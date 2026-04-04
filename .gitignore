@@ -1,0 +1,76 @@
+# ==============================================================================
+# Marius — .gitignore
+# Stacks : Rust (Cargo) + PostgreSQL · Environnement : Ubuntu / Debian
+# ==============================================================================
+
+# ── Rust / Cargo ──────────────────────────────────────────────────────────────
+/target/
+**/*.rs.bk
+*.pdb
+
+# ── Artéfacts de build AOT ────────────────────────────────────────────────────
+/dist/
+
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+# Dumps et exports locaux
+*.sql.bak
+*.dump
+*.pgdump
+*.backup
+/db/seed_local.sql
+
+# Fichiers de configuration locaux (connexion, mots de passe)
+.env
+.env.*
+!.env.example
+pgpass
+.pgpass
+
+# ── Variables d'environnement & secrets ───────────────────────────────────────
+*.env
+secrets/
+*.key
+*.pem
+*.cert
+
+# ── Éditeurs & IDEs ───────────────────────────────────────────────────────────
+# VS Code
+.vscode/
+!.vscode/extensions.json
+
+# JetBrains (CLion, IntelliJ)
+.idea/
+*.iml
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+.netrwhist
+
+# Emacs
+\#*\#
+.\#*
+
+# ── Système : Ubuntu / Debian ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.bak
+*.tmp
+
+# Fichiers de miniatures Nautilus
+.Trash-*/
+.directory
+
+# ── Documentation générée ─────────────────────────────────────────────────────
+# tbls (schéma PostgreSQL → Markdown/SVG)
+/doc/schema/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Divers ────────────────────────────────────────────────────────────────────
+*.orig
+.cache/
