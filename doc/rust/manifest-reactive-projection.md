@@ -29,7 +29,7 @@ L'architecture repose sur trois piliers inaltérables :
 Pour protéger le transformateur, on interpose un système de regroupement (Batching) qui réduit l'entropie du flux d'événements.
 
 - **Le Collector (Dédoublonnement en O(1)) :**
-  Les signaux entrants sont stockés dans une structure contiguë avec contrainte d'unicité (un `HashSet` Rust). Si un même ID est modifié 50 fois dans un court intervalle, il n'est conservé qu'une fois dans le layout mémoire.
+  Les signaux entrants sont stockés dans une structure contiguë avec contrainte d'unicité (une _table de présence_). Si un même ID est modifié 50 fois dans un court intervalle, il n'est conservé qu'une fois dans le layout mémoire.
 - **Le Dispatcher (Tick & Seuil) :**
   Le vidage du Collector (`flush`) est régi par deux invariants stricts pour lisser la charge (Smoothing) :
   - _Volumétrique :_ Déclenchement si la capacité maximale est atteinte (ex: 100 entités).
@@ -43,7 +43,7 @@ Le cycle de vie complet d'une donnée suit ce flux directionnel strict :
 
 1. **Mutation DB :** `UPDATE content.document` $\rightarrow$ Trigger SQL.
 2. **Signal :** `pg_notify('updates', 'ID')`.
-3. **Capture :** Écouteur asynchrone Rust $\rightarrow$ Injection dans le `HashSet`.
+3. **Capture :** Écouteur asynchrone Rust $\rightarrow$ Enregistrement dans la _table de présence_.
 4. **Dispatch :** Seuil ou Tick atteint $\rightarrow$ Extraction des IDs uniques.
 5. **Extraction Data :** Requêtes `SELECT` par lots (Batch SQL).
 6. **Projection AOT :** Exécution des macros `Maud` (Multi-thread).
@@ -52,3 +52,4 @@ Le cycle de vie complet d'une donnée suit ce flux directionnel strict :
 ---
 
 Document rédigé le 25 mars 2026.
+Révisé le 6 avril 2026.

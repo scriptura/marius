@@ -18,8 +18,8 @@ Le pipeline de lecture et le mécanisme de signalisation imposent une gestion ma
 
 La résolution de l'amplification d'écriture repose sur un pattern Collector/Dispatcher qui mute un état partagé en mémoire.
 
-- **Le besoin système :** Un _Collector_ intercepte les signaux et dédoublonne les identifiants dans une structure contiguë (`HashSet`). Lors du _flush_ temporel ou volumétrique, le _Dispatcher_ distribue ces identifiants sur l'ensemble des cœurs CPU pour une projection HTML parallèle.
-- **La solution Rust :** Le _Borrow Checker_ garantit au moment de la compilation l'absence de _data races_. Le transfert de propriété (ownership) du `HashSet` depuis le thread du Collector vers le pool de workers du Dispatcher est validé statiquement.
+- **Le besoin système :** Un _Collector_ intercepte les signaux et dédoublonne les identifiants dans une structure contiguë (_tampon de dédoublonnement_). Lors du _flush_ temporel ou volumétrique, le _Dispatcher_ distribue ces identifiants sur l'ensemble des cœurs CPU pour une projection HTML parallèle.
+- **La solution Rust :** Le _Borrow Checker_ garantit au moment de la compilation l'absence de _data races_. Le transfert de propriété (ownership) du _tampon de données_ depuis le thread du Collector vers le pool de workers du Dispatcher est validé statiquement.
 - **La limite de Zig :** Zig délègue la responsabilité de la synchronisation au développeur. Dans un pipeline où la donnée transite violemment entre un thread de capture d'événements et $N$ threads de rendu matriciel, l'absence d'analyseur statique de concurrence augmente drastiquement la probabilité de conditions de course (race conditions) insidieuses en production.
 
 ## ⚙️ 3. Métaprogrammation et Projection AOT (Macros vs Comptime)

@@ -1,6 +1,6 @@
-# Document d'Arbitrage : Projection Réactive & Gestion d'État Hybride
+# ADR : Projection Réactive & Gestion d'État Hybride
 
-## 1. Option C : Pattern "Draft vs. Committed"
+## 1. Pattern "Draft vs. Committed"
 
 ### Problématique
 
@@ -8,7 +8,7 @@ Dans un système de **Projection Réactive** avec un tick de 500ms, le risque de
 
 ### Décision Architecturale
 
-Rejet de l'Option B (Morphing/Idiomorph) au profit de l'**Option C** : une gestion explicite des états de synchronisation via des attributs de données natifs.
+Rejet de Morphing/Idiomorph au profit de **Draft vs. Committed** : une gestion explicite des états de synchronisation via des attributs de données natifs.
 
 ### Mécanique du Flux (State Machine)
 
@@ -44,16 +44,16 @@ Le Dispatcher agit comme un **Filtre Passe-Bas** pour la charge système. Son r�
 
 ### Logique d'Asservissement
 
-Le délai de vidage du Collector (`HashSet`) n'est plus une constante, mais une variable ajustée en temps réel selon la télémétrie du système.
+Le délai de vidage du Collector (_table de présence_) n'est plus une constante, mais une variable ajustée en temps réel selon la télémétrie du système.
 
 #### Invariants de Modulation :
 
 - **Charge Faible (Mode Réactif)** :
-  - Condition : `HashSet::len() < Seuil_Bas` ET `CPU_Usage < 30%`.
+  - Condition : `Volume < Seuil_Bas` ET `CPU_Usage < 30%`.
   - Action : Réduction du tick à **100ms**.
   - Objectif : Perception "Soft Real-Time".
 - **Charge Élevée (Mode Batch)** :
-  - Condition : `HashSet::len() > Seuil_Haut` OU `CPU_Usage > 70%`.
+  - Condition : `Volume > Seuil_Haut` OU `CPU_Usage > 70%`.
   - Action : Augmentation du tick jusqu'à **2000ms**.
   - Objectif : Maximiser le débit (Throughput) et l'efficacité du cache d'instruction CPU en traitant des lots de données contigus.
 

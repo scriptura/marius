@@ -42,7 +42,7 @@ Mutation SQL  →  pg_notify  →  Collector Rust  →  Projection Maud  →  Ar
 
 1. **Mutation** : une transaction SQL est validée (`CALL content.publish_document(42)`).
 2. **Signal** : PostgreSQL émet un événement `NOTIFY` contenant l'identifiant modifié.
-3. **Collecte** : un worker Rust reçoit le signal et l'insère dans un `HashSet`.
+3. **Collecte** : un worker Rust reçoit le signal et l'insère dans une _table de présence_.
    Plusieurs mutations rapides sur le même identifiant n'en produisent qu'une entrée.
 4. **Dispatch** : selon un seuil volumétrique (100 entités) ou temporel (500 ms),
    le lot est extrait et distribué sur tous les cœurs CPU disponibles.
@@ -53,7 +53,7 @@ Mutation SQL  →  pg_notify  →  Collector Rust  →  Projection Maud  →  Ar
 
 ### 🛡️ Pourquoi cette architecture est stable sous charge
 
-Le `HashSet` du Collector agit comme un amortisseur. Une mise à jour
+Le Collector agit comme un _tampon de dédoublonnement_. Une mise à jour
 massive (10 000 lignes modifiées en une transaction) produit autant de
 signaux `NOTIFY`, mais le Collector ne conserve que les identifiants uniques.
 Le pipeline de rendu reçoit une liste dédoublonnée, pas une avalanche.
@@ -97,7 +97,7 @@ marius/
 ├── src/             # Couche Rust : serveur, collecteur, projection, données
 │   ├── main.rs
 │   ├── server/      # Routes Axum + middleware Tower
-│   ├── collector/   # LISTEN/NOTIFY → HashSet → Dispatcher
+│   ├── collector/   # LISTEN/NOTIFY → Table de présence → Dispatcher
 │   ├── projection/  # Maud : struct → HTML
 │   └── data/        # Requêtes SQLx + structs mappés
 │
