@@ -37,8 +37,8 @@ La résolution du problème d'amplification d'écriture (Write Amplification) es
 
 1.  **Mutation :** Une transaction SQL est validée (ex: `CALL content.publish_document()`).
 2.  **Signal :** PostgreSQL émet un événement `pg_notify` contenant l'ID de l'entité.
-3.  **Collector (Dédoublonnement) :** Un worker Tokio intercepte le signal et place l'ID dans un `HashSet` en mémoire. Plusieurs mutations rapides sur le même ID sont écrasées (DOD).
-4.  **Dispatcher (Batching) :** Selon un invariant temporel (ex: `tick` de 500ms) ou volumétrique (ex: `len() == 100`), le `HashSet` est vidé (`flush`).
+3.  **Collector (Dédoublonnement) :** Un worker Tokio intercepte le signal et l'enregistre dans une _table de présence_ en mémoire. Plusieurs mutations rapides sur le même ID sont consolidées (DOD).
+4.  **Dispatcher (Batching) :** Selon un invariant temporel (ex: `tick` de 500ms) ou volumétrique (ex: seuil de capacité atteint), le _tampon_ est vidé (`flush`).
 5.  **Projection Parallèle :** Les $N$ entités uniques sont extraites via SQLx en lot, puis projetées simultanément en HTML via Maud sur tous les cœurs CPU (via Rayon/Tokio). L'artéfact cible est mis à jour.
 
 ## 4. Invariants Hybrides (Comportement Client)
@@ -51,3 +51,4 @@ Bien que l'état global soit géré par le serveur, les micro-interactions local
 ---
 
 Document rédigé le 25 mars 2026.
+Révisé le 7 avril 2026.
