@@ -53,5 +53,3 @@ Lors du cycle de `flush`, le Dispatcher n'itère plus sur des structures complex
 ---
 
 **Conclusion :** Le passage au Bit-Vector transforme le Collector d'une structure de données "boîte noire" en un tampon de signalisation haute performance, parfaitement aligné avec le pipeline AOT de Marius.
-
-Le design des IDs de votre base de données actuelle permet-il d'anticiper une borne maximale (ex: 2^24 entités) pour figer la taille du bit-vector au démarrage ?
