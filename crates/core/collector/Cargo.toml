@@ -1,0 +1,11 @@
+[package]
+name    = "marius-collector"
+version = "0.1.0"
+edition = "2024"
+
+# Ce crate ne doit pas dépendre de sqlx ni d'axum.
+# Il définit le Collector<MAX>, le trait Projection, et le Dispatcher.
+# Seule dépendance runtime admise : tokio (ordonnancement async).
+[dependencies]
+tokio = { workspace = true }
+rayon = { workspace = true }

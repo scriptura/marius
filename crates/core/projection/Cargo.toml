@@ -1,0 +1,14 @@
+[package]
+name    = "marius-projection"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+marius-collector = { path = "../../core/collector" }
+marius-schema    = { path = "../../core/schema" }
+sqlx             = { workspace = true }
+maud             = { workspace = true }
+
+[build-dependencies]
+marius-bridge-forge    = { path = "../../../forge/bridge-forge" }
+marius-fragment-forge  = { path = "../../../forge/fragment-forge" }

@@ -1,0 +1,16 @@
+[package]
+name    = "marius-render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+marius-collector  = { path = "../../core/collector" }
+marius-schema     = { path = "../../core/schema" }
+marius-projection = { path = "../../core/projection" }
+sqlx              = { workspace = true }
+tokio             = { workspace = true }
+maud              = { workspace = true }
+rayon             = { workspace = true }
+
+[build-dependencies]
+marius-fragment-forge = { path = "../../../forge/fragment-forge" }

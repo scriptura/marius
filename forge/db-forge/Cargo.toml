@@ -1,0 +1,11 @@
+[package]
+name    = "marius-db-forge"
+version = "0.1.0"
+edition = "2024"
+
+# db-forge est une bibliothèque de génération de code.
+# Elle est appelée depuis les build.rs des crates Core.
+# Elle n'apparaît JAMAIS en [dependencies] runtime.
+[dependencies]
+sqlx  = { workspace = true }
+tokio = { workspace = true }

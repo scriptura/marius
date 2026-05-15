@@ -1,0 +1,15 @@
+[package]
+name    = "marius-schema"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+marius-collector = { path = "../../core/collector" }
+sqlx             = { workspace = true }
+chrono           = { workspace = true }
+
+[build-dependencies]
+# db-forge est appelé depuis build.rs pour générer les structs.
+marius-db-forge = { path = "../../../forge/db-forge" }
+sqlx            = { workspace = true }
+tokio           = { workspace = true }
