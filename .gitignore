@@ -7,6 +7,7 @@
 /target/
 **/*.rs.bk
 *.pdb
+.cargo/config.toml
 
 # ── Artéfacts de build AOT ────────────────────────────────────────────────────
 /dist/

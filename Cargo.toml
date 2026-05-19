@@ -19,9 +19,14 @@ members = [
 
 # Versions partagées — source de vérité unique pour les dépendances communes.
 [workspace.dependencies]
-sqlx     = { version = "0.8", features = ["postgres", "runtime-tokio", "macros", "chrono"] }
-tokio    = { version = "1",   features = ["full"] }
-maud     = { version = "0.26", features = ["axum"] }
-rayon    = "1.10"
-axum     = "0.7"
-chrono   = { version = "0.4", features = ["serde"] }
+sqlx = { version = "0.8", features = [
+    "postgres",
+    "runtime-tokio",
+    "macros",
+    "chrono",
+] }
+tokio = { version = "1", features = ["full"] }
+maud = { version = "0.26", features = ["axum"] }
+rayon = "1.10"
+axum = "0.7"
+chrono = { version = "0.4", features = ["serde"] }

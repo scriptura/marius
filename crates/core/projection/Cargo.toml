@@ -1,7 +1,13 @@
 [package]
-name    = "marius-projection"
-version = "0.1.0"
-edition = "2024"
+name        = "marius-projection"
+version     = "0.1.0"
+edition     = "2024"
+description = "Generated Projection implementations for the Marius engine."
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/votre-org/marius"
+readme      = "README.md"
+keywords    = ["ecs", "codegen", "marius"]
+categories  = ["database"]
 
 [dependencies]
 marius-collector = { path = "../../core/collector" }
@@ -10,5 +16,5 @@ sqlx             = { workspace = true }
 maud             = { workspace = true }
 
 [build-dependencies]
-marius-bridge-forge    = { path = "../../../forge/bridge-forge" }
-marius-fragment-forge  = { path = "../../../forge/fragment-forge" }
+marius-bridge-forge   = { path = "../../../forge/bridge-forge" }
+marius-fragment-forge = { path = "../../../forge/fragment-forge" }

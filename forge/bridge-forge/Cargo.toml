@@ -1,6 +1,12 @@
 [package]
-name    = "marius-bridge-forge"
-version = "0.1.0"
-edition = "2024"
+name        = "marius-bridge-forge"
+version     = "0.1.0"
+edition     = "2024"
+description = "Build-time SQLx batch query and Axum route generator for the Marius engine."
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/votre-org/marius"
+readme      = "README.md"
+keywords    = ["codegen", "build-script", "sqlx", "axum", "marius"]
+categories  = ["development-tools"]
 
 [dependencies]

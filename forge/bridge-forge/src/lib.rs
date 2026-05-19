@@ -1,1 +1,1 @@
-// marius-bridge-forge — génération des requêtes SQLx et routes Axum (stub)
+// marius-bridge-forge — stub

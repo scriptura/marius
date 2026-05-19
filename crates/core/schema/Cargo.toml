@@ -1,7 +1,13 @@
 [package]
-name    = "marius-schema"
-version = "0.1.0"
-edition = "2024"
+name        = "marius-schema"
+version     = "0.1.0"
+edition     = "2024"
+description = "Generated #[repr(C)] structs and Collector statics mirroring PostgreSQL schema for the Marius engine."
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/votre-org/marius"
+readme      = "README.md"
+keywords    = ["ecs", "dod", "codegen", "postgresql", "marius"]
+categories  = ["database", "data-structures"]
 
 [dependencies]
 marius-collector = { path = "../../core/collector" }
@@ -9,7 +15,6 @@ sqlx             = { workspace = true }
 chrono           = { workspace = true }
 
 [build-dependencies]
-# db-forge est appelé depuis build.rs pour générer les structs.
 marius-db-forge = { path = "../../../forge/db-forge" }
 sqlx            = { workspace = true }
 tokio           = { workspace = true }

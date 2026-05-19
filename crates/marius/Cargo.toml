@@ -1,0 +1,21 @@
+[package]
+name        = "marius"
+version     = "0.1.0"
+edition     = "2024"
+description = "Marius: a data-oriented reactive projection engine. PostgreSQL → AOT HTML, zero intermediate transformation."
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/votre-org/marius"
+readme      = "README.md"
+keywords    = ["ecs", "dod", "reactive", "cms", "aot"]
+categories  = ["web-programming", "database", "concurrency"]
+
+[dependencies]
+marius-collector  = { version = "0.1.0", path = "../core/collector" }
+marius-schema     = { version = "0.1.0", path = "../core/schema",     optional = true }
+marius-projection = { version = "0.1.0", path = "../core/projection", optional = true }
+marius-render     = { version = "0.1.0", path = "../shell/render",    optional = true }
+
+[features]
+default = ["core"]
+core    = []
+full    = ["core", "dep:marius-schema", "dep:marius-projection", "dep:marius-render"]

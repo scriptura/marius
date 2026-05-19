@@ -1,11 +1,17 @@
 [package]
-name    = "marius-collector"
-version = "0.1.0"
-edition = "2024"
+name        = "marius-collector"
+version     = "0.1.0"
+edition     = "2024"
+description = "Lock-free bit-vector collector and reactive dispatcher for the Marius engine."
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/votre-org/marius"
+readme      = "README.md"
+keywords    = ["ecs", "reactive", "dispatcher", "lock-free", "cms"]
+categories  = ["concurrency", "data-structures"]
 
-# Ce crate ne doit pas dépendre de sqlx ni d'axum.
-# Il définit le Collector<MAX>, le trait Projection, et le Dispatcher.
-# Seule dépendance runtime admise : tokio (ordonnancement async).
 [dependencies]
+# sqlx : requis par le Dispatcher (fetch_batch) et le trait Projection.
+# Présent dans collector car le Dispatcher est la frontière Core/Shell.
+sqlx  = { workspace = true }
 tokio = { workspace = true }
 rayon = { workspace = true }

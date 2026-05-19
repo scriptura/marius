@@ -1,10 +1,11 @@
-// Trait Projection — interface unique entre le Dispatcher et les implémentations
+// marius-collector · projection.rs
+// Trait Projection : interface entre le Dispatcher et les implémentations
 // générées par Bridge-Forge + Fragment-Forge.
 //
-// Le Dispatcher est générique sur P: Projection.
-// Chaque table surveillée a une implémentation concrète générée par la Forge.
+// fetch_batch retourne impl Future + Send explicite :
+// async fn dans un trait ne permet pas de contraindre Send sur le Future retourné,
+// ce qui bloquerait l'utilisation dans tokio::spawn et les contextes multi-thread.
 
-use std::future::Future;
 use std::path::PathBuf;
 
 pub trait Projection: Sized + Send + Sync + 'static {
@@ -13,13 +14,17 @@ pub trait Projection: Sized + Send + Sync + 'static {
 
     /// Extraction batch depuis PostgreSQL.
     /// Généré par Bridge-Forge — sqlx::query_as! + conversion Row→Store.
+    ///
+    /// `impl Future + Send` explicite : permet aux appelants d'utiliser
+    /// ce Future dans des contextes multi-thread (tokio::spawn, rayon).
+    /// `async fn` dans un trait ne permet pas de spécifier Send sur le Future.
     fn fetch_batch(
         pool: &sqlx::PgPool,
         ids:  &[i64],
-    ) -> impl Future<Output = Result<Vec<Self::Record>, sqlx::Error>> + Send;
+    ) -> impl std::future::Future<Output = Result<Vec<Self::Record>, sqlx::Error>> + Send;
 
     /// Rendu HTML du record — généré par Fragment-Forge (macros Maud).
-    /// Pas d'appel système, pas d'I/O : pure transformation mémoire→String.
+    /// Pure transformation mémoire→String : aucun appel système, aucun I/O.
     fn render(record: &Self::Record) -> String;
 
     /// Chemin de l'artefact produit (fichier statique ou clé RAM).

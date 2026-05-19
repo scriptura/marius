@@ -1,1 +1,1 @@
-// marius-fragment-forge — génération des macros Maud (stub)
+// marius-fragment-forge — stub

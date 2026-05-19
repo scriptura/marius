@@ -18,6 +18,9 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::PathBuf;
 
+// sqlx::Row : nécessaire pour .get::<T, _>(index) sur les résultats non-macro.
+use sqlx::Row;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=DATABASE_URL");
@@ -46,7 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut output = String::from(
         "// GÉNÉRÉ PAR DB-FORGE — NE PAS MODIFIER MANUELLEMENT\n\
-         // Régénérer via : cargo build (relit pg_attribute)\n\n",
+         // Régénérer via : cargo build (relit pg_attribute)\n\n\
+         use std::path::PathBuf;\n\n",
     );
 
     for &(schema, table) in watched {
@@ -103,32 +107,33 @@ async fn fetch_columns(
     schema: &str,
     table:  &str,
 ) -> Result<Vec<Column>, sqlx::Error> {
-    let rows = sqlx::query!(
-        r#"
-        SELECT
-            a.attnum                                        AS "attnum!: i16",
-            a.attname                                       AS "name!: String",
-            format_type(a.atttypid, a.atttypmod)            AS "sql_type!: String",
-            a.attnotnull                                    AS "is_notnull!: bool"
-        FROM  pg_attribute  a
-        JOIN  pg_class      c ON a.attrelid = c.oid
-        JOIN  pg_namespace  n ON c.relnamespace = n.oid
-        WHERE n.nspname     = $1
-          AND c.relname     = $2
-          AND a.attnum      > 0
-          AND NOT a.attisdropped
-        ORDER BY a.attnum
-        "#,
-        schema, table,
+    // API non-macro : pas de vérification compile-time, DATABASE_URL non requise
+    // pendant la phase de build du build script.
+    let rows = sqlx::query(
+        "SELECT
+             a.attnum::smallint,
+             a.attname::text,
+             format_type(a.atttypid, a.atttypmod),
+             a.attnotnull
+         FROM  pg_attribute  a
+         JOIN  pg_class      c ON a.attrelid = c.oid
+         JOIN  pg_namespace  n ON c.relnamespace = n.oid
+         WHERE n.nspname     = $1
+           AND c.relname     = $2
+           AND a.attnum      > 0
+           AND NOT a.attisdropped
+         ORDER BY a.attnum",
     )
+    .bind(schema)
+    .bind(table)
     .fetch_all(pool)
     .await?;
 
     Ok(rows.into_iter().map(|r| Column {
-        attnum:     r.attnum,
-        name:       r.name,
-        sql_type:   r.sql_type,
-        is_notnull: r.is_notnull,
+        attnum:     r.get::<i16,    _>(0),
+        name:       r.get::<String, _>(1),
+        sql_type:   r.get::<String, _>(2),
+        is_notnull: r.get::<bool,   _>(3),
     }).collect())
 }
 
@@ -140,33 +145,35 @@ async fn fetch_pk_column(
     schema: &str,
     table:  &str,
 ) -> Result<PrimaryKey, sqlx::Error> {
-    let row = sqlx::query!(
-        r#"
-        SELECT
-            array_length(con.conkey, 1) AS "n_keys!: i32",
-            att.attname                 AS "col_name!: String"
-        FROM  pg_constraint con
-        JOIN  pg_class      cls ON cls.oid = con.conrelid
-        JOIN  pg_namespace  ns  ON ns.oid  = cls.relnamespace
-        JOIN  pg_attribute  att ON att.attrelid = cls.oid
-                                AND att.attnum  = con.conkey[1]
-        WHERE ns.nspname  = $1
-          AND cls.relname = $2
-          AND con.contype = 'p'
-        "#,
-        schema, table,
+    // information_schema évite les subtilités de cast int2 de pg_catalog.
+    // fetch_all + match sur la longueur remplace fetch_one pour éviter RowNotFound.
+    let rows = sqlx::query(
+        "SELECT kcu.column_name::text
+         FROM   information_schema.table_constraints  tc
+         JOIN   information_schema.key_column_usage   kcu
+                ON  kcu.constraint_name = tc.constraint_name
+                AND kcu.table_schema    = tc.table_schema
+                AND kcu.table_name      = tc.table_name
+         WHERE  tc.table_schema     = $1
+           AND  tc.table_name       = $2
+           AND  tc.constraint_type  = 'PRIMARY KEY'
+         ORDER BY kcu.ordinal_position",
     )
-    .fetch_one(pool)
+    .bind(schema)
+    .bind(table)
+    .fetch_all(pool)
     .await?;
 
-    if row.n_keys == 1 {
-        Ok(PrimaryKey::Single(row.col_name))
-    } else {
-        eprintln!(
-            "DB-Forge [{schema}.{table}] : PK composite ({} colonnes) — Collector ignoré.",
-            row.n_keys
-        );
-        Ok(PrimaryKey::Composite)
+    match rows.len() {
+        0 => {
+            eprintln!("DB-Forge [{schema}.{table}] : aucune PK trouvée — traité comme Composite.");
+            Ok(PrimaryKey::Composite)
+        }
+        1 => Ok(PrimaryKey::Single(rows[0].get::<String, _>(0))),
+        n => {
+            eprintln!("DB-Forge [{schema}.{table}] : PK composite ({n} colonnes) — Collector ignoré.");
+            Ok(PrimaryKey::Composite)
+        }
     }
 }
 
@@ -183,7 +190,7 @@ async fn fetch_max_id(
         "SELECT COALESCE(MAX({pk_col}), 0)::BIGINT FROM {schema}.{table}"
     );
 
-    let max_id: i64 = sqlx::query_scalar(&query)
+    let max_id: i64 = sqlx::query_scalar::<_, i64>(&query)
         .fetch_one(pool)
         .await
         .unwrap_or(0);
@@ -451,7 +458,9 @@ fn write_collector(
     writeln!(out, "// PK = {pk_col} | MAX_ID+20% arrondi power-of-two").unwrap();
     writeln!(out, "pub const MAX_{screaming}_ID: usize = {max_entity_id};").unwrap();
     writeln!(out, "pub const {screaming}_WORDS: usize = {words};").unwrap();
-    writeln!(out, "pub static {screaming}_COLLECTOR: crate::collector::Collector<MAX_{screaming}_ID> =").unwrap();
+    // Deux const generics : MAX (borne domaine) + WORDS (taille tableau).
+    // generic_const_exprs est instable — relation imposée par la Forge, pas le type system.
+    writeln!(out, "pub static {screaming}_COLLECTOR: crate::collector::Collector<MAX_{screaming}_ID, {screaming}_WORDS> =").unwrap();
     writeln!(out, "    crate::collector::Collector::new_zeroed();\n").unwrap();
 }
 
@@ -469,41 +478,78 @@ fn write_projection_stub(
     let name      = to_pascal(&format!("{schema}_{table}"));
     let proj_name = format!("{name}Projection");
 
-    // Colonnes fixed-length uniquement dans le SELECT (varlena → fetch_body séparé)
+    // Colonnes fixed-length uniquement dans le SELECT.
+    // Les varlena sont exclues du repr(C) et chargées séparément par Fragment-Forge.
     let fixed_cols: Vec<&str> = columns.iter()
         .filter(|c| map_type(&c.sql_type).is_fixed)
         .map(|c| c.name.as_str())
         .collect();
 
+    if fixed_cols.is_empty() {
+        eprintln!(
+            "cargo:warning=DB-Forge [{schema}.{table}] : \
+             aucune colonne fixed-length — stub incomplet généré."
+        );
+    }
+
     let select = fixed_cols.join(", ");
 
-    // Condition WHERE basée sur la PK
     let where_clause = match pk {
         PrimaryKey::Single(col) => format!("WHERE {col} = ANY($1)"),
-        PrimaryKey::Composite   => "WHERE /* PK composite — adapter */ 1=1".to_string(),
+        PrimaryKey::Composite   => "WHERE 1=1 /* PK composite: adapter */".to_string(),
     };
 
     writeln!(out, "pub struct {proj_name};").unwrap();
     writeln!(out).unwrap();
     writeln!(out, "// Pool requis : marius_user (SELECT non révoqué sur {schema}.{table})").unwrap();
-    writeln!(out, "// RLS actif   : voir 09_rls/01_policies.sql").unwrap();
+    writeln!(out, "// RLS         : voir 09_rls/01_policies.sql").unwrap();
     writeln!(out, "impl crate::projection::Projection for {proj_name} {{").unwrap();
     writeln!(out, "    type Record = {name};").unwrap();
     writeln!(out).unwrap();
+
+    // fetch_batch — async fn satisfait fn -> impl Future + Send dans le trait.
+    // API non-macro sqlx::query_as::<_, RowType>() :
+    //   - évite la vérification DATABASE_URL au compile-time de marius-schema
+    //   - le build script a déjà validé le schéma via pg_attribute
     writeln!(out, "    async fn fetch_batch(").unwrap();
     writeln!(out, "        pool: &sqlx::PgPool,").unwrap();
     writeln!(out, "        ids:  &[i64],").unwrap();
     writeln!(out, "    ) -> Result<Vec<Self::Record>, sqlx::Error> {{").unwrap();
-    writeln!(out, "        let rows = sqlx::query_as!({name}Row,").unwrap();
-    writeln!(out, "            \"SELECT {select}\"").unwrap();
-    writeln!(out, "            \" FROM {schema}.{table}\"").unwrap();
-    writeln!(out, "            \" {where_clause}\",").unwrap();
-    writeln!(out, "            ids as _,").unwrap();
-    writeln!(out, "        )").unwrap();
-    writeln!(out, "        .fetch_all(pool)").unwrap();
-    writeln!(out, "        .await?;").unwrap();
-    writeln!(out, "        Ok(rows.into_iter().map({name}::from).collect())").unwrap();
+
+    if fixed_cols.is_empty() {
+        writeln!(out,
+            "        todo!(\"DB-Forge: aucune colonne fixed-length pour {schema}.{table}\")"
+        ).unwrap();
+    } else {
+        writeln!(out, "        let rows = sqlx::query_as::<_, {name}Row>(").unwrap();
+        writeln!(out,
+            "            \"SELECT {select} FROM {schema}.{table} {where_clause}\","
+        ).unwrap();
+        writeln!(out, "        )").unwrap();
+        writeln!(out, "        .bind(ids)").unwrap();
+        writeln!(out, "        .fetch_all(pool)").unwrap();
+        writeln!(out, "        .await?;").unwrap();
+        writeln!(out, "        Ok(rows.into_iter().map({name}::from).collect())").unwrap();
+    }
+
     writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // render — stub généré par Fragment-Forge (non disponible à ce stade).
+    writeln!(out, "    fn render(_record: &Self::Record) -> String {{").unwrap();
+    writeln!(out,
+        "        todo!(\"Fragment-Forge: render non généré pour {schema}.{table}\")"
+    ).unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // artifact_path — stub généré par Fragment-Forge.
+    writeln!(out, "    fn artifact_path(_record: &Self::Record) -> PathBuf {{").unwrap();
+    writeln!(out,
+        "        todo!(\"Fragment-Forge: artifact_path non généré pour {schema}.{table}\")"
+    ).unwrap();
+    writeln!(out, "    }}").unwrap();
+
     writeln!(out, "}}\n").unwrap();
 }
 
@@ -516,9 +562,9 @@ fn write_section_header(out: &mut String, schema: &str, table: &str, pk: &Primar
         PrimaryKey::Single(col) => format!("PK={col}"),
         PrimaryKey::Composite   => "PK composite — Collector N/A".to_string(),
     };
-    writeln!(out, "// {'='<60}").unwrap();
+    writeln!(out, "// {}", "=".repeat(60)).unwrap();
     writeln!(out, "// {schema}.{table} · {pk_info}").unwrap();
-    writeln!(out, "// {'='<60}\n").unwrap();
+    writeln!(out, "// {}\n", "=".repeat(60)).unwrap();
 }
 
 fn to_pascal(s: &str) -> String {
