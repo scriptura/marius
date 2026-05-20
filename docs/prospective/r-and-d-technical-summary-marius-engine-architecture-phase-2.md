@@ -1,6 +1,6 @@
 # Synthèse Technique R&D : Architecture du Moteur Marius (Phase 2)
 
-**Préocupation :** Alignement Système Marius
+**Préoccupation :** Alignement Système Marius
 
 **Cadre Cognitif :** ECS / DOD / AOT / Zéro-Indirection / Zéro-Copie
 
