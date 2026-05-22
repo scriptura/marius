@@ -79,6 +79,9 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
             records.into_par_iter().for_each(|record| {
                 let html = P::render(&record);
                 let path = P::artifact_path(&record);
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 if let Err(e) = std::fs::write(&path, html) {
                     eprintln!("Dispatcher write {:?}: {e}", path);
                 }

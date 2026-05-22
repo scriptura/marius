@@ -535,18 +535,26 @@ fn write_projection_stub(
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // render — stub généré par Fragment-Forge (non disponible à ce stade).
-    writeln!(out, "    fn render(_record: &Self::Record) -> String {{").unwrap();
+    // render — PoC : Debug formatting dans une balise HTML sémantique.
+    // Fragment-Forge remplacera par un template Maud complet.
+    writeln!(out, "    fn render(record: &Self::Record) -> String {{").unwrap();
     writeln!(out,
-        "        todo!(\"Fragment-Forge: render non généré pour {schema}.{table}\")"
+        "        format!(\"<article class=\\\"{schema}-{table}\\\">{{:?}}</article>\", record)"
     ).unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // artifact_path — stub généré par Fragment-Forge.
-    writeln!(out, "    fn artifact_path(_record: &Self::Record) -> PathBuf {{").unwrap();
+    // artifact_path — chemin déterministe basé sur la PK.
+    // Racine configurable via MARIUS_ARTIFACTS_DIR (défaut : ./artifacts).
+    let pk_field = match pk {
+        PrimaryKey::Single(col) => col.as_str(),
+        PrimaryKey::Composite   => "0", // PK composite : chemin non déterministe
+    };
+    writeln!(out, "    fn artifact_path(record: &Self::Record) -> PathBuf {{").unwrap();
+    writeln!(out, "        let root = std::env::var(\"MARIUS_ARTIFACTS_DIR\")").unwrap();
+    writeln!(out, "            .unwrap_or_else(|_| \"artifacts\".to_string());").unwrap();
     writeln!(out,
-        "        todo!(\"Fragment-Forge: artifact_path non généré pour {schema}.{table}\")"
+        "        PathBuf::from(format!(\"{{root}}/{schema}/{table}/{{}}.html\", record.{pk_field}))"
     ).unwrap();
     writeln!(out, "    }}").unwrap();
 
