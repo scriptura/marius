@@ -2,12 +2,10 @@
 name = "marius-server"
 version = "0.1.0"
 edition = "2024"
+publish = false
 description = "Serveur shell pour le projet Marius"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/scriptura/marius"
-readme = "README.md"
-keywords = ["shell", "cli", "marius", "terminal", "command"]
-categories = ["command-line-interface", "development-tools"]
 
 # Binaire principal — point d'entrée du processus.
 [[bin]]
