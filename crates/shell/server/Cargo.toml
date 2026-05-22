@@ -1,7 +1,13 @@
 [package]
-name    = "marius-server"
+name = "marius-server"
 version = "0.1.0"
 edition = "2024"
+description = "Serveur shell pour le projet Marius"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/scriptura/marius"
+readme = "README.md"
+keywords = ["shell", "cli", "marius", "terminal", "command"]
+categories = ["command-line-interface", "development-tools"]
 
 # Binaire principal — point d'entrée du processus.
 [[bin]]
@@ -9,10 +15,10 @@ name = "marius"
 path = "src/main.rs"
 
 [dependencies]
-marius-collector  = { path = "../../core/collector" }
-marius-schema     = { path = "../../core/schema" }
+marius-collector = { path = "../../core/collector" }
+marius-schema = { path = "../../core/schema" }
 marius-projection = { path = "../../core/projection" }
-marius-render     = { path = "../../shell/render" }
-sqlx              = { workspace = true }
-tokio             = { workspace = true }
-axum              = { workspace = true }
+marius-render = { path = "../../shell/render" }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
