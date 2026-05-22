@@ -196,7 +196,7 @@ async fn fetch_max_id(
         .unwrap_or(0);
 
     let with_margin   = (max_id as f64 * 1.20).ceil() as usize;
-    let words_needed  = (with_margin.max(64) + 63) / 64;
+    let words_needed  = with_margin.max(64).div_ceil(64);
     let words_aligned = words_needed.next_power_of_two();
     let max_entity_id = words_aligned * 64;
 
@@ -392,8 +392,8 @@ fn write_store_struct(out: &mut String, schema: &str, table: &str, columns: &[Co
         // header = MAXALIGN(23 + ceil(n_cols/8))
         {
             let n = columns.len();
-            let raw = 23 + (n + 7) / 8;
-            (raw + 7) / 8 * 8  // MAXALIGN(8)
+            let raw = 23 + n.div_ceil(8);
+            raw.div_ceil(8)  // MAXALIGN(8)
         }
     ).unwrap();
     writeln!(out).unwrap();
@@ -452,7 +452,7 @@ fn write_collector(
     max_entity_id: usize,
 ) {
     let screaming = to_screaming(&format!("{schema}_{table}"));
-    let words     = (max_entity_id + 63) / 64;
+    let words     = max_entity_id.div_ceil(64);
 
     writeln!(out, "// Collector dimensionné pour {schema}.{table}").unwrap();
     writeln!(out, "// PK = {pk_col} | MAX_ID+20% arrondi power-of-two").unwrap();
