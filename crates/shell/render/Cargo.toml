@@ -1,23 +1,23 @@
 [package]
-name        = "marius-render"
-version     = "0.1.0"
-edition     = "2024"
+name = "marius-render"
+version = "0.1.0"
+edition = "2024"
 description = "Artifact writing and Axum integration shell for the Marius engine."
-license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/votre-org/marius"
-readme      = "README.md"
-keywords    = ["axum", "web", "marius"]
-categories  = ["web-programming"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/votre-org/marius"
+readme = "README.md"
+keywords = ["axum", "web", "marius"]
+categories = ["web-programming"]
 
 [dependencies]
-marius-collector  = { path = "../../core/collector" }
-marius-schema     = { path = "../../core/schema" }
+marius-collector = { path = "../../core/collector" }
+marius-schema = { path = "../../core/schema" }
 marius-projection = { path = "../../core/projection" }
-sqlx              = { workspace = true }
-tokio             = { workspace = true }
-maud              = { workspace = true }
-rayon             = { workspace = true }
-axum              = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+maud = { workspace = true }
+rayon = { workspace = true }
+axum = { workspace = true }
 
 [build-dependencies]
-marius-fragment-forge = { path = "../../../forge/fragment-forge" }
+marius-fragment-forge = { version = "0.1.0", path = "../../../forge/fragment-forge" }
