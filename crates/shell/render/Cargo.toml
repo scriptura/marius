@@ -10,9 +10,9 @@ keywords = ["axum", "web", "marius"]
 categories = ["web-programming"]
 
 [dependencies]
-marius-collector = { path = "../../core/collector" }
-marius-schema = { path = "../../core/schema" }
-marius-projection = { path = "../../core/projection" }
+marius-collector = { version = "0.1.0", path = "../../core/collector" }
+marius-schema = { version = "0.1.0", path = "../../core/schema" }
+marius-projection = { version = "0.1.0", path = "../../core/projection" }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 maud = { workspace = true }
