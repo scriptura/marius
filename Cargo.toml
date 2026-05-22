@@ -15,6 +15,9 @@ members = [
     # Shell (std)
     "crates/shell/render",
     "crates/shell/server",
+
+    # Facade
+    "crates/marius",
 ]
 
 # Versions partagées — source de vérité unique pour les dépendances communes.
