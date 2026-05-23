@@ -216,23 +216,24 @@ async fn fetch_max_id(
 #[derive(Debug, Clone)]
 struct TypeMapping {
     /// Type Rust dans la struct Row (sqlx-compatible).
-    /// Les nullable sont wrappés dans Option<T> par l'appelant.
     row_type:   &'static str,
 
     /// Type Rust dans la struct Store (#[repr(C)]).
-    /// Nullable → sentinel (voir commentaire ci-dessous).
     store_type: &'static str,
 
     /// Expression de conversion Row → Store pour ce champ.
-    /// `{field}` sera substitué par le nom de colonne.
     from_expr:  &'static str,
 
     /// Le type est fixed-length (inclus dans repr(C)).
-    /// false = varlena : exclu du Store, commentaire d'audit généré.
     is_fixed:   bool,
 
-    /// Taille en octets (pour documentation layout).
+    /// Taille en octets du type (pour calcul layout et static_assertions).
     size_bytes: usize,
+
+    /// Alignement du type en octets — détermine le padding repr(C) et
+    /// l'alignement de la struct entière (max des champs).
+    /// Utilisé pour émettre assert!(mem::align_of::<Struct>() == max_align).
+    alignment:  usize,
 }
 
 fn map_type(sql_type: &str) -> TypeMapping {
@@ -247,28 +248,28 @@ fn map_type(sql_type: &str) -> TypeMapping {
             // ATTENTION : le choix du sentinel est domain-specific.
             // La Forge full demandera une annotation par colonne.
             from_expr: "{field}.unwrap_or(-1)",
-            is_fixed: true, size_bytes: 8,
+            is_fixed: true, size_bytes: 8, alignment: 8,
         },
         "int4" | "integer" | "int" | "serial" => TypeMapping {
             row_type: "i32", store_type: "i32",
             // Sentinel 0 : les IDs PostgreSQL (GENERATED ALWAYS AS IDENTITY) commencent à 1.
             from_expr: "{field}.unwrap_or(0)",
-            is_fixed: true, size_bytes: 4,
+            is_fixed: true, size_bytes: 4, alignment: 4,
         },
         "int2" | "smallint" => TypeMapping {
             row_type: "i16", store_type: "i16",
             from_expr: "{field}.unwrap_or(0)",
-            is_fixed: true, size_bytes: 2,
+            is_fixed: true, size_bytes: 2, alignment: 2,
         },
         "bool" | "boolean" => TypeMapping {
             row_type: "bool", store_type: "bool",
             from_expr: "{field}.unwrap_or(false)",
-            is_fixed: true, size_bytes: 1,
+            is_fixed: true, size_bytes: 1, alignment: 1,
         },
         "uuid" => TypeMapping {
             row_type: "[u8; 16]", store_type: "[u8; 16]",
             from_expr: "{field}.unwrap_or([0u8; 16])",
-            is_fixed: true, size_bytes: 16,
+            is_fixed: true, size_bytes: 16, alignment: 1,
         },
         // TIMESTAMPTZ → i64 µs depuis l'epoch Unix.
         // La Row utilise chrono::DateTime<Utc>, le Store utilise i64.
@@ -277,28 +278,28 @@ fn map_type(sql_type: &str) -> TypeMapping {
             row_type:   "chrono::DateTime<chrono::Utc>",
             store_type: "i64",
             from_expr:  "{field}.map(|dt| dt.timestamp_micros()).unwrap_or(0)",
-            is_fixed: true, size_bytes: 8,
+            is_fixed: true, size_bytes: 8, alignment: 8,
         },
         "timestamp" | "timestamp without time zone" => TypeMapping {
             row_type:   "chrono::NaiveDateTime",
             store_type: "i64",
             from_expr:  "{field}.map(|dt| dt.and_utc().timestamp_micros()).unwrap_or(0)",
-            is_fixed: true, size_bytes: 8,
+            is_fixed: true, size_bytes: 8, alignment: 8,
         },
         "date" => TypeMapping {
             row_type: "chrono::NaiveDate", store_type: "i32",
             from_expr: "{field}.map(|d| d.num_days_from_ce()).unwrap_or(0)",
-            is_fixed: true, size_bytes: 4,
+            is_fixed: true, size_bytes: 4, alignment: 4,
         },
         "float4" | "real"             => TypeMapping {
             row_type: "f32", store_type: "f32",
             from_expr: "{field}.unwrap_or(0.0)",
-            is_fixed: true, size_bytes: 4,
+            is_fixed: true, size_bytes: 4, alignment: 4,
         },
         "float8" | "double precision" => TypeMapping {
             row_type: "f64", store_type: "f64",
             from_expr: "{field}.unwrap_or(0.0)",
-            is_fixed: true, size_bytes: 8,
+            is_fixed: true, size_bytes: 8, alignment: 8,
         },
         // Varlena : excluded du Store repr(C).
         // Restent dans la Row pour projection Fragment-Forge.
@@ -306,14 +307,24 @@ fn map_type(sql_type: &str) -> TypeMapping {
         | "jsonb" | "json" | "bytea" | "ltree" => TypeMapping {
             row_type: "String", store_type: "/* VARLENA */",
             from_expr: "/* VARLENA — non transféré */",
-            is_fixed: false, size_bytes: 0,
+            is_fixed: false, size_bytes: 0, alignment: 0,
+        },
+        // pg_lsn : type PostgreSQL natif (8B, LSN du WAL).
+        // Phase 1 : exclu des structs Rust (non utilisé pour le rendu).
+        // Phase 2 (SHM) : le Store lira walsn via pointeur mmap → u64.
+        // La colonne existe en DDL pour le mécanisme de resync LSN.
+        "pg_lsn" => TypeMapping {
+            row_type:   "/* PHASE2_ONLY: walsn → u64 via mmap */",
+            store_type: "/* PHASE2_ONLY */",
+            from_expr:  "/* PHASE2_ONLY */",
+            is_fixed: false, size_bytes: 8, alignment: 8,
         },
         other => {
             println!("cargo:warning=DB-Forge : type SQL inconnu '{other}' — exclu");
             TypeMapping {
                 row_type: "/* INCONNU */", store_type: "/* INCONNU */",
                 from_expr: "/* INCONNU */",
-                is_fixed: false, size_bytes: 0,
+                is_fixed: false, size_bytes: 0, alignment: 0,
             }
         }
     }
@@ -339,8 +350,15 @@ fn write_row_struct(out: &mut String, schema: &str, table: &str, columns: &[Colu
                 writeln!(out, "    pub {}: Option<{}>,  // NULLABLE", col.name, m.row_type).unwrap();
             }
         } else {
-            // Varlena : incluse dans la Row, exclue du Store.
-            if col.is_notnull {
+            // Types non-fixed : varlena incluse dans la Row, types commentaires exclus.
+            if m.row_type.starts_with("/*") {
+                // Type Phase 2 ou inconnu : commentaire uniquement, aucun champ généré.
+                // pg_lsn (walsn) est le cas nominal — exclu de la Row Phase 1.
+                writeln!(out,
+                    "    // EXCLU Phase 1 : {} ({}) — {}",
+                    col.name, col.sql_type, m.row_type
+                ).unwrap();
+            } else if col.is_notnull {
                 writeln!(out, "    pub {}: {},  // varlena", col.name, m.row_type).unwrap();
             } else {
                 writeln!(out, "    pub {}: Option<{}>,  // varlena NULLABLE", col.name, m.row_type).unwrap();
@@ -369,6 +387,7 @@ fn write_store_struct(out: &mut String, schema: &str, table: &str, columns: &[Co
     writeln!(out, "pub struct {name} {{").unwrap();
 
     let mut layout_bytes = 0usize;
+    let mut max_align    = 1usize;
     for col in columns {
         let m = map_type(&col.sql_type);
         if m.is_fixed {
@@ -380,6 +399,7 @@ fn write_store_struct(out: &mut String, schema: &str, table: &str, columns: &[Co
                 col.attnum, m.size_bytes, null_marker,
             ).unwrap();
             layout_bytes += m.size_bytes;
+            max_align     = max_align.max(m.alignment);
         } else {
             writeln!(out,
                 "    // VARLENA exclu : {} ({}) — Fragment-Forge",
@@ -388,13 +408,31 @@ fn write_store_struct(out: &mut String, schema: &str, table: &str, columns: &[Co
         }
     }
     writeln!(out, "}}").unwrap();
-    writeln!(out, "// Layout fixed-length : {layout_bytes}B + padding repr(C) + {}B header PostgreSQL",
-        // header = MAXALIGN(23 + ceil(n_cols/8))
-        {
-            let n = columns.len();
-            let raw = 23 + n.div_ceil(8);
-            raw.div_ceil(8)  // MAXALIGN(8)
-        }
+
+    // Taille padded repr(C) = arrondi au multiple de max_align supérieur.
+    let padded_size = layout_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
+
+    writeln!(out, "// Layout fixed-length : {layout_bytes}B données → {padded_size}B padded (align={max_align}B)").unwrap();
+    writeln!(out, "// + {}B header heap PostgreSQL (MAXALIGN(23 + ceil({}/8)))",
+        { let n = columns.len(); (23 + n.div_ceil(8)).div_ceil(8) * 8 },
+        columns.len()
+    ).unwrap();
+    writeln!(out).unwrap();
+
+    // static_assertions — vérifie la symétrie binaire repr(C) ↔ DDL PostgreSQL.
+    // Critique pour la Phase 2 (SHM) : une divergence d'un octet produit
+    // de la corruption silencieuse lors du mmap::ptr::read().
+    writeln!(out,
+        "const _: () = assert!(\n    \
+         std::mem::size_of::<{name}>() == {padded_size},\n    \
+         \"DB-Forge [{schema}.{table}]: size_of diverge du DDL — reconstruire après ALTER TABLE\",\n\
+         );"
+    ).unwrap();
+    writeln!(out,
+        "const _: () = assert!(\n    \
+         std::mem::align_of::<{name}>() == {max_align},\n    \
+         \"DB-Forge [{schema}.{table}]: align_of diverge du DDL — vérifier les types colonnes\",\n\
+         );"
     ).unwrap();
     writeln!(out).unwrap();
 }
@@ -495,7 +533,7 @@ fn write_projection_stub(
     let select = fixed_cols.join(", ");
 
     let where_clause = match pk {
-        PrimaryKey::Single(col) => format!("WHERE {col} = ANY($1)"),
+        PrimaryKey::Single(col) => format!("WHERE {col} = ANY($1) ORDER BY {col} ASC"),
         PrimaryKey::Composite   => "WHERE 1=1 /* PK composite: adapter */".to_string(),
     };
 
@@ -535,20 +573,21 @@ fn write_projection_stub(
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // render — PoC : Debug formatting dans une balise HTML sémantique.
-    // Fragment-Forge remplacera par un template Maud complet.
-    writeln!(out, "    fn render(record: &Self::Record) -> String {{").unwrap();
+    // render — pattern buffer (pas de valeur de retour).
+    // Zéro allocation supplémentaire : Fragment-Forge utilisera with_capacity.
+    // PoC : write! du Debug formatting via fmt::Write (String impl fmt::Write).
+    writeln!(out, "    fn render(record: &Self::Record, buf: &mut String) {{").unwrap();
     writeln!(out,
-        "        format!(\"<article class=\\\"{schema}-{table}\\\">{{:?}}</article>\", record)"
+        "        let _ = ::std::fmt::Write::write_fmt(\
+         buf, format_args!(\"<article class=\\\"{schema}-{table}\\\">{{:?}}</article>\", record));"
     ).unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
     // artifact_path — chemin déterministe basé sur la PK.
-    // Racine configurable via MARIUS_ARTIFACTS_DIR (défaut : ./artifacts).
     let pk_field = match pk {
         PrimaryKey::Single(col) => col.as_str(),
-        PrimaryKey::Composite   => "0", // PK composite : chemin non déterministe
+        PrimaryKey::Composite   => "0",
     };
     writeln!(out, "    fn artifact_path(record: &Self::Record) -> PathBuf {{").unwrap();
     writeln!(out, "        let root = std::env::var(\"MARIUS_ARTIFACTS_DIR\")").unwrap();

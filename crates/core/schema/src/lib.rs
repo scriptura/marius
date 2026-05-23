@@ -1,12 +1,11 @@
 // marius-schema
-// Ce crate ne contient pas de code écrit à la main.
-// Toutes les structs, statics et stubs Projection sont générés par DB-Forge
-// via build.rs → $OUT_DIR/generated_schema.rs.
+// Crate de structs générées par DB-Forge.
+// Aucun code manuel — tout vient de build.rs → $OUT_DIR/generated_schema.rs.
 
-// Réexporte le trait Projection pour que les implémentations générées
-// puissent y accéder via `crate::projection::Projection`.
+// Réexporte le trait Projection depuis marius-projection (frontière Core/Shell).
+// Le code généré utilise `crate::projection::Projection`.
 pub mod projection {
-    pub use marius_collector::Projection;
+    pub use marius_projection::Projection;
 }
 
 // Réexporte le Collector pour les statics générés.
@@ -15,17 +14,13 @@ pub mod collector {
 }
 
 // Point d'entrée de la génération.
-// Le compilateur voit toutes les structs et implémentations comme
-// si elles étaient écrites ici.
 include!(concat!(env!("OUT_DIR"), "/generated_schema.rs"));
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marius_collector::Projection; // trait en scope pour appeler fetch_batch
+    use marius_projection::Projection;
 
-    // cargo test -p marius-schema -- --ignored --nocapture
-    // Requiert DATABASE_URL dans l'environnement ou .cargo/config.toml.
     #[tokio::test]
     #[ignore]
     async fn test_fetch_content_core() {
@@ -39,12 +34,11 @@ mod tests {
             .unwrap();
 
         assert!(!records.is_empty(), "Aucun enregistrement — DML appliqué ?");
-        println!(
-            "ContentCore[0] : document_id={}, status={}, created_at={}",
-            records[0].document_id,
-            records[0].status,
-            records[0].created_at,
-        );
+
+        let mut buf = String::new();
+        ContentCoreProjection::render(&records[0], &mut buf);
+        println!("ContentCore[0] HTML : {buf}");
+        assert!(buf.contains("content-core"));
     }
 
     #[tokio::test]
@@ -59,13 +53,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!records.is_empty(), "Aucun enregistrement — DML appliqué ?");
-        println!(
-            "ProductCore[0] : id={}, price_cents={}, stock={}, is_available={}",
-            records[0].id,
-            records[0].price_cents, // -1 si NULL en DB (sentinel)
-            records[0].stock,
-            records[0].is_available,
-        );
+        assert!(!records.is_empty());
+
+        let mut buf = String::new();
+        CommerceProductCoreProjection::render(&records[0], &mut buf);
+        println!("ProductCore[0] HTML : {buf}");
     }
 }

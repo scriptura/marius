@@ -1,23 +1,25 @@
 [package]
 name = "marius-render"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "Artifact writing and Axum integration shell for the Marius engine."
+description = "Dispatcher and artifact rendering shell for the Marius reactive engine."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/scriptura/marius"
 readme = "README.md"
-keywords = ["axum", "web", "marius"]
+keywords = ["axum", "web", "dispatcher", "marius"]
 categories = ["web-programming"]
 
 [dependencies]
-marius-collector = { version = "0.1.0", path = "../../core/collector" }
-marius-schema = { version = "0.1.0", path = "../../core/schema" }
-marius-projection = { version = "0.1.0", path = "../../core/projection" }
-sqlx = { workspace = true }
+# Core
+marius-collector = { path = "../../core/collector", version = "=0.2.0" }
+marius-projection = { path = "../../core/projection", version = "=0.2.0" }
+
+# Shell — Tokio et Rayon vivent uniquement ici (pas dans le Core)
 tokio = { workspace = true }
-maud = { workspace = true }
 rayon = { workspace = true }
+sqlx = { workspace = true }
+maud = { workspace = true }
 axum = { workspace = true }
 
 [build-dependencies]
-marius-fragment-forge = { version = "0.1.0", path = "../../../forge/fragment-forge" }
+marius-fragment-forge = { path = "../../../forge/fragment-forge", version = "=0.2.0" }

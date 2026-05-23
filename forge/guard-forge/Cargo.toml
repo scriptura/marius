@@ -1,12 +1,12 @@
 [package]
-name        = "marius-guard-forge"
-version     = "0.1.0"
-edition     = "2024"
+name = "marius-guard-forge"
+version = "0.2.0"
+edition = "2024"
 description = "Build-time RLS and security trait generator for the Marius engine."
-license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/votre-org/marius"
-readme      = "README.md"
-keywords    = ["codegen", "build-script", "security", "rls", "marius"]
-categories  = ["development-tools"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/scriptura/marius"
+readme = "README.md"
+keywords = ["codegen", "build-script", "security", "rls", "marius"]
+categories = ["development-tools"]
 
 [dependencies]

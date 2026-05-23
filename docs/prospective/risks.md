@@ -1,7 +1,3 @@
-Voici la version intégrale, fusionnée et augmentée de la spécification technique de référence pour Marius. Ce document sert de manifeste d'ingénierie et de garde-fou contre les dérives architecturales.
-
----
-
 # Spécification Technique des Points d'Attention & Doctrine de Couplage : Moteur Marius (Phase 2)
 
 ## 1. La Forge (Build-Time) : Le Point de Fléchissement Unique

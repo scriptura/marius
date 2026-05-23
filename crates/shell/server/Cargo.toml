@@ -13,10 +13,10 @@ name = "marius"
 path = "src/main.rs"
 
 [dependencies]
-marius-collector = { version = "0.1.0", path = "../../core/collector" }
-marius-schema = { version = "0.1.0", path = "../../core/schema" }
-marius-projection = { version = "0.1.0", path = "../../core/projection" }
-marius-render = { version = "0.1.0", path = "../../shell/render" }
+marius-collector = { version = "=0.2.0", path = "../../core/collector" }
+marius-schema = { version = "=0.2.0", path = "../../core/schema" }
+marius-projection = { version = "=0.2.0", path = "../../core/projection" }
+marius-render = { version = "=0.2.0", path = "../../shell/render" }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }

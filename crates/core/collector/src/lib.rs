@@ -1,7 +1,10 @@
-pub mod collector;
-pub mod dispatcher;
-pub mod projection;
+// marius-collector
+// Crate Core — attitude no_std.
+// Contient uniquement : Collector<MAX, WORDS> + InsertResult.
+//
+// Ce crate n'a aucune dépendance Tokio, SQLx, ou Rayon.
+// Le Dispatcher (Tokio) vit dans marius-render (Shell).
+// Le trait Projection (SQLx) vit dans marius-projection (frontière Core/Shell).
 
-pub use collector::Collector;
-pub use dispatcher::{Dispatcher, DispatcherConfig};
-pub use projection::Projection;
+pub mod collector;
+pub use collector::{Collector, InsertResult};

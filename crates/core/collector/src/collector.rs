@@ -1,33 +1,41 @@
 // marius-collector · collector.rs
 // Table de présence lock-free par Bit-Vector.
-// Spécification : ADR-002 / session de conception Mai 2026.
+// Aucune dépendance Tokio ni SQLx — Core pur.
 //
-// Deux const generics stables :
-//   MAX  : identifiant maximal accepté (borne domaine)
-//   WORDS: taille du tableau = ceil(MAX / 64), arrondi power-of-two par la Forge.
-// La relation WORDS == (MAX + 63) / 64 est imposée par la Forge au build-time.
-// Elle n'est pas encodée dans le type system (generic_const_exprs instable).
+// L'appelant (Shell / Dispatcher dans marius-render) reçoit InsertResult
+// et décide d'émettre notify.notify_one() si ThresholdReached.
+// Ce pattern isole toute primitive de synchronisation async hors du Core.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::*};
-use tokio::sync::Notify;
+
+/// Résultat d'un appel à Collector::insert.
+/// Permet à l'appelant (Shell) de décider d'émettre un signal Tokio
+/// sans que le Collector ne connaisse Tokio.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InsertResult {
+    /// Nouveau signal enregistré, seuil non atteint.
+    Inserted,
+    /// Signal ignoré : ID déjà présent dans le Bit-Vector (déduplication O(1)).
+    Duplicate,
+    /// Nouveau signal ET seuil volumétrique atteint — déclencher un flush immédiat.
+    ThresholdReached,
+    /// ID hors périmètre (id > MAX) — indicateur de désynchronisation de config.
+    /// Action : relancer la Forge avec MAX_ENTITY_ID élargi (Article Zéro).
+    Dropped,
+}
 
 pub struct Collector<const MAX: usize, const WORDS: usize> {
     /// Bit-vector de présence. Bit (id-1) = signal en attente.
     presence: [AtomicU64; WORDS],
-    /// Approximation du nombre de bits positionnés (non garanti exact sous contention).
+    /// Approximation du nombre de bits positionnés.
     count:    AtomicUsize,
-    /// Signaux ignorés car id > MAX — indicateur de désynchronisation de configuration.
-    /// Action corrective : relancer la Forge avec MAX_ENTITY_ID élargi (Article Zéro).
+    /// Signaux ignorés car id > MAX — désynchronisation de configuration.
     dropped:  AtomicU64,
 }
 
 impl<const MAX: usize, const WORDS: usize> Collector<MAX, WORDS> {
-    /// Constructeur const — pour les statics générés par la Forge.
-    /// `AtomicU64::new(0)` est const : aucun unsafe requis.
     pub const fn new_zeroed() -> Self {
         Self {
-            // [expr; N] avec expr const et N const generic : stable depuis Rust 1.79.
-            // AtomicU64 n'est pas Copy mais `AtomicU64::new(0)` est une expr const.
             presence: [const { AtomicU64::new(0) }; WORDS],
             count:    AtomicUsize::new(0),
             dropped:  AtomicU64::new(0),
@@ -35,12 +43,12 @@ impl<const MAX: usize, const WORDS: usize> Collector<MAX, WORDS> {
     }
 
     /// Insère un signal pour l'entité `id`.
-    /// Idempotent : si le bit est déjà positionné, aucun effet sur `count`.
-    /// Déclenche `notify` si le seuil volumétrique `threshold` est atteint.
-    pub fn insert(&self, id: i64, threshold: usize, notify: &Notify) {
+    /// Idempotent : si le bit est déjà positionné, retourne Duplicate.
+    /// L'appelant appelle notify.notify_one() si ThresholdReached.
+    pub fn insert(&self, id: i64, threshold: usize) -> InsertResult {
         if id < 1 || id as usize > MAX {
             self.dropped.fetch_add(1, Relaxed);
-            return;
+            return InsertResult::Dropped;
         }
 
         let idx  = (id - 1) as usize;
@@ -48,18 +56,21 @@ impl<const MAX: usize, const WORDS: usize> Collector<MAX, WORDS> {
         let bit  = 1u64 << (idx % 64);
 
         let old = self.presence[word].fetch_or(bit, Release);
-        if old & bit == 0 {
-            // Premier signal pour cet ID : incrémenter et vérifier le seuil.
-            let prev = self.count.fetch_add(1, AcqRel);
-            if prev + 1 >= threshold {
-                notify.notify_one();
-            }
+
+        if old & bit != 0 {
+            return InsertResult::Duplicate;
         }
-        // Sinon : déduplication native, O(1).
+
+        let prev = self.count.fetch_add(1, AcqRel);
+        if prev + 1 >= threshold {
+            InsertResult::ThresholdReached
+        } else {
+            InsertResult::Inserted
+        }
     }
 
     /// Vide le Collector et retourne les IDs en attente.
-    /// swap(0, AcqRel) sur chaque word libère les slots pour les inserts concurrents.
+    /// swap(0, AcqRel) libère les slots pour les inserts concurrents.
     /// Scan en O(bits_set) via trailing_zeros() (TZCNT sur x86).
     pub fn flush(&self) -> Vec<i64> {
         let mut ids = Vec::with_capacity(self.count.load(Relaxed));
@@ -69,7 +80,7 @@ impl<const MAX: usize, const WORDS: usize> Collector<MAX, WORDS> {
             while word != 0 {
                 let bit = word.trailing_zeros() as usize;
                 ids.push((w * 64 + bit + 1) as i64);
-                word &= word - 1; // clear du bit le plus bas
+                word &= word - 1;
             }
         }
 

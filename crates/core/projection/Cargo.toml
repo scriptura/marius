@@ -1,20 +1,15 @@
 [package]
 name = "marius-projection"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "Generated Projection implementations for the Marius engine."
+description = "Projection trait for the Marius reactive engine (Core/Shell boundary)."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/scriptura/marius"
 readme = "README.md"
-keywords = ["ecs", "codegen", "marius"]
+keywords = ["ecs", "projection", "marius"]
 categories = ["database"]
 
 [dependencies]
-marius-collector = { version = "0.1.0", path = "../../core/collector" }
-marius-schema = { version = "0.1.0", path = "../../core/schema" }
+# sqlx : fetch_batch prend &PgPool (Phase 1).
+# Phase 2 (SHM) : fetch_batch utilisera mmap — sqlx sera retiré du trait.
 sqlx = { workspace = true }
-maud = { workspace = true }
-
-[build-dependencies]
-marius-bridge-forge = { version = "0.1.0", path = "../../../forge/bridge-forge" }
-marius-fragment-forge = { version = "0.1.0", path = "../../../forge/fragment-forge" }

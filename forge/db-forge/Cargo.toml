@@ -1,14 +1,14 @@
 [package]
-name        = "marius-db-forge"
-version     = "0.1.0"
-edition     = "2024"
+name = "marius-db-forge"
+version = "0.2.0"
+edition = "2024"
 description = "Build-time generator: PostgreSQL pg_attribute → Rust #[repr(C)] structs for the Marius engine."
-license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/votre-org/marius"
-readme      = "README.md"
-keywords    = ["codegen", "postgresql", "build-script", "ecs", "marius"]
-categories  = ["development-tools", "database"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/scriptura/marius"
+readme = "README.md"
+keywords = ["codegen", "postgresql", "build-script", "ecs", "marius"]
+categories = ["development-tools", "database"]
 
 [dependencies]
-sqlx  = { workspace = true }
+sqlx = { workspace = true }
 tokio = { workspace = true }

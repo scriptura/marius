@@ -848,30 +848,24 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "marius"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "marius-collector",
  "marius-projection",
  "marius-render",
- "marius-schema",
 ]
 
 [[package]]
 name = "marius-bridge-forge"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "marius-collector"
-version = "0.1.0"
-dependencies = [
- "rayon",
- "sqlx",
- "tokio",
-]
+version = "0.2.0"
 
 [[package]]
 name = "marius-db-forge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "sqlx",
  "tokio",
@@ -879,33 +873,27 @@ dependencies = [
 
 [[package]]
 name = "marius-fragment-forge"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "marius-guard-forge"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "marius-projection"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "marius-bridge-forge",
- "marius-collector",
- "marius-fragment-forge",
- "marius-schema",
- "maud",
  "sqlx",
 ]
 
 [[package]]
 name = "marius-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "marius-collector",
  "marius-fragment-forge",
  "marius-projection",
- "marius-schema",
  "maud",
  "rayon",
  "sqlx",
@@ -914,11 +902,12 @@ dependencies = [
 
 [[package]]
 name = "marius-schema"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "marius-collector",
  "marius-db-forge",
+ "marius-projection",
  "sqlx",
  "tokio",
 ]
