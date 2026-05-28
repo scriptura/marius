@@ -2,11 +2,12 @@
 name = "marius-fragment-forge"
 version = "0.2.0"
 edition = "2024"
-description = "Build-time Maud HTML fragment generator for the Marius engine."
+description = "Build-time HTML render generator for the Marius engine. Computes static/dynamic buffer capacities."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/scriptura/marius"
 readme = "README.md"
 keywords = ["codegen", "build-script", "maud", "marius"]
 categories = ["development-tools"]
 
+# Aucune dépendance — calculs purement statiques sur des slices de FieldSpec.
 [dependencies]

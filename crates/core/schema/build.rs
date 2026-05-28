@@ -21,6 +21,9 @@ use std::path::PathBuf;
 // sqlx::Row : nécessaire pour .get::<T, _>(index) sur les résultats non-macro.
 use sqlx::Row;
 
+// Fragment-Forge : génération des corps render() + calcul capacité statique.
+use marius_fragment_forge::{FieldSpec, FieldKind, generate_render, generate_capacity_consts};
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=DATABASE_URL");
@@ -517,7 +520,6 @@ fn write_projection_stub(
     let proj_name = format!("{name}Projection");
 
     // Colonnes fixed-length uniquement dans le SELECT.
-    // Les varlena sont exclues du repr(C) et chargées séparément par Fragment-Forge.
     let fixed_cols: Vec<&str> = columns.iter()
         .filter(|c| map_type(&c.sql_type).is_fixed)
         .map(|c| c.name.as_str())
@@ -537,8 +539,36 @@ fn write_projection_stub(
         PrimaryKey::Composite   => "WHERE 1=1 /* PK composite: adapter */".to_string(),
     };
 
+    // Fragment-Forge : calculer AVANT d'émettre quoi que ce soit.
+    // Les constantes de capacité sont émises au niveau MODULE (entre struct et impl),
+    // pas dans le bloc impl (où elles seraient des constantes associées invalides
+    // car non déclarées dans le trait Projection).
+    let field_specs: Vec<FieldSpec> = columns.iter()
+        .filter(|c| map_type(&c.sql_type).is_fixed)
+        .filter_map(|c| {
+            FieldKind::from_sql_type(&c.sql_type).map(|kind| FieldSpec {
+                name:   c.name.clone(),
+                kind,
+                attnum: c.attnum,
+            })
+        })
+        .collect();
+
+    let (static_cap, dynamic_cap, render_body) = generate_render(
+        schema, table, &name, &field_specs,
+        // PK réelle issue de pg_constraint — pas le premier champ par attnum.
+        match pk {
+            PrimaryKey::Single(col) => col.as_str(),
+            PrimaryKey::Composite   => field_specs.first().map(|f| f.name.as_str()).unwrap_or("id"),
+        },
+    );
+    let screaming   = to_screaming(&format!("{schema}_{table}"));
+    let cap_consts  = generate_capacity_consts(&screaming, static_cap, dynamic_cap);
+
+    // Struct + constantes au niveau module
     writeln!(out, "pub struct {proj_name};").unwrap();
     writeln!(out).unwrap();
+    writeln!(out, "{cap_consts}").unwrap();  // ← niveau module ✓
     writeln!(out, "// Pool requis : marius_user (SELECT non révoqué sur {schema}.{table})").unwrap();
     writeln!(out, "// RLS         : voir 09_rls/01_policies.sql").unwrap();
     writeln!(out, "impl crate::projection::Projection for {proj_name} {{").unwrap();
@@ -573,14 +603,13 @@ fn write_projection_stub(
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // render — pattern buffer (pas de valeur de retour).
-    // Zéro allocation supplémentaire : Fragment-Forge utilisera with_capacity.
-    // PoC : write! du Debug formatting via fmt::Write (String impl fmt::Write).
+    // render — généré par Fragment-Forge.
+    // Corps : push_str (statique) + write! (dynamique). Zéro allocation intermédiaire.
+    // field_specs, render_body et cap_consts ont été calculés en tête de fonction.
     writeln!(out, "    fn render(record: &Self::Record, buf: &mut String) {{").unwrap();
-    writeln!(out,
-        "        let _ = ::std::fmt::Write::write_fmt(\
-         buf, format_args!(\"<article class=\\\"{schema}-{table}\\\">{{:?}}</article>\", record));"
-    ).unwrap();
+    for line in render_body.lines() {
+        writeln!(out, "    {line}").unwrap();
+    }
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 

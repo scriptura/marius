@@ -907,6 +907,7 @@ dependencies = [
  "chrono",
  "marius-collector",
  "marius-db-forge",
+ "marius-fragment-forge",
  "marius-projection",
  "sqlx",
  "tokio",
