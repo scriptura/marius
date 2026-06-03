@@ -1,7 +1,7 @@
 
 [package]
 name = "marius"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Marius: a data-oriented reactive projection engine. PostgreSQL → AOT HTML, zero intermediate transformation."
 license = "MIT OR Apache-2.0"
@@ -12,5 +12,5 @@ categories = ["web-programming", "database", "concurrency"]
 
 [dependencies]
 marius-collector = { version = "=0.2.0", path = "../core/collector" }
-marius-projection = { version = "=0.2.0", path = "../core/projection" }
-marius-render = { version = "=0.2.0", path = "../shell/render" }
+marius-projection = { version = "0.3.0", path = "../core/projection" }
+marius-render = { version = "0.3.0", path = "../shell/render" }
