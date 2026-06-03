@@ -1,4 +1,4 @@
-# Le Manifeste de la Projection Réactive
+# Manifeste de la Projection Réactive
 
 ## Architecture Data-First & Rendu AOT
 

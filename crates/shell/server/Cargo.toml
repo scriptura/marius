@@ -1,6 +1,6 @@
 [package]
 name = "marius-server"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 publish = false
 description = "Serveur shell pour le projet Marius"
@@ -20,3 +20,7 @@ marius-render = { version = "=0.2.0", path = "../../shell/render" }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
+
+# ServeDir : sert les artefacts HTML depuis le disque (read path O(1)).
+# Feature "fs" requise pour tower_http::services::ServeDir.
+tower-http = { version = "0.6", features = ["fs"] }
