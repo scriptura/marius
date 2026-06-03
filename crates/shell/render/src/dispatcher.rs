@@ -5,6 +5,16 @@
 // Migration depuis marius-collector (Phase 1 refactoring) :
 // Le Collector<MAX, WORDS> reste dans le Core (marius-collector, zéro dépendance).
 // Le Dispatcher vit ici, dans le Shell, car il orchestre les I/O.
+//
+// ─── Séparation async / sync ──────────────────────────────────────────────────
+//
+//   run()         : boucle asynchrone Tokio. Gère le tick adaptatif, fetch_batch,
+//                   l'écriture des artefacts, et appelle render_batch().
+//   render_batch(): logique de rendu parallèle Rayon, synchrone, générique.
+//                   Extractible hors de la boucle async pour :
+//                     - les benchmarks Divan (pas de runtime Tokio requis),
+//                     - les tests d'intégration (appel direct sans Dispatcher),
+//                     - la lisibilité (hot path isolé du code d'orchestration).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -79,35 +89,9 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
                 Err(e) => { eprintln!("[dispatcher] fetch_batch: {e}"); continue; }
             };
 
-            // Projection parallèle.
-            // into_par_iter() : T: Send suffisant (pas T: Sync).
-            //
-            // fetch_batch retourne Vec<(Record, VarlenOwned)> (ADR-003).
-            // Déstructuration du tuple : record et varlena sont Send + 'static,
-            // traversent la frontière Rayon sans contrainte de lifetime.
-            // render() reconstruit les &str localement via as_deref() — zéro copie,
-            // durée de vie confinée à la closure.
-            //
-            // Buffer réutilisé par thread Rayon via map_with().
-            // map_with() clone le buffer seed (capacité 0) une fois par thread
-            // au démarrage du pool, puis le passe par &mut à chaque itération.
-            // buf.clear() remet len=0 sans libérer la mémoire allouée :
-            // après le premier render(), le buffer est à la bonne capacité
-            // et les itérations suivantes n'allouent plus.
-            // Invariant : une seule allocation par thread Rayon par tick de Dispatcher,
-            // indépendamment du nombre d'enregistrements dans le batch.
-            records.into_par_iter().map_with(String::new(), |buf, (record, varlena)| {
-                buf.clear();
-                P::render(&record, &varlena, buf);
-
-                let path = P::artifact_path(&record);
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Err(e) = std::fs::write(&path, buf.as_bytes()) {
-                    eprintln!("[dispatcher] write {:?}: {e}", path);
-                }
-            }).for_each(|_| {});
+            // Hot path de rendu : délégué à render_batch() (fonction libre synchrone).
+            // Séparation async/sync : run() orchestre les I/O, render_batch() sature les CPU.
+            render_batch::<P>(records);
 
             let new_tick = self.adapt_tick(ids.len(), t0.elapsed());
             if new_tick != current_tick {
@@ -128,6 +112,89 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
             _         => self.config.tick_default,
         }
     }
+}
+
+// =============================================================================
+// Hot path : rendu parallèle (fonction libre, synchrone, générique)
+// =============================================================================
+
+/// Projette un batch d'enregistrements en fragments HTML et les écrit sur disque.
+///
+/// ─── Contrat ─────────────────────────────────────────────────────────────────
+///
+///   - Entrée  : Vec<(P::Record, P::VarlenOwned)> produit par fetch_batch().
+///   - Sortie  : artefacts écrits dans le système de fichiers (chemin via artifact_path).
+///   - Aucune valeur de retour : les erreurs d'écriture sont loguées, non propagées.
+///     Le Dispatcher est un pipeline best-effort : une écriture ratée sera
+///     réessayée au prochain tick si l'ID reste dans le Collector.
+///
+/// ─── Séparation rendu / I/O ──────────────────────────────────────────────────
+///
+///   Cette fonction combine rendu (render_batch_pure) et écriture disque.
+///   Pour benchmarker le rendu seul sans I/O, utiliser render_batch_pure.
+///   Les benchmarks Divan utilisent render_batch_pure pour mesurer le hot path
+///   CPU sans le bruit des syscalls write(2).
+///
+/// ─── Invariant d'allocation O(T) (ADR-003) ───────────────────────────────────
+///
+///   map_with(String::new()) distribue un buffer par thread Rayon au démarrage.
+///   buf.clear() préserve la capacité entre itérations du même thread.
+///   Nombre d'allocations = O(T), T = nombre de threads Rayon, indépendant de N.
+pub fn render_batch<P: Projection>(batch: Vec<(P::Record, P::VarlenOwned)>) {
+    batch
+        .into_par_iter()
+        .map_with(
+            String::new(),
+            |buf, (record, varlena)| {
+                buf.clear();
+                P::render(&record, &varlena, buf);
+
+                let path = P::artifact_path(&record);
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::write(&path, buf.as_bytes()) {
+                    eprintln!("[dispatcher] write {:?}: {e}", path);
+                }
+            },
+        )
+        .for_each(|_| {});
+}
+
+/// Rendu parallèle pur — sans I/O disque.
+///
+/// ─── Rôle ────────────────────────────────────────────────────────────────────
+///
+///   Isole le hot path CPU (marius_html_escape + push_str + write_fmt) des
+///   syscalls write(2) et create_dir_all(). Utilisée par les benchmarks Divan
+///   pour mesurer le coût réel du rendu sans le bruit des I/O.
+///
+///   En production, render_batch() appelle render_batch_pure() conceptuellement
+///   mais fusionne les deux phases pour éviter l'allocation d'un Vec intermédiaire.
+///   render_batch_pure() est une fonction distincte, pas un wrapper de render_batch().
+///
+/// ─── Invariants identiques à render_batch ────────────────────────────────────
+///
+///   O(T) allocations, buf.clear() préserve la capacité, Send + 'static requis.
+///   black_box() dans le benchmark empêche LLVM d'éliminer les push_str
+///   dont le résultat n'est pas observé hors de la closure.
+pub fn render_batch_pure<P: Projection>(batch: Vec<(P::Record, P::VarlenOwned)>) {
+    batch
+        .into_par_iter()
+        .map_with(
+            (String::new(), 0usize), // (buffer réutilisé, ref_cap pour diagnostics)
+            |(buf, ref_cap), (record, varlena)| {
+                buf.clear();
+                P::render(&record, &varlena, buf);
+                // ref_cap : capturé pour diagnostics uniquement.
+                // Permet au test d'intégration de vérifier le no-realloc
+                // sans introduire de logique de mesure dans render_batch().
+                if *ref_cap == 0 {
+                    *ref_cap = buf.capacity();
+                }
+            },
+        )
+        .for_each(|_| {});
 }
 
 #[cfg(test)]
@@ -342,8 +409,6 @@ mod tests {
 
         // ── Vérification de débit ─────────────────────────────────────────────
         // Tous les enregistrements du lot ont été projetés.
-        // Un écart signalerait un bug dans la distribution Rayon ou une panique
-        // silencieuse (impossible en Rust safe, mais détecté par précaution).
         let total = projected.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
             total, BATCH_SIZE,

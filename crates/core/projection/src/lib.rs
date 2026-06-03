@@ -47,6 +47,14 @@
 
 use std::path::PathBuf;
 
+/// Alias de type pour le retour de fetch_batch.
+/// Évite la répétition du type complexe dans le trait et les implémentations.
+/// Nommé explicitement pour la lisibilité dans les bounds du Dispatcher.
+pub type BatchResult<P> = Result<
+    Vec<(<P as Projection>::Record, <P as Projection>::VarlenOwned)>,
+    sqlx::Error,
+>;
+
 pub trait Projection: Sized + Send + Sync + 'static {
     /// Layout fixed-length, #[repr(C)], miroir du heap tuple PostgreSQL.
     /// Send + 'static : peut traverser tokio::spawn et rayon::par_iter.
@@ -69,9 +77,7 @@ pub trait Projection: Sized + Send + Sync + 'static {
     fn fetch_batch(
         pool: &sqlx::PgPool,
         ids:  &[i64],
-    ) -> impl std::future::Future<
-        Output = Result<Vec<(Self::Record, Self::VarlenOwned)>, sqlx::Error>
-    > + Send;
+    ) -> impl std::future::Future<Output = BatchResult<Self>> + Send;
 
     /// Rendu HTML du record dans le buffer fourni.
     ///

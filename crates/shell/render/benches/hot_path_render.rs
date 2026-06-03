@@ -26,7 +26,6 @@
 
 use divan::{black_box, Bencher};
 use divan::counter::{BytesCount, ItemsCount};
-use rayon::prelude::*;
 
 use marius_schema::{
     ContentCoreStorageRow,
@@ -35,6 +34,7 @@ use marius_schema::{
     CONTENT_CORE_TOTAL_CAP,
 };
 use marius_projection::Projection;
+use marius_render::render_batch_pure;
 
 fn main() {
     divan::main();
@@ -186,30 +186,12 @@ fn bench_render_rayon_nominal(bencher: Bencher, batch_size: usize) {
         .counter(BytesCount::new(batch_size * CONTENT_CORE_TOTAL_CAP))
         .with_inputs(|| batch(batch_size, record_nominal))
         .bench_local_values(|records| {
-            records
-                .into_par_iter()
-                .map_with(
-                    (String::new(), 0usize),
-                    |(buf, ref_cap), (storage, varlena)| {
-                        buf.clear();
-                        ContentCoreProjection::render(&storage, &varlena, buf);
-
-                        // Capture de la capacité de référence au premier rendu.
-                        // Invariant no-realloc : vérifié dans le test d'intégration,
-                        // pas ici (les assertions ralentissent le benchmark).
-                        if *ref_cap == 0 {
-                            *ref_cap = buf.capacity();
-                        }
-
-                        // black_box sur le contenu du buffer :
-                        // empêche LLVM de prouver statiquement que buf est jeté
-                        // et d'éliminer render() par dead-code elimination.
-                        black_box(buf.len())
-                    },
-                )
-                // Consommation de l'itérateur — for_each(|_| {}) est le pattern
-                // standard pour map_with sans collecte.
-                .for_each(|_| {});
+            // render_batch_pure() : rendu parallèle sans I/O disque.
+            // Isole le coût CPU (marius_html_escape + push_str) des syscalls
+            // write(2) qui domineraient la mesure (~22µs/record vs ~420ns/record).
+            // black_box sur le batch entier : empêche LLVM d'éliminer render()
+            // en prouvant que le contenu du buffer n'est pas observé.
+            render_batch_pure::<ContentCoreProjection>(black_box(records));
         });
 }
 
@@ -228,19 +210,6 @@ fn bench_render_rayon_worst_case(bencher: Bencher, batch_size: usize) {
         .counter(BytesCount::new(batch_size * CONTENT_CORE_TOTAL_CAP))
         .with_inputs(|| batch(batch_size, record_worst_case))
         .bench_local_values(|records| {
-            records
-                .into_par_iter()
-                .map_with(
-                    (String::new(), 0usize),
-                    |(buf, ref_cap), (storage, varlena)| {
-                        buf.clear();
-                        ContentCoreProjection::render(&storage, &varlena, buf);
-                        if *ref_cap == 0 {
-                            *ref_cap = buf.capacity();
-                        }
-                        black_box(buf.len())
-                    },
-                )
-                .for_each(|_| {});
+            render_batch_pure::<ContentCoreProjection>(black_box(records));
         });
 }

@@ -104,7 +104,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Extension future : lire cette liste depuis meta.containment_intent
     // pour piloter la Forge entièrement depuis le DDL.
     // -------------------------------------------------------------------------
-    let watched: &[(&str, &str, Option<(&str, &str, &str)>)] = &[
+    // Alias local pour le type de la table de surveillance.
+    // Élimine le warning clippy::type_complexity sur ce site.
+    // Format : (schema, table, Option<(join_schema, join_table, fk_col)>)
+    type WatchedTable = (&'static str, &'static str, Option<(&'static str, &'static str, &'static str)>);
+    let watched: &[WatchedTable] = &[
         ("content",  "core",         Some(("content", "identity", "document_id"))),
         ("commerce", "product_core", None),
     ];
@@ -1208,7 +1212,11 @@ fn write_projection_stub(
                     m.from_expr.replace("{field}", &col.name)
                 };
 
-                writeln!(out, "                {}: {},", col.name, expr).unwrap();
+                if expr == col.name {
+                    writeln!(out, "                {},", col.name).unwrap();
+                } else {
+                    writeln!(out, "                {}: {},", col.name, expr).unwrap();
+                }
             }
             writeln!(out, "            }};").unwrap();
 
