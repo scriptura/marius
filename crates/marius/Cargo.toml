@@ -11,6 +11,6 @@ keywords = ["ecs", "dod", "reactive", "cms", "aot"]
 categories = ["web-programming", "database", "concurrency"]
 
 [dependencies]
-marius-collector = { version = "=0.2.0", path = "../core/collector" }
+marius-collector = { version = "=0.3.0", path = "../core/collector" }
 marius-projection = { version = "0.3.0", path = "../core/projection" }
 marius-render = { version = "0.3.0", path = "../shell/render" }

@@ -11,7 +11,7 @@ categories = ["web-programming"]
 
 [dependencies]
 # Core
-marius-collector = { path = "../../core/collector", version = "=0.2.0" }
+marius-collector = { path = "../../core/collector", version = "=0.3.0" }
 marius-projection = { path = "../../core/projection", version = "0.3.0" }
 
 # Shell — Tokio et Rayon vivent uniquement ici (pas dans le Core)
@@ -23,7 +23,7 @@ axum = { workspace = true }
 
 [dev-dependencies]
 divan = "0.1"
-marius-schema = { path = "../../core/schema", version = "=0.2.0" }
+marius-schema = { path = "../../core/schema", version = "=0.3.0" }
 
 [build-dependencies]
 marius-fragment-forge = { path = "../../../forge/fragment-forge", version = "0.3.0" }

@@ -10,7 +10,7 @@ keywords = ["ecs", "dod", "codegen", "postgresql", "marius"]
 categories = ["database", "data-structures"]
 
 [dependencies]
-marius-collector = { path = "../../core/collector", version = "0.2.0" }
+marius-collector = { path = "../../core/collector", version = "0.3.0" }
 marius-projection = { path = "../../core/projection", version = "0.3.0" }
 sqlx = { workspace = true }
 chrono = { workspace = true }
@@ -19,7 +19,7 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 
 [build-dependencies]
-marius-db-forge = { path = "../../../forge/db-forge", version = "0.2.0" }
+marius-db-forge = { path = "../../../forge/db-forge", version = "0.3.0" }
 marius-fragment-forge = { path = "../../../forge/fragment-forge", version = "0.3.0" }
 sqlx = { workspace = true }
 tokio = { workspace = true }

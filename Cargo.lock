@@ -923,7 +923,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "marius"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "marius-collector",
  "marius-projection",
@@ -932,15 +932,15 @@ dependencies = [
 
 [[package]]
 name = "marius-bridge-forge"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "marius-collector"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "marius-db-forge"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "sqlx",
  "tokio",
@@ -948,22 +948,22 @@ dependencies = [
 
 [[package]]
 name = "marius-fragment-forge"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "marius-guard-forge"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "marius-projection"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "sqlx",
 ]
 
 [[package]]
 name = "marius-render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "divan",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "marius-schema"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "marius-collector",
@@ -992,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "marius-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "marius-collector",
