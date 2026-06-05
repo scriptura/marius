@@ -283,10 +283,18 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
 
             assert_eq!(
                 allocs, 0,
-                "CERTIFICATION ÉCHOUÉE : {allocs} allocation(s) détectée(s)                  dans render() ({bytes} octets).                  DYNAMIC_CAP ({CONTENT_CORE_TOTAL_CAP}B) sous-estime le pire cas.                  Vérifier max_display_width (FieldKind) et max_escaped_len (VarlenField)                  dans forge/fragment-forge/src/lib.rs."
+                "CERTIFICATION ÉCHOUÉE : {allocs} allocation(s) détectée(s) \
+                 dans render() ({bytes} octets). \
+                 DYNAMIC_CAP ({CONTENT_CORE_TOTAL_CAP}B) sous-estime le pire cas. \
+                 Vérifier max_display_width (FieldKind) et max_escaped_len (VarlenField) \
+                 dans forge/fragment-forge/src/lib.rs."
             );
 
-            // Observable pour Divan — empêche l'élimination de render() par LLVM.
-            black_box(buf.len())
+            // black_box sur la référence — force LLVM à considérer buf comme
+            // observable sans retourner de valeur scalaire à Divan.
+            // Retourner un usize (buf.len()) confond Divan qui l'interprète comme
+            // un compteur d'items et supprime la ligne de timing dans le rapport.
+            // La closure retourne () implicitement : Divan mesure le temps pur.
+            black_box(&buf);
         });
 }

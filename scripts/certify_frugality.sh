@@ -60,6 +60,11 @@ fi
 # =============================================================================
 
 echo "Compilation du binaire de certification (profil release)..."
+# touch : force Cargo à recompiler même si le source semble inchangé.
+# Sans cela, Cargo peut réutiliser un binaire périmé si le mtime du source
+# n'a pas été mis à jour (cas fréquent après git checkout ou rsync).
+touch "crates/shell/render/benches/${BENCH_NAME}.rs"
+
 if ! cargo bench -p "$BENCH_CRATE" --bench "$BENCH_NAME" --no-run \
         2>&1 | tee "$LOG_FILE"; then
     echo ""
@@ -71,7 +76,6 @@ fi
 # On cherche le plus récent parmi les binaires hot_path_certify-* en release.
 # -newer avec le fichier source bench garantit que c'est bien la compilation
 # actuelle, et non un artefact périmé d'une session précédente.
-BENCH_SRC="crates/shell/render/benches/${BENCH_NAME}.rs"
 BENCH_BIN=$(find target/release/deps -name "${BENCH_NAME}-*" \
     -not -name "*.d" \
     -not -name "*.rlib" \

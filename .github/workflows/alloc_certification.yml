@@ -1,0 +1,179 @@
+# .github/workflows/alloc_certification.yml
+# CI — Certification Zéro-Allocation du pipeline de rendu Marius
+#
+# ─── Déclencheurs ────────────────────────────────────────────────────────────
+#
+#   push sur main et develop : détecte les régressions au merge.
+#   pull_request vers main   : bloque la PR si une allocation est introduite.
+#   workflow_dispatch        : exécution manuelle depuis l'interface GitHub.
+#
+# ─── Ce que ce workflow certifie ─────────────────────────────────────────────
+#
+#   P::render() n'effectue aucune allocation sur le tas pendant son exécution
+#   une fois le buffer pré-alloué à STATIC_CAP + DYNAMIC_CAP.
+#   Invariant ADR-003 : buf.reserve() est un no-op au runtime.
+#
+#   Le binaire hot_path_certify embarque CountingAlloc comme allocateur global.
+#   L'assertion ALLOC_COUNT == 0 est posée dans bench_certify_zero_alloc()
+#   avec un buffer pré-chauffé, sur 100 samples × pires cas varlena.
+#
+# ─── Ce que ce workflow ne certifie PAS ──────────────────────────────────────
+#
+#   Il ne certifie pas render_batch_pure() (Rayon) : elle alloue O(T) buffers
+#   via map_with — comportement attendu et documenté dans ADR-003.
+#
+# ─── Artifacts produits ───────────────────────────────────────────────────────
+#
+#   logs/certify_ci_*.txt : rapport d'exécution Divan (uploadé en artifact).
+
+name: Alloc Certification
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      # Déclencher uniquement si le code impactant le rendu change.
+      # Ignorer les modifications de documentation, scripts, ADRs.
+      - "crates/**"
+      - "forge/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "forge/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Raison de l'exécution manuelle"
+        required: false
+        default: "Vérification ad hoc"
+
+jobs:
+  certify-zero-alloc:
+    name: Certification Zéro-Allocation (render)
+    runs-on: ubuntu-latest
+
+    env:
+      # DATABASE_URL requis par marius-schema/build.rs pour l'introspection PostgreSQL.
+      # En CI, le schéma est déjà généré et committé — build.rs ne se ré-exécute
+      # que si DATABASE_URL est définie. On la laisse vide pour utiliser le cache.
+      DATABASE_URL: ""
+      CARGO_TERM_COLOR: always
+      # Rust backtrace pour les panics d'assertion dans le benchmark.
+      RUST_BACKTRACE: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Rust toolchain et registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-rust-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-
+
+      - name: Cache target/ (profil release)
+        uses: actions/cache@v4
+        with:
+          path: target/release
+          key: ${{ runner.os }}-target-release-${{ hashFiles('**/Cargo.lock', 'crates/**/*.rs', 'forge/**/*.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-target-release-
+
+      - name: Installer Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compiler le binaire de certification
+        # --no-run : compile uniquement, n'exécute pas.
+        # Séparé de l'étape d'exécution pour distinguer les erreurs de compilation
+        # des échecs de certification dans les logs GitHub.
+        run: |
+          cargo bench \
+            -p marius-render \
+            --bench hot_path_certify \
+            --no-run
+
+      - name: Exécuter la certification zéro-allocation
+        # Le binaire Divan retourne exit code 1 si une assertion échoue.
+        # GitHub Actions interprète exit code != 0 comme un échec d'étape.
+        # L'assertion dans bench_certify_zero_alloc() produit un message
+        # explicite identifiant le champ responsable de la régression.
+        run: |
+          mkdir -p logs
+          LOG="logs/certify_ci_$(date +%Y%m%d_%H%M%S).txt"
+
+          # Localisation du binaire le plus récent (hash Cargo dans le nom).
+          BENCH_BIN=$(find target/release/deps -name "hot_path_certify-*" \
+            -not -name "*.d" \
+            -not -name "*.rlib" \
+            -executable \
+            | xargs ls -t 2>/dev/null \
+            | head -1)
+
+          echo "Binaire : $BENCH_BIN"
+          echo "Rapport : $LOG"
+
+          # Exécution — argument positionnel nu pour le filtre Divan.
+          "$BENCH_BIN" "certify/zero_alloc_in_render" 2>&1 | tee "$LOG"
+
+      - name: Uploader le rapport de certification
+        # Toujours uploader, même en cas d'échec, pour permettre le diagnostic.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: certify-report-${{ github.run_id }}
+          path: logs/certify_ci_*.txt
+          retention-days: 30
+
+  # ─── Job optionnel : tests unitaires no-realloc ──────────────────────────────
+  # Les tests test_content_core_no_realloc et test_product_core_no_realloc
+  # dans marius-schema vérifient l'invariant STATIC_CAP + DYNAMIC_CAP
+  # sans allocateur instrumenté. Complémentaires à la certification.
+  schema-no-realloc:
+    name: Tests no-realloc marius-schema
+    runs-on: ubuntu-latest
+
+    env:
+      DATABASE_URL: ""
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Rust toolchain et registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-rust-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-
+
+      - name: Installer Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Tests no-realloc et ratio de remplissage
+        # Exclut les tests ignorés (#[ignore]) qui requièrent DATABASE_URL.
+        # Les 4 tests actifs (no-realloc + ratio) s'exécutent sans base de données.
+        run: |
+          cargo test -p marius-schema \
+            -- \
+            test_content_core_no_realloc \
+            test_product_core_no_realloc \
+            test_content_core_realistic_ratio \
+            test_product_core_realistic_ratio \
+            --nocapture
