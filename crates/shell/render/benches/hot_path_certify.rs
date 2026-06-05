@@ -1,22 +1,26 @@
-// crates/shell/render/benches/hot_path_render.rs
-// Micro-benchmarks Divan — pipeline de rendu Marius (timing pur).
+// crates/shell/render/benches/hot_path_certify.rs
+// Certification zéro-allocation du pipeline de rendu Marius.
 //
-// Ce binaire ne contient AUCUN allocateur instrumenté.
-// L'allocateur système est utilisé tel quel : les mesures de débit
-// (GB/s, items/s) ne subissent aucune perturbation liée à l'instrumentation.
+// Ce binaire déclare CountingAlloc comme allocateur global.
+// Chaque appel à alloc() incrémente un compteur atomique.
+// L'invariant certifié : render_batch_pure() n'alloue PAS pendant son exécution
+// une fois les buffers Rayon pré-chauffés (O(T) allocations initiales attendues).
 //
-// Pour la certification zéro-allocation, utiliser le binaire séparé :
-//   cargo bench -p marius-render --bench hot_path_certify
-//
-// ─── Granularités mesurées ────────────────────────────────────────────────
-//
-//   render/single/*      : coût d'un render() unique, sans overhead Rayon.
-//   render/rayon/nominal : scalabilité parallèle, données courtes.
-//   render/rayon/worst_case : scalabilité parallèle, escape HTML saturé.
+// Ce binaire est intentionnellement séparé de hot_path_render pour garantir
+// que les mesures de timing ne subissent aucune perturbation liée aux
+// deux fetch_add atomiques par allocation introduits par CountingAlloc.
 //
 // ─── Exécution ────────────────────────────────────────────────────────────
 //
-//   cargo bench -p marius-render --bench hot_path_render
+//   cargo bench -p marius-render --bench hot_path_certify
+
+mod counting_alloc;
+use counting_alloc::CountingAlloc;
+
+/// Allocateur global instrumenté — actif uniquement dans ce binaire.
+/// Délègue à System, incrémente ALLOC_COUNT/ALLOC_BYTES à chaque alloc().
+#[global_allocator]
+static ALLOC: CountingAlloc = CountingAlloc::new();
 
 use divan::{black_box, Bencher};
 use divan::counter::{BytesCount, ItemsCount};
@@ -205,5 +209,84 @@ fn bench_render_rayon_worst_case(bencher: Bencher, batch_size: usize) {
         .with_inputs(|| batch(batch_size, record_worst_case))
         .bench_local_values(|records| {
             render_batch_pure::<ContentCoreProjection>(black_box(records));
+        });
+}
+
+// =============================================================================
+// Benchmark de certification zéro-allocation
+// =============================================================================
+
+/// Certifie que P::render() n'alloue pas sur le tas pendant son exécution.
+///
+/// ─── Périmètre de la certification ───────────────────────────────────────────
+///
+///   La fenêtre reset/read encadre un appel unique à render() avec un buffer
+///   déjà alloué à TOTAL_CAP. Cette granularité est la seule correcte :
+///   render_batch_pure() alloue O(T) buffers via map_with(String::new())
+///   à chaque invocation — ces allocations sont légitimes (ADR-003).
+///   Ce que l'on certifie ici : render() lui-même, une fois le buffer stable.
+///
+/// ─── Protocole ───────────────────────────────────────────────────────────────
+///
+///   setup (hors fenêtre Divan, dans with_inputs) :
+///     - buf alloué à TOTAL_CAP via String::with_capacity()
+///     - un premier render() pour confirmer la capacité suffisante
+///       (l'allocateur peut arrondir à la page supérieure — c'est acceptable)
+///
+///   fenêtre certifiée (dans bench_local_values) :
+///     - buf.clear()            → len=0, capacity inchangée
+///     - CountingAlloc::reset() → compteurs à 0, barrière SeqCst
+///     - render(&record, &varlena, &mut buf)
+///     - assert ALLOC_COUNT == 0
+///
+/// ─── Invariant prouvé ────────────────────────────────────────────────────────
+///
+///   buf.capacity() >= STATIC_CAP + DYNAMIC_CAP avant l'appel garantit que
+///   buf.reserve() dans render() est un no-op. ALLOC_COUNT == 0 confirme
+///   qu'aucun autre chemin dans render() n'alloue.
+///
+/// ─── Ce que ce test ne prouve pas ────────────────────────────────────────────
+///
+///   Il ne certifie pas render_batch_pure() (Rayon) : elle alloue O(T) buffers
+///   via map_with — comportement attendu et documenté dans ADR-003.
+#[divan::bench(name = "certify/zero_alloc_in_render", sample_count = 100)]
+fn bench_certify_zero_alloc(bencher: Bencher) {
+    bencher
+        .with_inputs(|| {
+            // with_inputs produit le tuple (storage, varlena, buf) à chaque sample.
+            // Inclure storage et varlena dans le tuple est nécessaire pour que Divan
+            // reconnaisse un input complet et produise un rapport de timing visible.
+            // Les capturer hors de with_inputs comme références produit un affichage
+            // tronqué : Divan ne voit pas d'input à mesurer et n'affiche pas les temps.
+            //
+            // buf est pré-chauffé ici (hors fenêtre de certification) : le premier
+            // render() garantit que capacity >= TOTAL_CAP après l'éventuel arrondi
+            // page de l'allocateur. Les allocations de ce setup sont hors reset/read.
+            let (storage, varlena) = record_worst_case();
+            let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
+            ContentCoreProjection::render(&storage, &varlena, &mut buf);
+            (storage, varlena, buf)
+        })
+        .bench_local_values(|(storage, varlena, mut buf)| {
+            // ── Fenêtre de certification ──────────────────────────────────────
+            // buf.clear() : len=0, capacity inchangée — buf est prêt pour render().
+            buf.clear();
+            // reset() : barrière SeqCst — garantit la visibilité avant render().
+            CountingAlloc::reset();
+
+            ContentCoreProjection::render(&storage, &varlena, &mut buf);
+
+            // ── Lecture et assertion ──────────────────────────────────────────
+            // SeqCst : garantit que toutes les écritures de render() sont visibles.
+            let allocs = CountingAlloc::alloc_count();
+            let bytes  = CountingAlloc::alloc_bytes();
+
+            assert_eq!(
+                allocs, 0,
+                "CERTIFICATION ÉCHOUÉE : {allocs} allocation(s) détectée(s)                  dans render() ({bytes} octets).                  DYNAMIC_CAP ({CONTENT_CORE_TOTAL_CAP}B) sous-estime le pire cas.                  Vérifier max_display_width (FieldKind) et max_escaped_len (VarlenField)                  dans forge/fragment-forge/src/lib.rs."
+            );
+
+            // Observable pour Divan — empêche l'élimination de render() par LLVM.
+            black_box(buf.len())
         });
 }

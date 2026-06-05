@@ -31,3 +31,7 @@ marius-fragment-forge = { path = "../../../forge/fragment-forge", version = "0.3
 [[bench]]
 name = "hot_path_render"
 harness = false
+
+[[bench]]
+name = "hot_path_certify"
+harness = false
