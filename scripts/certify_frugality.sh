@@ -43,6 +43,10 @@ LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="${LOG_DIR}/certify_frugality_$(date +%Y%m%d_%H%M%S).txt"
 
+# Redirection globale : copie tout stdout (1) et stderr (2) du shell 
+# courant vers tee, qui dispatche vers le terminal et le fichier.
+exec > >(tee "$LOG_FILE") 2>&1
+
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║       Marius Engine — Certification Zéro-Allocation          ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
@@ -65,8 +69,7 @@ echo "Compilation du binaire de certification (profil release)..."
 # n'a pas été mis à jour (cas fréquent après git checkout ou rsync).
 touch "crates/shell/render/benches/${BENCH_NAME}.rs"
 
-if ! cargo bench -p "$BENCH_CRATE" --bench "$BENCH_NAME" --no-run \
-        2>&1 | tee "$LOG_FILE"; then
+if ! cargo bench -p "$BENCH_CRATE" --bench "$BENCH_NAME" --no-run; then
     echo ""
     echo "ERREUR : compilation échouée. Voir $LOG_FILE pour les détails."
     exit 1
@@ -108,11 +111,9 @@ echo ""
 #
 # Le filtre est passé comme argument positionnel au binaire Divan.
 set +e
-"$BENCH_BIN" \
-    "certify/zero_alloc_in_render" \
-    2>&1 | tee -a "$LOG_FILE"
-# Capture PIPESTATUS immédiatement après le pipe, avant toute autre commande.
-EXIT_CODE="${PIPESTATUS[0]}"
+"$BENCH_BIN" "certify/zero_alloc_in_render"
+# L'évaluation redevient directe, PIPESTATUS n'est plus nécessaire.
+EXIT_CODE=$?
 set -e
 
 echo ""

@@ -1,7 +1,14 @@
 # Spécification Architecturale : Inversion de Projection Statique (Static View-Driven Data Pipeline)
 
+**Statut :** deprecated
 **Version :** 0.1
 **Cible :** Moteur Marius (Crates `marius-schema`, `marius-projection`, `marius-render`)
+
+> Spécification dépréciée au profit d'une solution sanctuarisant la souveraineté du schéma tout en conservant l'optimisation maximale par élimination de code mort (_Tree-Shaking_) à la compilation.
+>
+> Le "gouvernement des vues" est desormais remplacé par une "optimisation par l'usage" qui résout la crainte de la dérive fonctionnelle tout en conservant l'impact matériel recherché (Tree-Shaking des octets morts sur le bus mémoire).
+
+---
 
 ## 1. Objectif Système
 
