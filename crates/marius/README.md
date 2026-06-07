@@ -21,16 +21,16 @@ Artifact (HTML file / RAM)
 
 ## Crates
 
-| Crate | Role |
-|---|---|
-| `marius-collector` | `Collector<MAX, WORDS>`, `Dispatcher`, `Projection` trait |
-| `marius-schema` | Generated `#[repr(C)]` structs (DB-Forge) |
-| `marius-projection` | Generated `impl Projection` (Bridge-Forge + Fragment-Forge) |
-| `marius-render` | Artifact I/O, Axum integration |
-| `marius-db-forge` | Build-time: `pg_attribute` → Rust structs |
-| `marius-fragment-forge` | Build-time: Maud template generation |
-| `marius-guard-forge` | Build-time: RLS / security trait generation |
-| `marius-bridge-forge` | Build-time: SQLx batch query generation |
+| Crate                   | Role                                                                                          |
+| ----------------------- | --------------------------------------------------------------------------------------------- |
+| `marius-collector`      | `Collector<MAX, WORDS>`, `Dispatcher`, `Projection` trait                                     |
+| `marius-schema`         | Generated `#[repr(C)]` structs (DB-Forge)                                                     |
+| `marius-projection`     | Generated `impl Projection` (Bridge-Forge + Fragment-Forge)                                   |
+| `marius-render`         | Artifact I/O, Axum integration                                                                |
+| `marius-db-forge`       | Build-time: `pg_attribute` → Rust structs                                                     |
+| `marius-fragment-forge` | Build-time: `.marius` template parsing and native Rust compilation (`push_str` / `write_fmt`) |
+| `marius-guard-forge`    | Build-time: RLS / security trait generation                                                   |
+| `marius-bridge-forge`   | Build-time: SQLx batch query generation                                                       |
 
 ## Status
 

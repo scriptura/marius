@@ -15,7 +15,7 @@ L'architecture repose sur la capacité du compilateur Rust à valider les requê
 
 Dans une approche Data-Oriented Design (DOD), la structure de la donnée (Layout) et la logique de transformation sont les deux faces d'un même artefact technique.
 
-- **Commits Atomiques :** Le monorepo permet de réaliser des commits atomiques incluant simultanément la migration SQL (ex: ajout d'un composant ECS) et sa mise en œuvre dans le moteur Rust (mise à jour des `structs` et de la projection Maud). Cette unité de temps élimine les périodes d'incohérence entre les services.
+- **Commits Atomiques :** Le monorepo permet de réaliser des commits atomiques incluant simultanément la migration SQL (ex: ajout d'un composant ECS) et sa mise en œuvre dans le moteur Rust. Cette unité de temps élimine les périodes d'incohérence entre les services.
 - **Refactoring Global :** Toute modification structurelle dans la base de données peut être répercutée et testée immédiatement sur l'ensemble du pipeline applicatif, assurant que le "Blueprint" et le "Transformateur" restent synchronisés.
 
 ## 🧪 3. Intégrité du Pipeline de Test et CI/CD
