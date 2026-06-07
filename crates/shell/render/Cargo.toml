@@ -18,8 +18,6 @@ marius-projection = { path = "../../core/projection", version = "0.3.0" }
 tokio = { workspace = true }
 rayon = { workspace = true }
 sqlx = { workspace = true }
-maud = { workspace = true }
-axum = { workspace = true }
 
 [dev-dependencies]
 divan = "0.1"

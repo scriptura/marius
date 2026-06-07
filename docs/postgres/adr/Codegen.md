@@ -24,7 +24,7 @@ Si une procédure `SECURITY DEFINER` est modifiée ou qu'une colonne est renomm�
 
 1. Le script de build détecte le changement.
 2. Le fichier `.rs` est mis à jour.
-3. Le compilateur Rust lève une erreur si le code de rendu (Maud) référence un champ obsolète.
+3. Le compilateur Rust lève une erreur si le code de rendu référence un champ obsolète.
    _Le bug meurt avant même d'exister en environnement de test._
 
 ---

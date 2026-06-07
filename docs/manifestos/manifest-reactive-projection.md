@@ -4,7 +4,7 @@
 
 ### 1. Vision Stratégique
 
-Le serveur web n'est plus un médiateur interactif, mais un **Système de Projection**. Il transforme de manière déterministe un flux de mutations de données (PostgreSQL) en artéfacts statiques ou semi-statiques (HTML via Maud), éliminant le besoin de caches intermédiaires (Redis, Memcached). L'artéfact généré _est_ l'état optimal de lecture.
+Le serveur web n'est plus un médiateur interactif, mais un **Système de Projection**. Il transforme de manière déterministe un flux de mutations de données (PostgreSQL) en artéfacts statiques ou semi-statiques (HTML brut via allocation minimale), éliminant le besoin de caches intermédiaires (Redis, Memcached). L'artéfact généré _est_ l'état optimal de lecture.
 
 ### 2. Résolution des Problèmes Classiques
 
@@ -18,7 +18,7 @@ L'architecture repose sur trois piliers inaltérables :
 
 1. **Source de Vérité (PostgreSQL) :** Centralise la logique métier et l'état. Seule la base de données qualifie une mutation.
 2. **Canal de Transport (LISTEN/NOTIFY) :** Protocole asynchrone natif poussant les signaux de mutation vers le système applicatif.
-3. **Transformateur Pur (Rust + Maud) :** Un pipeline AOT (Ahead-of-Time) sans état interne, traduisant le modèle de données (`struct`) en mémoire contiguë (DOM/HTML).
+3. **Transformateur Pur (Rust AOT) :** Un pipeline de génération de chaînes brutes sans état interne, traduisant le modèle de données (`struct`) en mémoire contiguë (HTML/Octets).
 
 ### 4. Limite Physiologique : L'Amplification d'Écriture
 
@@ -32,8 +32,9 @@ Pour protéger le transformateur, on interpose un système de regroupement (Batc
   Les signaux entrants sont stockés dans une structure contiguë avec contrainte d'unicité (une _table de présence_). Si un même ID est modifié 50 fois dans un court intervalle, il n'est conservé qu'une fois dans le layout mémoire.
 - **Le Dispatcher (Tick & Seuil) :**
   Le vidage du Collector (`flush`) est régi par deux invariants stricts pour lisser la charge (Smoothing) :
-  - _Volumétrique :_ Déclenchement si la capacité maximale est atteinte (ex: 100 entités).
-  - _Temporel :_ Déclenchement périodique forcé (ex: toutes les 500ms).
+- _Volumétrique :_ Déclenchement si la capacité maximale est atteinte (ex: 100 entités).
+- _Temporel :_ Déclenchement périodique forcé (ex: toutes les 500ms).
+
 - **Parallélisme de Rendu :**
   Lors du `flush`, la liste dédoublonnée d'IDs est distribuée sur l'ensemble des cœurs CPU disponibles (via un ordonnanceur comme _Rayon_ ou les workers _Tokio_). La projection de $N$ artéfacts s'exécute en simultané, garantissant une latence de mise à jour stable.
 
@@ -46,7 +47,7 @@ Le cycle de vie complet d'une donnée suit ce flux directionnel strict :
 3. **Capture :** Écouteur asynchrone Rust $\rightarrow$ Enregistrement dans la _table de présence_.
 4. **Dispatch :** Seuil ou Tick atteint $\rightarrow$ Extraction des IDs uniques.
 5. **Extraction Data :** Requêtes `SELECT` par lots (Batch SQL).
-6. **Projection AOT :** Exécution des macros `Maud` (Multi-thread).
+6. **Projection AOT :** Génération de texte brut (`push_str` / Multi-thread).
 7. **Persistance :** Remplacement atomique de l'artéfact (Fichier / RAM).
 
 ---

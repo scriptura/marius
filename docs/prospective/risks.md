@@ -11,7 +11,7 @@ Le déplacement de la complexité du runtime vers le build-time est un invariant
 
 ### Désynchronisation Inter-Forges
 
-- **Risque de pipeline :** Un changement de schéma DDL dans la base de données peut être correctement traité par la **DB-Forge**, mais rompre silencieusement les structures attendues par la **Bridge-Forge** (requêtes vectorielles) ou la **Fragment-Forge** (macros Maud).
+- **Risque de pipeline :** Un changement de schéma DDL dans la base de données peut être correctement traité par la **DB-Forge**, mais rompre silencieusement les structures attendues par la **Bridge-Forge** (requêtes vectorielles) ou la **Fragment-Forge** (macros.
 - **Point d'attention :** L'ordonnanceur de build (Nix / Cargo) doit imposer une séquentialité stricte et étanche : `DDL DB -> DB-Forge (Structs) -> Bridge-Forge (Queries) -> Fragment-Forge (Templates)`. Toute erreur de correspondance à un niveau intermédiaire doit invalider instantanément le build de manière déterministe.
 
 ---

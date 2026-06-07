@@ -291,7 +291,7 @@ impl ArenaStr {
 }
 ```
 
-La macro Maud itère nativement sur les deux segments. La branche conditionnelle est hautement
+Le pipeline de rendu (AOT / `push_str`) itère nativement sur les deux segments. La branche conditionnelle est hautement
 prédictible (quasi-systématiquement non prise). **Précision formelle :** la propriété garantie
 est la _haute prédictibilité_ de cette branche, non son absence. Toute reformulation "sans
 if/else" dans les documents dérivés est incorrecte.

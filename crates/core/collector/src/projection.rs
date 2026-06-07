@@ -23,7 +23,7 @@ pub trait Projection: Sized + Send + Sync + 'static {
         ids:  &[i64],
     ) -> impl std::future::Future<Output = Result<Vec<Self::Record>, sqlx::Error>> + Send;
 
-    /// Rendu HTML du record — généré par Fragment-Forge (macros Maud).
+    /// Rendu HTML du record — généré par Fragment-Forge (écriture directe AOT).
     /// Pure transformation mémoire→String : aucun appel système, aucun I/O.
     fn render(record: &Self::Record) -> String;
 

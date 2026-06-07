@@ -29,7 +29,6 @@ sqlx = { version = "0.8", features = [
     "chrono",
 ] }
 tokio = { version = "1", features = ["full"] }
-maud = { version = "0.26", features = ["axum"] }
 rayon = "1.10"
 axum = "0.7"
 chrono = { version = "0.4", features = ["serde"] }

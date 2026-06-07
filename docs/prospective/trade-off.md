@@ -91,7 +91,7 @@
 1. **Prototype DB‑Forge** : SQL → `#[repr(C)]` + tests de symétrie et documentation d’allocation.
 2. **Collector/Dispatcher PoC** : in‑memory dedupe + flush volumétrique et temporel + tests de rafale.
 3. **Integration SQLx** : batch SELECT optimisés et orchestration Tokio pour extraction.
-4. **Fragment‑Forge minimal** : génération Maud pour un cas d’usage simple et validation multi‑threaded.
+4. **Fragment‑Forge minimal** : génération de texte brut (AOT / `push_str`) pour un cas d’usage simple et validation multi‑threaded.
 5. **CI/Observability** : pipelines de génération, métriques allocation, traces end‑to‑end.
 
 ---

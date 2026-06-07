@@ -37,7 +37,7 @@ Marius supprime ces intermédiaires à travers trois partis pris :
 ### Le cycle de vie d'une donnée
 
 ```
-Mutation SQL  →  pg_notify  →  Collector Rust  →  Projection Maud  →  Artéfact HTML
+Mutation SQL  →  pg_notify  →  Collector Rust  →  Projection  →  Artéfact HTML
 ```
 
 1. **Mutation** : une transaction SQL est validée (`CALL content.publish_document(42)`).
@@ -46,8 +46,8 @@ Mutation SQL  →  pg_notify  →  Collector Rust  →  Projection Maud  →  Ar
    Plusieurs mutations rapides sur le même identifiant n'en produisent qu'une entrée.
 4. **Dispatch** : selon un seuil volumétrique (100 entités) ou temporel (500 ms),
    le lot est extrait et distribué sur tous les cœurs CPU disponibles.
-5. **Projection** : chaque entité est transformée en HTML par les macros Maud,
-   compilées en code machine à la construction du binaire.
+5. **Projection** :chaque entité est transformée en HTML par le pipeline AOT natif,
+   compilé en code machine à la construction du binaire.
 6. **Distribution** : le serveur Axum sert l'artéfact via `sendfile(2)`.
    Latence de lecture : ~100 µs, coût CPU quasi nul.
 
@@ -62,16 +62,16 @@ Le pipeline de rendu reçoit une liste dédoublonnée, pas une avalanche.
 
 ## 🧰 Stack technique
 
-| Rôle                   | Outil            | Raison                                                    |
-| ---------------------- | ---------------- | --------------------------------------------------------- |
-| Socle système          | **Rust**         | Zéro GC, sécurité mémoire à la compilation                |
-| Runtime async          | **Tokio**        | I/O non-bloquants, work-stealing multi-thread             |
-| Serveur HTTP           | **Axum + Tower** | Typage statique, middleware composable                    |
-| Projection HTML        | **Maud**         | Templates compilés en code machine (zéro parsing runtime) |
-| Protocole client       | **HTMX**         | Échange de fragments HTML, pas de JSON                    |
-| Driver base de données | **SQLx**         | Requêtes validées à la compilation                        |
-| Source de vérité       | **PostgreSQL**   | Logique métier, triggers, `LISTEN/NOTIFY`                 |
-| Pipeline assets        | **build.rs**     | CSS/JS minifiés et hashés avant compilation               |
+| Rôle                   | Outil                 | Raison                                                 |
+| ---------------------- | --------------------- | ------------------------------------------------------ |
+| Socle système          | **Rust**              | Zéro GC, sécurité mémoire à la compilation             |
+| Runtime async          | **Tokio**             | I/O non-bloquants, work-stealing multi-thread          |
+| Serveur HTTP           | **Axum + Tower**      | Typage statique, middleware composable                 |
+| Projection HTML        | **Génération Native** | Code machine natif (`push_str`) (zéro parsing runtime) |
+| Protocole client       | **HTMX**              | Échange de fragments HTML, pas de JSON                 |
+| Driver base de données | **SQLx**              | Requêtes validées à la compilation                     |
+| Source de vérité       | **PostgreSQL**        | Logique métier, triggers, `LISTEN/NOTIFY`              |
+| Pipeline assets        | **build.rs**          | CSS/JS minifiés et hashés avant compilation            |
 
 ---
 
@@ -98,7 +98,7 @@ marius/
 │   ├── main.rs
 │   ├── server/      # Routes Axum + middleware Tower
 │   ├── collector/   # LISTEN/NOTIFY → Table de présence → Dispatcher
-│   ├── projection/  # Maud : struct → HTML
+│   ├── projection/  # Génération AOT : struct → HTML (push_str)
 │   └── data/        # Requêtes SQLx + structs mappés
 │
 ├── assets/          # Sources CSS et JS (traités par build.rs)

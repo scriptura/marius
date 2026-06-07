@@ -15,7 +15,7 @@ Rejet de Morphing/Idiomorph au profit de **Draft vs. Committed** : une gestion e
 L'interface utilisateur est traitée comme un tampon de mémoire vive (Draft) distinct de la source de vérité (Committed).
 
 1.  **État : Pristine (Initial)**
-    - L'élément affiche la donnée projetée par le pipeline Rust/Maud.
+    - L'élément affiche la donnée brute projetée statiquement par le pipeline de code généré via `.marius`.
 2.  **État : Dirty (Focus/Input)**
     - Action : `onFocus` ou `onInput`.
     - Mutation : L'élément reçoit l'attribut `data-state="dirty"`.
@@ -59,18 +59,18 @@ Le délai de vidage du Collector (_table de présence_) n'est plus une constante
 
 ### Analyse CPU/Mémoire
 
-- **Allocation Minimale** : Le passage d'un tick court à un tick long permet de saturer les vecteurs SIMD lors du rendu Maud en traitant plus de données par itération.
-- **Backpressure** : Le système protège activement PostgreSQL contre une saturation des connexions (I/O) en forçant un regroupement des requêtes `SELECT` de projection.
+- **Optimisation du Rendu** : Le regroupement des entités lors d'un tick long permet de saturer les registres vectoriels et d'exécuter les fonctions `push_str` générées par `.marius` en flux continu, sans réallocation dynamique ni fragmentation mémoire.
+- **Backpressure** : Le moteur protège activement le pool de connexions PostgreSQL en limitant le nombre de requêtes `SELECT` concurrentes nécessaires aux projections massives.
 
 ---
 
-## 3. Synthèse des Impacts
+## 3. Synthèse des Impacts Structurels
 
 | Composant       | Stratégie               | Bénéfice Architectural                              |
 | :-------------- | :---------------------- | :-------------------------------------------------- |
 | **Frontend**    | Vanilla JS / Data-State | Suppression du coût de morphing, focus préservé.    |
 | **Worker Rust** | PID Controller (Tick)   | Protection contre l'amplification d'écriture (DOD). |
 | **PostgreSQL**  | Listen/Notify           | Découplage total Write Path / Read Path.            |
-| **Rendu**       | AOT (Maud)              | CPU libéré pour la gestion des flux réseaux.        |
+| **Rendu**       | AOT (`.marius`)         | CPU libéré pour la gestion des flux réseaux.        |
 
 **Conclusion :** Ce design transforme le serveur en un moteur de flux asynchrone où la latence est un paramètre géré, et non une contrainte subie. L'utilisateur bénéficie d'une interface instantanée (via le mode Draft) tandis que l'infrastructure reste stable et froide (via le Dispatcher adaptatif).
