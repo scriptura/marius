@@ -2,8 +2,8 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use crate::generator::generate_aot_snippet;       // Phase 2.2
-use crate::types::{FlatPageToken, TemplateMetrics};
+use crate::{FlatPageToken, TemplateMetrics};
+use crate::generate_aot_snippet;
 
 // ── Erreur ───────────────────────────────────────────────────────────────────
 
