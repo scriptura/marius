@@ -135,6 +135,14 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             from_expr:  "/* PHASE2_ONLY */",
             is_fixed: false, size_bytes: 8, alignment: 8,
         },
+
+        "geometry" => TypeMapping {
+            row_type:   "Vec<u8>", // PostGIS renvoie du WKB (Well-Known Binary)
+            store_type: "/* VARLENA — exclu du StorageRow repr(C) */",
+            from_expr:  "/* VARLENA — non transféré dans StorageRow */",
+            is_fixed: false, size_bytes: 0, alignment: 0,
+        },
+        
         other => {
             println!("cargo:warning=DB-Forge : type SQL inconnu '{other}' — exclu");
             TypeMapping {

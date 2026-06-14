@@ -96,3 +96,39 @@ BEGIN
     END IF;
 END;
 $$;
+
+-- ==============================================================================
+-- REGISTRE DES JOINTURES VARLENA (Pivot 1 — Phase 1)
+-- ==============================================================================
+-- Chaque ligne déclare une source de colonnes varlena pour un composant.
+--
+-- join_slot_idx INT2 :
+--   Ordre déterministe des JOIN en mémoire (INV-8). Dicte la position des
+--   champs varlena dans {Name}VarlenOwned. Toute heuristique pg_constraint
+--   est exclue — l'ordre est déclaratif, pas inféré.
+--
+-- Clé UNIQUE (component_id, ref_schema, ref_table) :
+--   Un composant ne peut joindre la même table source qu'une seule fois.
+--   Plusieurs tables sources sont permises via join_slot_idx distincts.
+--
+-- ON DELETE CASCADE :
+--   La suppression d'un composant dans containment_intent retire ses JOIN
+--   varlena sans intervention manuelle. Cohérent avec le workflow migration :
+--   DROP composant → registre auto-nettoyé.
+-- ==============================================================================
+
+CREATE TABLE IF NOT EXISTS meta.component_varlena_join (
+    component_id   TEXT  NOT NULL
+        REFERENCES meta.containment_intent(component_id) ON DELETE CASCADE,
+    join_slot_idx  INT2  NOT NULL,
+    ref_schema     TEXT  NOT NULL,
+    ref_table      TEXT  NOT NULL,
+    fk_column      TEXT  NOT NULL,
+
+    PRIMARY KEY (component_id, join_slot_idx),
+    UNIQUE      (component_id, ref_schema, ref_table),
+
+    CONSTRAINT varlena_join_slot_positive CHECK (join_slot_idx >= 0),
+    CONSTRAINT varlena_ref_schema_format  CHECK (ref_schema ~ '^[a-z_]+$'),
+    CONSTRAINT varlena_ref_table_format   CHECK (ref_table  ~ '^[a-z_0-9]+$')
+);

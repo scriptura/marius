@@ -29,11 +29,11 @@ La fragmentation des données augmente mécaniquement la densité des composants
 
 ## Prérequis
 
-| Composant  | Version minimale                   |
-| ---------- | ---------------------------------- |
-| PostgreSQL | **18** (async I/O, EXPLAIN MEMORY) |
-| PostGIS    | 3.x                                |
-| pgTAP      | Compatible PG 18 (tests uniquement)|
+| Composant  | Version minimale                    |
+| ---------- | ----------------------------------- |
+| PostgreSQL | **18** (async I/O, EXPLAIN MEMORY)  |
+| PostGIS    | 3.x                                 |
+| pgTAP      | Compatible PG 18 (tests uniquement) |
 
 ### Extensions PostgreSQL requises
 
@@ -60,7 +60,7 @@ ORDER  BY name;
 ### 1. Déploiement du schéma (DDL)
 
 ```bash
-psql -U postgres -f master_schema_ddl.pgsql
+psql -U postgres -f master_init.sql
 ```
 
 Le script commence par `DROP DATABASE IF EXISTS marius` — il repart d'une ardoise vierge. Sur une installation déjà existante, vérifier que la base peut être supprimée avant d'exécuter.
@@ -182,7 +182,7 @@ Voir `documentation/meta_tooling_guide.md` pour le guide complet des trois outil
 
 ```bash
 # Déploiement
-psql -U postgres -f master_schema_ddl.pgsql
+psql -U postgres -f master_init.sql
 psql -U postgres -d marius -f master_schema_dml.pgsql
 
 # Meta-Registry
@@ -228,13 +228,13 @@ variable →  VARCHAR, TEXT, ltree, geometry
 
 ### Tailles de tuples padded — valeurs de référence
 
-| Composant                    | Tuple padded | ff   | tpp approx. | Hot path                          |
-| ---------------------------- | ------------ | ---- | ----------- | --------------------------------- |
-| `content.tag_hierarchy`      | 40B          | 100% | ~185        | INSERT-only (Closure Table)       |
-| `commerce.transaction_item`  | 48B          | 100% | ~157        | INSERT-only (trigger immuabilité) |
-| `commerce.product_core`      | 48B          | 80%  | ~125        | HOT update sur `stock`            |
-| `content.core`               | 72B          | 100% | ~107        | Aucun HOT (toutes colonnes indexées) |
-| `identity.auth`              | 160B         | 70%  | ~34         | HOT update sur `last_login_at`    |
+| Composant                   | Tuple padded | ff   | tpp approx. | Hot path                             |
+| --------------------------- | ------------ | ---- | ----------- | ------------------------------------ |
+| `content.tag_hierarchy`     | 40B          | 100% | ~185        | INSERT-only (Closure Table)          |
+| `commerce.transaction_item` | 48B          | 100% | ~157        | INSERT-only (trigger immuabilité)    |
+| `commerce.product_core`     | 48B          | 80%  | ~125        | HOT update sur `stock`               |
+| `content.core`              | 72B          | 100% | ~107        | Aucun HOT (toutes colonnes indexées) |
+| `identity.auth`             | 160B         | 70%  | ~34         | HOT update sur `last_login_at`       |
 
 Le tuple `identity.auth` (160B) inclut `password_hash` inline (~101B) en `STORAGE MAIN` : argon2id est pseudo-aléatoire, la compression PGLZ n'apporte rien. `content.core` n'a pas de fillfactor : tous ses chemins d'UPDATE touchent des colonnes indexées (`published_at`, `modified_at`), le HOT n'est jamais possible.
 
@@ -282,24 +282,24 @@ Toujours utiliser `v_article_list` pour les listings. Ne projeter `articleBody` 
 
 Procédures principales :
 
-| Procédure                                        | Composants créés                                  |
-| ------------------------------------------------ | ------------------------------------------------- |
-| `identity.create_account(...)`                   | `entity` + `auth` + `account_core`                |
-| `identity.create_person(...)`                    | `entity` + `person_identity`                      |
-| `identity.anonymize_person(entity_id)`           | Purge RGPD des 10 composants nominatifs (ADR-017) |
-| `identity.create_group(name)`                    | `group`                                           |
-| `identity.add_account_to_group(...)`             | `group_to_account`                                |
-| `geo.create_place(...)`                          | `place_core` + `postal_address` optionnel         |
-| `content.create_document(...)`                   | `document` + `core` + `identity` + `revision`     |
-| `content.publish_document(document_id)`          | UPDATE `core.status`                              |
-| `content.save_revision(document_id, author_id)`  | Snapshot éditorial complet (ADR-024)              |
-| `content.create_comment(...)`                    | `comment` avec chemin ltree atomique (ADR-007)    |
-| `content.create_tag(...)`                        | `tag` + entrées `tag_hierarchy` (Closure Table)   |
-| `content.create_media(...)`                      | `media_core` + `media_content` optionnel          |
-| `content.add_media_to_document(...)`             | `content_to_media`                                |
-| `commerce.create_product(...)`                   | `product_core` + `product_identity`               |
-| `commerce.create_transaction(...)`               | `transaction_core` + 3 composants ECS             |
-| `commerce.create_transaction_item(...)`          | `transaction_item` + décrémentation `stock`       |
+| Procédure                                       | Composants créés                                  |
+| ----------------------------------------------- | ------------------------------------------------- |
+| `identity.create_account(...)`                  | `entity` + `auth` + `account_core`                |
+| `identity.create_person(...)`                   | `entity` + `person_identity`                      |
+| `identity.anonymize_person(entity_id)`          | Purge RGPD des 10 composants nominatifs (ADR-017) |
+| `identity.create_group(name)`                   | `group`                                           |
+| `identity.add_account_to_group(...)`            | `group_to_account`                                |
+| `geo.create_place(...)`                         | `place_core` + `postal_address` optionnel         |
+| `content.create_document(...)`                  | `document` + `core` + `identity` + `revision`     |
+| `content.publish_document(document_id)`         | UPDATE `core.status`                              |
+| `content.save_revision(document_id, author_id)` | Snapshot éditorial complet (ADR-024)              |
+| `content.create_comment(...)`                   | `comment` avec chemin ltree atomique (ADR-007)    |
+| `content.create_tag(...)`                       | `tag` + entrées `tag_hierarchy` (Closure Table)   |
+| `content.create_media(...)`                     | `media_core` + `media_content` optionnel          |
+| `content.add_media_to_document(...)`            | `content_to_media`                                |
+| `commerce.create_product(...)`                  | `product_core` + `product_identity`               |
+| `commerce.create_transaction(...)`              | `transaction_core` + 3 composants ECS             |
+| `commerce.create_transaction_item(...)`         | `transaction_item` + décrémentation `stock`       |
 
 ---
 
@@ -313,19 +313,19 @@ psql -U postgres -d marius -f tests/02_identity_logic.sql
 # ... etc
 ```
 
-| Fichier                       | Périmètre                                                              |
-| ----------------------------- | ---------------------------------------------------------------------- |
-| `01_schema_and_security.sql`  | Types physiques, BRIN, RBAC, SECURITY DEFINER, triggers immuabilité    |
-| `02_identity_logic.sql`       | `create_account`, slugs, bitmask, connexions, garde escalade de rôle   |
-| `03_content_logic.sql`        | Documents, snapshot complet (ADR-024), ltree, commentaires             |
-| `04_commerce_logic.sql`       | Stock, snapshot de prix, sur-vente, agrégats, gardes ADR-030           |
-| `05_tag_hierarchy.sql`        | Closure Table, profondeur max, sous-arbre, breadcrumb                  |
-| `06_security_audit.sql`       | Shadow write detection, qualification des objets, bypass admin         |
-| `07_hot_audit.sql`            | Immuabilité `created_at`, matrice HOT, corrélation BRIN                |
-| `08_rgpd_audit.sql`           | Gardes bitwise, anonymisation complète, jointure orpheline, finance     |
-| `09_dod_hot_collision.sql`    | Collision layout/HOT, fillfactor, index `core_author`                  |
-| `10_mutation_interface.sql`   | Nouvelles procédures, trigger `entity_id` immuable, gardes bitwise     |
-| `11_meta_audit.sql`           | ECSM fail-safe : zéro dérive DOD/sécurité/interface                    |
+| Fichier                      | Périmètre                                                            |
+| ---------------------------- | -------------------------------------------------------------------- |
+| `01_schema_and_security.sql` | Types physiques, BRIN, RBAC, SECURITY DEFINER, triggers immuabilité  |
+| `02_identity_logic.sql`      | `create_account`, slugs, bitmask, connexions, garde escalade de rôle |
+| `03_content_logic.sql`       | Documents, snapshot complet (ADR-024), ltree, commentaires           |
+| `04_commerce_logic.sql`      | Stock, snapshot de prix, sur-vente, agrégats, gardes ADR-030         |
+| `05_tag_hierarchy.sql`       | Closure Table, profondeur max, sous-arbre, breadcrumb                |
+| `06_security_audit.sql`      | Shadow write detection, qualification des objets, bypass admin       |
+| `07_hot_audit.sql`           | Immuabilité `created_at`, matrice HOT, corrélation BRIN              |
+| `08_rgpd_audit.sql`          | Gardes bitwise, anonymisation complète, jointure orpheline, finance  |
+| `09_dod_hot_collision.sql`   | Collision layout/HOT, fillfactor, index `core_author`                |
+| `10_mutation_interface.sql`  | Nouvelles procédures, trigger `entity_id` immuable, gardes bitwise   |
+| `11_meta_audit.sql`          | ECSM fail-safe : zéro dérive DOD/sécurité/interface                  |
 
 ---
 

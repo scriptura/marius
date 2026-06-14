@@ -27,7 +27,8 @@
 use std::path::PathBuf;
 
 use marius_db_forge::{
-    ComponentConfig, PrimaryKey, VarlenJoin,
+    PrimaryKey,
+    fetch_component_list,
     fetch_columns, fetch_max_id, fetch_pk_column, fetch_varlena_cols,
     write_collector, write_from_impl, write_projection_stub,
     write_row_struct, write_section_header, write_store_struct,
@@ -40,6 +41,8 @@ const GENERATED_HEADER: &str = "// GÉNÉRÉ PAR LA FORGE MARIUS — NE PAS MODI
 // Régénérer via : cargo build\n\n\
 #[allow(unused_imports)]\n\
 use crate::projection::Projection as _;\n\n\
+#[allow(unused_imports)]\n\
+use chrono::Datelike as _;\n\n\
 /// Échappe les caractères HTML dangereux dans `s` et pousse le résultat dans `buf`.\n\
 /// Zéro allocation : opère directement sur buf (déjà réservé par render()).\n\
 #[inline(always)]\n\
@@ -66,33 +69,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("DB-Forge : DATABASE_URL non définie.");
     let pool = sqlx::PgPool::connect(&database_url).await?;
 
-    // ── Phase 0 : liste hardcodée ─────────────────────────────────────────────
-    // Phase 1 : remplacer par :
-    //   let components = marius_db_forge::fetch_component_list(&pool).await?;
-    //
-    // Nota : varlena_join spécifie la table jointe portant les colonnes texte.
-    // Phase 1 : lu depuis meta.component_varlena_join (join_slot_idx détermine
-    // l'ordre — Pivot 1 : table dédiée, pas d'heuristique FK).
-    let components: Vec<ComponentConfig> = vec![
-        ComponentConfig {
-            schema:            "content".to_string(),
-            table:             "core".to_string(),
-            intent_density:    0,   // Phase 2 : lire depuis meta.containment_intent
-            rls_guard_bitmask: None,
-            varlena_join: Some(VarlenJoin {
-                schema: "content".to_string(),
-                table:  "identity".to_string(),
-                fk_col: "document_id".to_string(),
-            }),
-        },
-        ComponentConfig {
-            schema:            "commerce".to_string(),
-            table:             "product_core".to_string(),
-            intent_density:    0,
-            rls_guard_bitmask: None,
-            varlena_join:      None,
-        },
-    ];
+    // ── Phase 1 : registry driver ─────────────────────────────────────────────
+    // Toute erreur (DATABASE_URL inaccessible, schéma absent, component_id malformé)
+    // remonte via ? → Box<dyn Error> → cargo:error. Aucun panic.
+    let components = fetch_component_list(&pool).await?;
 
     let out_dir  = PathBuf::from(std::env::var("OUT_DIR")?);
     let out_path = out_dir.join("generated_schema.rs");

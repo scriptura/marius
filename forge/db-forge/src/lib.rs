@@ -33,8 +33,8 @@ pub use naming::{to_pascal, to_screaming};
 // ── Introspection pg_catalog ──────────────────────────────────────────────────
 pub use introspect::{fetch_columns, fetch_max_id, fetch_pk_column, fetch_varlena_cols};
 
-// ── Registre (Phase 0 : types ; Phase 1 : + fetch_component_list) ────────────
-pub use registry::{ComponentConfig, VarlenJoin};
+// ── Registre (Phase 1 : + fetch_component_list) ───────────────────────────────
+pub use crate::registry::{ComponentConfig, VarlenJoin, fetch_component_list};
 
 // ── Validation layout (Phase 2) ───────────────────────────────────────────────
 pub use validate::validate_layout;

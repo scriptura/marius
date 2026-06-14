@@ -22,7 +22,7 @@
 BEGIN;
 
 -- Nettoyage du registre pour éviter les doublons lors des ré-exécutions
-TRUNCATE meta.containment_intent;
+TRUNCATE meta.component_varlena_join, meta.containment_intent;
 
 -- ==============================================================================
 -- INSERTION DES INVARIANTS PAR DOMAINE
@@ -261,6 +261,17 @@ VALUES
     false,
     NULL
 );
+
+-- ── JOINTURES VARLENA ─────────────────────────────────────────────────────────
+-- Phase 1 : join_slot_idx = 0 (slot unique par composant).
+-- Phase 2+ : slots supplémentaires ajoutés ici pour les multi-JOIN.
+
+INSERT INTO meta.component_varlena_join
+    (component_id, join_slot_idx, ref_schema, ref_table, fk_column)
+VALUES
+    ('content.core', 0, 'content', 'identity', 'document_id');
+
+-- ── COMMIT ────────────────────────────────────────────────────────────────────
 
 COMMIT;
 

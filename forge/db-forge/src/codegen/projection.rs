@@ -243,7 +243,20 @@ pub fn write_projection_stub(
     // sans connaissance du nom du champ PK au niveau du trait générique.
     writeln!(out, "    #[inline(always)]").unwrap();
     writeln!(out, "    fn record_id(record: &Self::Record) -> i64 {{").unwrap();
-    writeln!(out, "        record.{} as i64", pk_field.name).unwrap();
+    // On retrouve la colonne d'origine dans le slice pour lire son sql_type
+    let pk_column = columns
+        .iter()
+        .find(|c| c.name == pk_field.name)
+        .expect("DB-Forge : colonne PK absente du slice columns — incohérence fetch_pk_column/fetch_columns");
+    let pk_mapping = crate::mapping::map_type(&pk_column.sql_type);
+
+    // Résolution du cast selon la taille native (zéro overhead si déjà i64)
+    let pk_expr = if pk_mapping.store_type == "i64" {
+        format!("record.{}", pk_field.name)
+    } else {
+        format!("record.{} as i64", pk_field.name)
+    };
+    writeln!(out, "        {}", pk_expr).unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
