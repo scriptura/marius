@@ -19,8 +19,14 @@ use tower_http::services::ServeDir;
 use marius_collector::InsertResult;
 use marius_render::{Dispatcher, DispatcherConfig};
 use marius_schema::{
-    CONTENT_CORE_COLLECTOR,          MAX_CONTENT_CORE_ID,          CONTENT_CORE_WORDS,
-    COMMERCE_PRODUCT_CORE_COLLECTOR, MAX_COMMERCE_PRODUCT_CORE_ID, COMMERCE_PRODUCT_CORE_WORDS,
+    CONTENT_CORE_COLLECTOR,
+    CONTENT_CORE_TOTAL_CAP,
+    MAX_CONTENT_CORE_ID,
+    CONTENT_CORE_WORDS,
+    COMMERCE_PRODUCT_CORE_COLLECTOR,
+    COMMERCE_PRODUCT_CORE_TOTAL_CAP,
+    MAX_COMMERCE_PRODUCT_CORE_ID,
+    COMMERCE_PRODUCT_CORE_WORDS,
     ContentCoreProjection,
     CommerceProductCoreProjection,
 };
@@ -54,6 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         notify_content.clone(),
         pool.clone(),
         DispatcherConfig::default(),
+        CONTENT_CORE_TOTAL_CAP,
     ).run());
 
     tokio::spawn(Dispatcher::<
@@ -65,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         notify_product.clone(),
         pool.clone(),
         DispatcherConfig::default(),
+        COMMERCE_PRODUCT_CORE_TOTAL_CAP,
     ).run());
 
     println!("[marius] dispatchers démarrés");

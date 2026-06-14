@@ -1,4 +1,10 @@
-// marius-render — Shell : I/O, rendu AOT, Dispatcher.
+// =============================================================================
+// crates/shell/render/src/batch_renderer.rs
+// =============================================================================
 
 pub mod dispatcher;
-pub use dispatcher::{Dispatcher, DispatcherConfig, render_batch, render_batch_pure};
+pub mod batch_renderer;
+
+// Ré-export pour la façade
+pub use dispatcher::{Dispatcher, DispatcherConfig};
+pub use batch_renderer::{BatchRenderer, PackfileEntry};

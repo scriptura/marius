@@ -16,8 +16,12 @@
 //                     - les tests d'intégration (appel direct sans Dispatcher),
 //                     - la lisibilité (hot path isolé du code d'orchestration).
 
+use std::fs::OpenOptions;
+use std::io::BufWriter;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use crate::BatchRenderer;
 
 use rayon::prelude::*;
 use tokio::sync::Notify;
@@ -57,6 +61,7 @@ pub struct Dispatcher<P: Projection, const MAX: usize, const WORDS: usize> {
     notify:    Arc<Notify>,
     pool:      sqlx::PgPool,
     config:    DispatcherConfig,
+    total_cap: usize, // Ajout du contrat de capacité pour le BatchRenderer
     _phantom:  std::marker::PhantomData<P>,
 }
 
@@ -66,8 +71,9 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
         notify:    Arc<Notify>,
         pool:      sqlx::PgPool,
         config:    DispatcherConfig,
+        total_cap: usize, // Requis à l'instanciation
     ) -> Self {
-        Self { collector, notify, pool, config, _phantom: std::marker::PhantomData }
+        Self { collector, notify, pool, config, total_cap, _phantom: std::marker::PhantomData }
     }
 
     pub async fn run(self) {
@@ -89,14 +95,12 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
                 Err(e) => { eprintln!("[dispatcher] fetch_batch: {e}"); continue; }
             };
 
-            // Hot path de rendu : délégué à render_batch() (fonction libre synchrone).
-            // Séparation async/sync : run() orchestre les I/O, render_batch() sature les CPU.
-            render_batch::<P>(records);
+            // Exécution du batch via le nouveau moteur Packfile (synchrone)
+            render_batch::<P>(records, self.total_cap);
 
             let new_tick = self.adapt_tick(ids.len(), t0.elapsed());
             if new_tick != current_tick {
                 current_tick = new_tick;
-                // interval() Tokio ne supporte pas le changement de période à chaud.
                 ticker = interval(current_tick);
             }
         }
@@ -115,50 +119,34 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
 }
 
 // =============================================================================
-// Hot path : rendu parallèle (fonction libre, synchrone, générique)
+// Hot path : rendu packfile (moteur Phase 1)
 // =============================================================================
 
-/// Projette un batch d'enregistrements en fragments HTML et les écrit sur disque.
-///
-/// ─── Contrat ─────────────────────────────────────────────────────────────────
-///
-///   - Entrée  : Vec<(P::Record, P::VarlenOwned)> produit par fetch_batch().
-///   - Sortie  : artefacts écrits dans le système de fichiers (chemin via artifact_path).
-///   - Aucune valeur de retour : les erreurs d'écriture sont loguées, non propagées.
-///     Le Dispatcher est un pipeline best-effort : une écriture ratée sera
-///     réessayée au prochain tick si l'ID reste dans le Collector.
-///
-/// ─── Séparation rendu / I/O ──────────────────────────────────────────────────
-///
-///   Cette fonction combine rendu (render_batch_pure) et écriture disque.
-///   Pour benchmarker le rendu seul sans I/O, utiliser render_batch_pure.
-///   Les benchmarks Divan utilisent render_batch_pure pour mesurer le hot path
-///   CPU sans le bruit des syscalls write(2).
-///
-/// ─── Invariant d'allocation O(T) (ADR-003) ───────────────────────────────────
-///
-///   map_with(String::new()) distribue un buffer par thread Rayon au démarrage.
-///   buf.clear() préserve la capacité entre itérations du même thread.
-///   Nombre d'allocations = O(T), T = nombre de threads Rayon, indépendant de N.
-pub fn render_batch<P: Projection>(batch: Vec<(P::Record, P::VarlenOwned)>) {
-    batch
-        .into_par_iter()
-        .map_with(
-            String::new(),
-            |buf, (record, varlena)| {
-                buf.clear();
-                P::render(&record, &varlena, buf);
+pub fn render_batch<P: Projection>(batch: Vec<(P::Record, P::VarlenOwned)>, total_cap: usize) {
+    if batch.is_empty() { return; }
 
-                let path = P::artifact_path(&record);
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Err(e) = std::fs::write(&path, buf.as_bytes()) {
-                    eprintln!("[dispatcher] write {:?}: {e}", path);
-                }
-            },
-        )
-        .for_each(|_| {});
+    let path = P::packfile_path();
+    
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // O(1) Syscall : Ouverture unique du packfile en mode Append
+    let file = match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => { eprintln!("[dispatcher] write {:?}: {e}", path); return; }
+    };
+    let mut writer = BufWriter::new(file);
+
+    // Initialisation du buffer zéro-allocation
+    let mut renderer = BatchRenderer::<P>::new(total_cap, batch.len());
+
+    if let Err(e) = renderer.render_batch(&batch, &mut writer, 0) {
+        eprintln!("[dispatcher] packfile append error: {e}");
+    }
+    
+    // Note Phase 2 : l'index physique (renderer.into_index()) est calculé ici.
+    // Nous gérerons sa persistance (mmap/fichier d'index) lors de la prochaine étape.
 }
 
 /// Rendu parallèle pur — sans I/O disque.
@@ -207,7 +195,7 @@ mod tests {
         CONTENT_CORE_TOTAL_CAP,
     };
     // Trait requis en scope pour résoudre ContentCoreProjection::render()
-    // et ContentCoreProjection::artifact_path() sous forme qualifiée.
+    // et ContentCoreProjection::packfile_path() sous forme qualifiée.
     // use as _ ne suffit pas pour les appels Type::method() — seul
     // le trait nommé permet la résolution statique de la méthode de trait.
     #[allow(unused_imports)]

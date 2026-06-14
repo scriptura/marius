@@ -91,7 +91,15 @@ pub trait Projection: Sized + Send + Sync + 'static {
     /// Le Dispatcher passe un buffer réutilisable entre les records du même batch.
     fn render(record: &Self::Record, varlena: &Self::VarlenOwned, buf: &mut String);
 
-    /// Chemin déterministe de l'artefact produit.
-    /// Racine via MARIUS_ARTIFACTS_DIR (défaut : ./artifacts).
-    fn artifact_path(record: &Self::Record) -> PathBuf;
+    /// Identifiant entier extrait du Record — requis par BatchRenderer pour
+    /// construire l'index physique (PackfileEntry.id) sans accès au champ PK
+    /// via réflexion. Généré par DB-Forge comme accesseur direct du champ PK.
+    fn record_id(record: &Self::Record) -> i64;
+
+    /// Chemin du packfile de la table (un fichier par table, pas par record).
+    ///
+    /// Remplace artifact_path(record) : O(1) syscalls par batch au lieu de O(N).
+    /// Format : {root}/{schema}_{table}_pack.bin
+    /// L'index physique (Vec<PackfileEntry>) associe chaque ID à son offset/len.
+    fn packfile_path() -> PathBuf;
 }

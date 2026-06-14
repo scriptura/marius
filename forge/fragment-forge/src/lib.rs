@@ -386,11 +386,11 @@ pub fn generate_render(
     table:    &str,
     _name:    &str,
     fields:   &[FieldSpec],
-    pk_field: &str,
+    pk_field: &FieldSpec,
     varlena:  &[VarlenField],
 ) -> (usize, usize, String) {
     let sc      = static_capacity(schema, table, fields, varlena);
-    let dc      = dynamic_capacity(fields, pk_field, varlena);
+    let dc      = dynamic_capacity(fields, &pk_field.name, varlena);
     let css     = format!("{schema}-{table}");
     let mut c   = String::new();
 
@@ -429,7 +429,8 @@ pub fn generate_render(
     c.push_str(&format!(
         "buf.push_str(\"<article class=\\\"{css}\\\" data-id=\\\"\");\n\
          ::std::fmt::Write::write_fmt(buf, format_args!(\"{{}}\", record.{pk_field})).ok();\n\
-         buf.push_str(\"\\\"><dl>\");\n"
+         buf.push_str(\"\\\"><dl>\");\n",
+        pk_field = pk_field.name
     ));
 
     // ─── Champs fixed-length ─────────────────────────────────────────────────
