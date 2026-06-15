@@ -29,4 +29,7 @@ pub trait Projection: Sized + Send + Sync + 'static {
 
     /// Chemin de l'artefact produit (fichier statique ou clé RAM).
     fn artifact_path(record: &Self::Record) -> PathBuf;
+
+    /// Retourne le chemin où stocker les données générées
+    fn store_path() -> ::std::path::PathBuf;
 }

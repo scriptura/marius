@@ -10,6 +10,7 @@ keywords = ["ecs", "dod", "codegen", "postgresql", "marius"]
 categories = ["database", "data-structures"]
 
 [dependencies]
+bytemuck = { version = "1.14", features = ["derive"] }
 marius-collector = { path = "../../core/collector", version = "0.3.0" }
 marius-projection = { path = "../../core/projection", version = "0.3.0" }
 sqlx = { workspace = true }

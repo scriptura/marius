@@ -57,6 +57,18 @@ fn marius_html_escape(s: &str, buf: &mut String) {\n\
             _    => buf.push(ch),\n\
         }\n\
     }\n\
+}\n\n\
+/// Pousse un VarlenSlot dans la TOC et concatène la valeur dans le heap (Phase 1.4).\n\
+#[inline(always)]\n\
+fn push_varlen_slot(field: &Option<String>, heap: &mut Vec<u8>, toc: &mut Vec<crate::projection::VarlenSlot>) {\n\
+    match field {\n\
+        None    => toc.push(crate::projection::VarlenSlot { offset: u32::MAX, len: 0 }),\n\
+        Some(s) => {\n\
+            let offset = heap.len() as u32;\n\
+            heap.extend_from_slice(s.as_bytes());\n\
+            toc.push(crate::projection::VarlenSlot { offset, len: s.len() as u32 });\n\
+        }\n\
+    }\n\
 }\n\n";
 
 #[tokio::main]

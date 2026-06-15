@@ -185,11 +185,18 @@ pub fn write_projection_stub(
 
             // StorageRow depuis les bindings fixed — logique From<Row> inline.
             writeln!(out, "            let storage = {name}StorageRow {{").unwrap();
+
+            let mut layout_bytes = 0usize;
+            let mut max_align    = 1usize;
+
             for col in columns {
                 let m = map_type(&col.sql_type);
                 if !m.is_fixed { continue; }
+                // Accumulation binaire pour le calcul du padding
+                layout_bytes += m.size_bytes;
+                max_align     = max_align.max(m.alignment);
 
-                let expr = if col.is_notnull {
+                let mut expr = if col.is_notnull {
                     match m.row_type {
                         "chrono::DateTime<chrono::Utc>" => {
                             format!("{}.timestamp_micros()", col.name)
@@ -206,12 +213,21 @@ pub fn write_projection_stub(
                     m.from_expr.replace("{field}", &col.name)
                 };
 
-                if expr == col.name {
-                    writeln!(out, "                {},", col.name).unwrap();
-                } else {
-                    writeln!(out, "                {}: {},", col.name, expr).unwrap();
+                // Cast explicite vers le type compact de destination (u8)
+                if m.row_type == "bool" {
+                    expr = format!("({expr}) as u8");
                 }
+                
+                writeln!(out, "                {}: {},", col.name, expr).unwrap();
             }
+
+            // Injection du tail padding structurel pour satisfaire l'alignement et bytemuck
+            let padded_size = layout_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
+            let tail_pad = padded_size - layout_bytes;
+            if tail_pad > 0 {
+                writeln!(out, "                _pad: [0u8; {tail_pad}],").unwrap();
+            }
+
             writeln!(out, "            }};").unwrap();
 
             writeln!(out, "            (storage, owned)").unwrap();
@@ -260,7 +276,7 @@ pub fn write_projection_stub(
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // ── packfile_path() ───────────────────────────────────────────────────────
+    // ── packfile_path() (HTML Fragments) ──────────────────────────────────────
     // Chemin statique par table — aucun paramètre record.
     // Un seul open() par batch (INV O(1) syscalls).
     writeln!(out, "    fn packfile_path() -> ::std::path::PathBuf {{").unwrap();
@@ -268,6 +284,16 @@ pub fn write_projection_stub(
     writeln!(out, "            .unwrap_or_else(|_| \"artifacts\".to_string());").unwrap();
     writeln!(out,
         "        ::std::path::PathBuf::from(format!(\"{{root}}/{schema}_{table}_pack.bin\"))"
+    ).unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // ── store_path() (Phase 1.4 : binary dump) ────────────────────────────────
+    writeln!(out, "    fn store_path() -> ::std::path::PathBuf {{").unwrap();
+    writeln!(out, "        let root = std::env::var(\"MARIUS_ARTIFACTS_DIR\")").unwrap();
+    writeln!(out, "            .unwrap_or_else(|_| \"artifacts\".to_string());").unwrap();
+    writeln!(out,
+        "        ::std::path::PathBuf::from(format!(\"{{root}}/{schema}_{table}_store.bin\"))"
     ).unwrap();
     writeln!(out, "    }}").unwrap();
 

@@ -96,10 +96,26 @@ pub trait Projection: Sized + Send + Sync + 'static {
     /// via réflexion. Généré par DB-Forge comme accesseur direct du champ PK.
     fn record_id(record: &Self::Record) -> i64;
 
-    /// Chemin du packfile de la table (un fichier par table, pas par record).
-    ///
-    /// Remplace artifact_path(record) : O(1) syscalls par batch au lieu de O(N).
+    /// Chemin du packfile de la table (HTML).
     /// Format : {root}/{schema}_{table}_pack.bin
-    /// L'index physique (Vec<PackfileEntry>) associe chaque ID à son offset/len.
     fn packfile_path() -> PathBuf;
+
+    /// Chemin absolu du binary store brut #[repr(C)] (Requis par dumper.rs).
+    /// Format : {root}/{schema}_{table}_store.bin
+    fn store_path() -> PathBuf;
+
+    /// Retourne le nombre de colonnes varlena définies dans la projection.
+    #[inline(always)]
+    fn varlena_field_count() -> u16 { 0 }
+
+    /// Encode la structure varlena possédée dans le tas binaire et peuple la TOC.
+    #[inline(always)]
+    fn encode_varlena(_varlena: &Self::VarlenOwned, _heap: &mut Vec<u8>, _toc: &mut Vec<VarlenSlot>) {}
+}
+
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct VarlenSlot {
+    pub offset: u32,
+    pub len:    u32,
 }

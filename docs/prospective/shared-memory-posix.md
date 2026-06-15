@@ -9,6 +9,10 @@ LSN high-water mark, contrainte de capacité d'arena, politique de versioning AB
 
 ---
 
+> Cette spécification est compète mais est réservée pour une version 2 de Marius. Il s'agit ici d'imaginer une "soudure à froid" (Cold Welding) entre PostgreSQL et Rust.
+
+---
+
 ## 1. Topologie des Processus et Invariant SPSC
 
 La communication s'établit via un segment de mémoire partagée POSIX (`/dev/shm/marius_engine`),
@@ -418,3 +422,8 @@ En réponse, l'architecture pose les invariants suivants :
 | Cohérence après drop              | Resync par LSN (`walsn > last_processed_lsn`)         | Tick suivant          |
 | Déduplication IDs                 | Bit-Vector atomique (ADR HashSet→Bit-Vector)          | Collector Rust        |
 | Stabilité ABI PostgreSQL          | Adhérence LTS + audit explicite sur migration majeure | Gouvernance           |
+
+---
+
+Document créé le 21 mai 2026.
+Révisé le 15 juin 2026.

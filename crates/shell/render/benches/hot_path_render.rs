@@ -51,9 +51,9 @@ fn record_nominal() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
         document_id:         42i32,
         author_entity_id:    7i32,
         status:              1i16,
-        is_readable:         true,
-        is_commentable:      true,
-        is_visible_comments: true,
+        is_readable:         0,
+        is_commentable:      0,
+        is_visible_comments: 0,
     };
     let varlena = ContentCoreVarlenOwned {
         headline:             Some("Introduction à l'architecture DOD".to_string()),
@@ -86,9 +86,9 @@ fn record_worst_case() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
         document_id:         i32::MIN,
         author_entity_id:    i32::MIN,
         status:              i16::MIN,
-        is_readable:         false,
-        is_commentable:      false,
-        is_visible_comments: false,
+        is_readable:         0,
+        is_commentable:      0,
+        is_visible_comments: 0,
     };
     let varlena = ContentCoreVarlenOwned {
         headline:             Some(aggressive.clone()),

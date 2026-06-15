@@ -136,17 +136,22 @@ pub fn render_batch<P: Projection>(batch: Vec<(P::Record, P::VarlenOwned)>, tota
         Ok(f) => f,
         Err(e) => { eprintln!("[dispatcher] write {:?}: {e}", path); return; }
     };
+
+    // CORRECTION DOD : Extraction de la position réelle (EOF) pour l'adressage absolu
+    let offset_start = file.metadata().map(|m| m.len()).unwrap_or(0);
+
     let mut writer = BufWriter::new(file);
 
     // Initialisation du buffer zéro-allocation
     let mut renderer = BatchRenderer::<P>::new(total_cap, batch.len());
 
-    if let Err(e) = renderer.render_batch(&batch, &mut writer, 0) {
+    // Injection de l'offset absolu au lieu de 0
+    if let Err(e) = renderer.render_batch(&batch, &mut writer, offset_start) {
         eprintln!("[dispatcher] packfile append error: {e}");
     }
     
-    // Note Phase 2 : l'index physique (renderer.into_index()) est calculé ici.
-    // Nous gérerons sa persistance (mmap/fichier d'index) lors de la prochaine étape.
+    // Note Phase 2 : l'index physique (renderer.into_index()) est calculé ici
+    // avec des adresses mémoires physiquement exactes.
 }
 
 /// Rendu parallèle pur — sans I/O disque.
@@ -232,9 +237,9 @@ mod tests {
             document_id:         i32::MIN,  // 11 chars — max I32
             author_entity_id:    i32::MIN,
             status:              i16::MIN,  // 6 chars  — max I16
-            is_readable:         false,     // 5 chars  — "false" > "true"
-            is_commentable:      false,
-            is_visible_comments: false,
+            is_readable:         0,
+            is_commentable:      0,
+            is_visible_comments: 0,
         }
     }
 

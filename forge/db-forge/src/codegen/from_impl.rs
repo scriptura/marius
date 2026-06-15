@@ -28,11 +28,18 @@ pub fn write_from_impl(
     writeln!(out, "    fn from(r: {name}Row) -> Self {{").unwrap();
     writeln!(out, "        Self {{").unwrap();
 
+    let mut layout_bytes = 0usize;
+    let mut max_align    = 1usize;
+
     for col in columns {
         let m = map_type(&col.sql_type);
         if !m.is_fixed { continue; }
 
-        let expr = if col.is_notnull {
+        // Suivi du layout pour le calcul ultérieur du tail padding
+        layout_bytes += m.size_bytes;
+        max_align     = max_align.max(m.alignment);
+
+        let mut expr = if col.is_notnull {
             match m.row_type {
                 "chrono::DateTime<chrono::Utc>" => {
                     format!("r.{}.timestamp_micros()", col.name)
@@ -49,10 +56,23 @@ pub fn write_from_impl(
             m.from_expr.replace("{field}", &format!("r.{}", col.name))
         };
 
+        // INTEGRATION PHASE 1.4 : Cast de l'expression vers u8 si le type d'origine SQL est un booléen
+        if m.row_type == "bool" {
+            expr = format!("({expr}) as u8");
+        }
+
         writeln!(out, "            {}: {},", col.name, expr).unwrap();
+    }
+
+    // INTEGRATION PHASE 1.4 : Initialisation obligatoire du tail padding à zéro
+    let padded_size = layout_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
+    let tail_pad = padded_size - layout_bytes;
+    if tail_pad > 0 {
+        writeln!(out, "            _pad: [0u8; {tail_pad}],").unwrap();
     }
 
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}\n").unwrap();
 }
+

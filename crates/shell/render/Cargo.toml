@@ -10,9 +10,10 @@ keywords = ["axum", "web", "dispatcher", "marius"]
 categories = ["web-programming"]
 
 [dependencies]
-# Core
-marius-collector = { path = "../../core/collector", version = "=0.3.0" }
+bytemuck = { version = "1.14", features = ["derive"] }
+marius-collector = { path = "../../core/collector", version = "0.3.0" }
 marius-projection = { path = "../../core/projection", version = "0.3.0" }
+marius-schema = { path = "../../core/schema", version = "0.3.0" }
 
 # Shell — Tokio et Rayon vivent uniquement ici (pas dans le Core)
 tokio = { workspace = true }
@@ -21,7 +22,7 @@ sqlx = { workspace = true }
 
 [dev-dependencies]
 divan = "0.1"
-marius-schema = { path = "../../core/schema", version = "=0.3.0" }
+marius-schema = { path = "../../core/schema", version = "0.3.0" }
 
 [build-dependencies]
 marius-fragment-forge = { path = "../../../forge/fragment-forge", version = "0.3.0" }
@@ -33,3 +34,7 @@ harness = false
 [[bench]]
 name = "hot_path_certify"
 harness = false
+
+[[bin]]
+name = "marius-dump"
+path = "src/bin/dump.rs"

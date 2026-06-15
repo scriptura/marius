@@ -52,7 +52,7 @@
 // =============================================================================
 
 pub mod projection {
-    pub use marius_projection::Projection;
+    pub use marius_projection::{Projection, VarlenSlot};
 }
 
 pub mod collector {
@@ -155,9 +155,9 @@ mod tests {
             document_id:         i32::MIN,  // 11 chars
             author_entity_id:    i32::MIN,
             status:              i16::MIN,  // 6 chars
-            is_readable:         false,     // 5 chars
-            is_commentable:      false,
-            is_visible_comments: false,
+            is_readable:         0,
+            is_commentable:      0,
+            is_visible_comments: 0,
         };
 
         // Pire cas varlena : max_len caractères '&' → max_len × 5 après escape.
@@ -243,9 +243,9 @@ mod tests {
             document_id:         42,
             author_entity_id:    7,
             status:              1,
-            is_readable:         true,
-            is_commentable:      true,
-            is_visible_comments: true,
+            is_readable:         0,
+            is_commentable:      0,
+            is_visible_comments: 0,
         };
 
         // Varlena représentatives : titre court (~40 chars).

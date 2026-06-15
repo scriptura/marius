@@ -24,6 +24,7 @@ use crate::naming::to_pascal;
 ///
 ///   size_of et align_of vérifiés à la compilation. Un ALTER TABLE non suivi
 ///   d'une reconstruction déclenche une erreur compilateur, pas une corruption.
+
 pub fn write_store_struct(
     out:     &mut String,
     schema:  &str,
@@ -41,7 +42,8 @@ pub fn write_store_struct(
          /// AVERTISSEMENT NULLABLE : sentinel domain-specific (Phase 3 : pg_description)."
     ).unwrap();
     writeln!(out, "#[repr(C)]").unwrap();
-    writeln!(out, "#[derive(Debug, Clone, Copy, Default)]").unwrap();
+    // INTEGRATION PHASE 1.4 : Dérivation sécurisée via bytemuck
+    writeln!(out, "#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]").unwrap();
     writeln!(out, "pub struct {name}StorageRow {{").unwrap();
 
     let mut layout_bytes = 0usize;
@@ -56,9 +58,13 @@ pub fn write_store_struct(
             } else {
                 String::new()
             };
+
+            // INTEGRATION PHASE 1.4 : bool n'est pas Pod-safe (un bit à 0x02 est invalide), substitution par u8
+            let emit_type = if m.store_type == "bool" { "u8" } else { m.store_type };
+
             writeln!(out,
                 "    pub {}: {},{}  // attnum={}, {}B{}",
-                col.name, m.store_type, pad,
+                col.name, emit_type, pad,
                 col.attnum, m.size_bytes, null_marker,
             ).unwrap();
             layout_bytes += m.size_bytes;
@@ -70,16 +76,20 @@ pub fn write_store_struct(
             ).unwrap();
         }
     }
+
+    // INTEGRATION PHASE 1.4 : Calcul et insertion du tail padding explicite
+    let padded_size = layout_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
+    let tail_pad = padded_size - layout_bytes;
+    if tail_pad > 0 {
+        writeln!(out, "    pub _pad: [u8; {tail_pad}], // Tail padding explicite pour alignement Pod").unwrap();
+    }
+
     writeln!(out, "}}").unwrap();
 
-    // Taille padded repr(C) : arrondie au multiple supérieur de max_align.
-    let padded_size = layout_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
-
-    // Commentaire de layout : visible dans generated_schema.rs pour diagnostic.
+    // Commentaire de layout : visible dans generated_schema.rs pour diagnostic
     writeln!(out,
         "// Layout fixed-length : {layout_bytes}B données → {padded_size}B padded (align={max_align}B)"
     ).unwrap();
-    // Header PostgreSQL : MAXALIGN(23 + ceil(N_total/8)) — N_total = toutes colonnes.
     writeln!(out,
         "// + {}B header heap PostgreSQL (MAXALIGN(23 + ceil({}/8)))",
         { let n = columns.len(); (23 + n.div_ceil(8)).div_ceil(8) * 8 },
@@ -87,7 +97,7 @@ pub fn write_store_struct(
     ).unwrap();
     writeln!(out).unwrap();
 
-    // static_assertions : symétrie binaire à la compilation.
+    // static_assertions : symétrie binaire à la compilation
     writeln!(out,
         "const _: () = assert!(\n    \
          std::mem::size_of::<{name}StorageRow>() == {padded_size},\n    \
