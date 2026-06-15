@@ -46,6 +46,7 @@ use chrono::Datelike as _;\n\n\
 /// Échappe les caractères HTML dangereux dans `s` et pousse le résultat dans `buf`.\n\
 /// Zéro allocation : opère directement sur buf (déjà réservé par render()).\n\
 #[inline(always)]\n\
+#[allow(dead_code)]\n\
 fn marius_html_escape(s: &str, buf: &mut String) {\n\
     for ch in s.chars() {\n\
         match ch {\n\
@@ -60,6 +61,7 @@ fn marius_html_escape(s: &str, buf: &mut String) {\n\
 }\n\n\
 /// Pousse un VarlenSlot dans la TOC et concatène la valeur dans le heap (Phase 1.4).\n\
 #[inline(always)]\n\
+#[allow(dead_code)]\n\
 fn push_varlen_slot(field: &Option<String>, heap: &mut Vec<u8>, toc: &mut Vec<crate::projection::VarlenSlot>) {\n\
     match field {\n\
         None    => toc.push(crate::projection::VarlenSlot { offset: u32::MAX, len: 0 }),\n\

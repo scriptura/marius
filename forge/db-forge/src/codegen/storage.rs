@@ -24,7 +24,6 @@ use crate::naming::to_pascal;
 ///
 ///   size_of et align_of vérifiés à la compilation. Un ALTER TABLE non suivi
 ///   d'une reconstruction déclenche une erreur compilateur, pas une corruption.
-
 pub fn write_store_struct(
     out:     &mut String,
     schema:  &str,

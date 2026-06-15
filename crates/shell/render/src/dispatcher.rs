@@ -240,6 +240,7 @@ mod tests {
             is_readable:         0,
             is_commentable:      0,
             is_visible_comments: 0,
+            _pad:                [0; 3],     // padding pour alignement 8B
         }
     }
 

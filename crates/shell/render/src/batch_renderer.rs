@@ -203,6 +203,10 @@ mod tests {
         fn packfile_path() -> PathBuf {
             PathBuf::from("artifacts/stub_pack.bin")
         }
+
+        fn store_path() -> ::std::path::PathBuf {
+            ::std::path::PathBuf::from("stub_store.bin")
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

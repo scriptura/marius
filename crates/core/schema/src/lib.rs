@@ -158,6 +158,7 @@ mod tests {
             is_readable:         0,
             is_commentable:      0,
             is_visible_comments: 0,
+            _pad:                [0; 3],
         };
 
         // Pire cas varlena : max_len caractères '&' → max_len × 5 après escape.
@@ -201,7 +202,8 @@ mod tests {
             id:           i32::MIN,
             stock:        i32::MIN,
             media_id:     i32::MIN,
-            is_available: false,
+            is_available: 0,
+            _pad:         [0; 3],
         };
 
         let initial_cap = COMMERCE_PRODUCT_CORE_TOTAL_CAP;
@@ -246,6 +248,7 @@ mod tests {
             is_readable:         0,
             is_commentable:      0,
             is_visible_comments: 0,
+            _pad:                [0; 3],
         };
 
         // Varlena représentatives : titre court (~40 chars).
@@ -290,7 +293,8 @@ mod tests {
             id:           42,
             stock:        150,
             media_id:     7,
-            is_available: true,
+            is_available: 1,
+            _pad:         [0; 3],
         };
 
         let mut buf = String::new();
