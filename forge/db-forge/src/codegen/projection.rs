@@ -58,7 +58,8 @@ pub fn write_projection_stub(
         let varlena_cols: Vec<String> = varlena.iter()
             .map(|v| format!("{vt}.{}", v.name))
             .collect();
-        let all_cols: Vec<String> = fixed_cols.iter().map(|c| c.to_string())
+        let all_cols: Vec<String> = fixed_cols.iter()
+            .map(|c| format!("{schema}.{table}.{c}"))
             .chain(varlena_cols)
             .collect();
         let from = format!(
@@ -296,6 +297,39 @@ pub fn write_projection_stub(
         "        ::std::path::PathBuf::from(format!(\"{{root}}/{schema}_{table}_store.bin\"))"
     ).unwrap();
     writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // ── varlena_field_count() + encode_varlena() ─────────────────────────────
+    // Émis uniquement si la table a des colonnes varlena.
+    // Sans ces overrides, le trait applique les defaults (0 / no-op) →
+    // PackfileBuilder n'écrit ni TOC ni Heap → store tronqué à Header+Rows+IDIdx.
+    if !varlena.is_empty() {
+        let vf = varlena.len();
+
+        writeln!(out, "    #[inline(always)]").unwrap();
+        writeln!(out, "    fn varlena_field_count() -> u16 {{ {vf} }}").unwrap();
+        writeln!(out).unwrap();
+
+        writeln!(out, "    fn encode_varlena(").unwrap();
+        writeln!(out, "        owned: &Self::VarlenOwned,").unwrap();
+        writeln!(out, "        heap:  &mut Vec<u8>,").unwrap();
+        writeln!(out, "        toc:   &mut Vec<marius_projection::VarlenSlot>,").unwrap();
+        writeln!(out, "    ) {{").unwrap();
+        for v in varlena {
+            // Option<String> → heap contiguë + slot TOC.
+            // None → sentinel offset=u32::MAX, len=0 (convention VarlenSlot).
+            writeln!(out, "        match &owned.{} {{", v.name).unwrap();
+            writeln!(out, "            Some(s) => {{").unwrap();
+            writeln!(out, "                let offset = heap.len() as u32;").unwrap();
+            writeln!(out, "                let len    = s.len() as u32;").unwrap();
+            writeln!(out, "                heap.extend_from_slice(s.as_bytes());").unwrap();
+            writeln!(out, "                toc.push(marius_projection::VarlenSlot {{ offset, len }});").unwrap();
+            writeln!(out, "            }}").unwrap();
+            writeln!(out, "            None => toc.push(marius_projection::VarlenSlot {{ offset: u32::MAX, len: 0 }}),").unwrap();
+            writeln!(out, "        }}").unwrap();
+        }
+        writeln!(out, "    }}").unwrap();
+    }
 
     writeln!(out, "}}\n").unwrap();
 }

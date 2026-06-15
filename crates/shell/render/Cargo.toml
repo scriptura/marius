@@ -38,3 +38,7 @@ harness = false
 [[bin]]
 name = "marius-dump"
 path = "src/bin/dump.rs"
+
+[[bin]]
+name = "marius-verify"
+path = "src/bin/verify.rs"
