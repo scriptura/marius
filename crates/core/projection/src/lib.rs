@@ -3,114 +3,57 @@
 // implémentations générées par Bridge-Forge + Fragment-Forge.
 //
 // Ce crate est la frontière Core/Shell :
-//   - Il référence sqlx::PgPool (Shell) pour fetch_batch (Phase 1)
-//   - Il ne référence pas Tokio (pure logique de projection)
-//   - Phase 2 (SHM) modifiera uniquement les corps de fetch_batch,
-//     pas la structure du trait.
+//   - Il référence sqlx::PgPool (Shell) pour fetch_batch
+//   - Il porte PackfileStoreHeader + align8 : source de vérité unique du
+//     protocole binaire (partagée par PackfileBuilder et PackfileReader).
+//   - Phase 2 : PackfileReader exposé ici pour que marius_schema puisse
+//     l'utiliser sans cycle de dépendance (marius_render → marius_schema).
 //
 // ─── ADR-003 : Dualité Record / VarlenOwned ───────────────────────────────────
 //
-//   L'introduction des champs varlena brise l'invariant monolithique
-//   où type Record gérait une structure unique 'static.
-//   Le chemin critique distingue désormais deux natures de données :
-//
 //   Record      : struct #[repr(C)], fixed-length, layout miroir PostgreSQL.
-//                 Possédée, 'static, Send. Vit en mémoire contiguë.
-//                 Exemple : {Name}StorageRow.
-//
 //   VarlenOwned : struct possédée portant les données varlena (Option<String>).
-//                 'static, Send : peut traverser tokio::spawn et rayon::par_iter.
-//                 () pour les tables sans varlena (coût zéro à la compilation).
-//                 Exemple : {Name}VarlenOwned, ou () si pas de JOIN varlena.
+//                 () pour les tables sans varlena.
 //
-// ─── Payload<'a> hors du trait ───────────────────────────────────────────────
+// ─── Protocole binaire ────────────────────────────────────────────────────────
 //
-//   {Name}RenderPayload<'a> (Option<&'a str>) n'est PAS un type associé du trait.
-//   Il est construit localement dans render() via varlena.as_deref() sur chaque
-//   thread Rayon, sans traversée de frontière de lifetime.
-//   Raison : un GAT avec lifetime dans le trait contraint fortement les bounds
-//   sur le Dispatcher générique pour un gain nul côté API publique.
-//
-// ─── Transition Phase 2 ──────────────────────────────────────────────────────
-//
-//   fetch_batch : signature inchangée côté Dispatcher.
-//   L'implémentation générée substituera sqlx::query_as par un lecteur mmap.
-//   VarlenOwned sera produit depuis le buffer de page WAL, pas depuis une Row sqlx.
-//   render() : inchangé — ne dépend pas de la source des données.
-//
-// ─── Signature render — pattern buffer ───────────────────────────────────────
-//
-//   fn render(&Self::Record, &Self::VarlenOwned, &mut String)
-//   Permet à Fragment-Forge d'utiliser String::with_capacity(STATIC + DYNAMIC)
-//   et d'écrire via write_fmt() sans allocation intermédiaire.
-//   Contraste avec -> String : alloue systématiquement une nouvelle String.
+//   Défini ici (PackfileStoreHeader, align8) — importé par PackfileBuilder
+//   (marius_render) et PackfileReader (ce crate). Toute modification du layout
+//   se propage automatiquement aux deux côtés.
 
 use std::path::PathBuf;
 
-/// Alias de type pour le retour de fetch_batch.
-/// Évite la répétition du type complexe dans le trait et les implémentations.
-/// Nommé explicitement pour la lisibilité dans les bounds du Dispatcher.
 pub type BatchResult<P> = Result<
     Vec<(<P as Projection>::Record, <P as Projection>::VarlenOwned)>,
     sqlx::Error,
 >;
 
 pub trait Projection: Sized + Send + Sync + 'static {
-    /// Layout fixed-length, #[repr(C)], miroir du heap tuple PostgreSQL.
-    /// Send + 'static : peut traverser tokio::spawn et rayon::par_iter.
     type Record: Sized + Send + 'static;
-
-    /// Données varlena possédées (Option<String>), issues du fetch SQLx.
-    /// Send + 'static : même contrainte que Record pour la traversée de threads.
-    /// () pour les tables sans colonnes varlena (coût zéro, optimisé par le compilateur).
     type VarlenOwned: Sized + Send + 'static;
 
-    /// Extraction batch depuis PostgreSQL (Phase 1 : SQLx).
-    /// Retourne le couple (Record, VarlenOwned) possédé par enregistrement.
-    /// Le Dispatcher reconstruit le RenderPayload (&str) localement sur chaque
-    /// thread Rayon depuis VarlenOwned via as_deref() — sans traversée de lifetime.
-    ///
-    /// Phase 2 : l'implémentation utilisera des offsets mmap — même signature.
-    ///
-    /// impl Future<Output> + Send explicite : async fn dans un trait public ne
-    /// permet pas de contraindre Send sur le Future retourné, bloquant tokio::spawn.
     fn fetch_batch(
         pool: &sqlx::PgPool,
         ids:  &[i64],
     ) -> impl std::future::Future<Output = BatchResult<Self>> + Send;
 
-    /// Rendu HTML du record dans le buffer fourni.
-    ///
-    /// `record`  : données fixed-length (StorageRow, repr(C)).
-    /// `varlena` : données varlena possédées. Le corps généré par Fragment-Forge
-    ///             effectue les as_deref() localement pour construire les &str.
-    ///             Passé comme &VarlenOwned plutôt que &Payload<'_> pour éviter
-    ///             un GAT dans le trait (détail d'implémentation interne à render).
-    ///
-    /// Invariant no-realloc : buf.capacity() == TOTAL_CAP avant et après.
-    /// Le Dispatcher passe un buffer réutilisable entre les records du même batch.
     fn render(record: &Self::Record, varlena: &Self::VarlenOwned, buf: &mut String);
 
-    /// Identifiant entier extrait du Record — requis par BatchRenderer pour
-    /// construire l'index physique (PackfileEntry.id) sans accès au champ PK
-    /// via réflexion. Généré par DB-Forge comme accesseur direct du champ PK.
     fn record_id(record: &Self::Record) -> i64;
 
-    /// Chemin du packfile de la table (HTML).
-    /// Format : {root}/{schema}_{table}_pack.bin
     fn packfile_path() -> PathBuf;
 
-    /// Chemin absolu du binary store brut #[repr(C)] (Requis par dumper.rs).
-    /// Format : {root}/{schema}_{table}_store.bin
     fn store_path() -> PathBuf;
 
-    /// Retourne le nombre de colonnes varlena définies dans la projection.
     #[inline(always)]
     fn varlena_field_count() -> u16 { 0 }
 
-    /// Encode la structure varlena possédée dans le tas binaire et peuple la TOC.
     #[inline(always)]
-    fn encode_varlena(_varlena: &Self::VarlenOwned, _heap: &mut Vec<u8>, _toc: &mut Vec<VarlenSlot>) {}
+    fn encode_varlena(
+        _varlena: &Self::VarlenOwned,
+        _heap: &mut Vec<u8>,
+        _toc: &mut Vec<VarlenSlot>,
+    ) {}
 }
 
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -118,4 +61,243 @@ pub trait Projection: Sized + Send + Sync + 'static {
 pub struct VarlenSlot {
     pub offset: u32,
     pub len:    u32,
+}
+
+// =============================================================================
+// Protocole binaire — source de vérité unique
+//
+// PackfileStoreHeader et align8 sont définis ici et importés par :
+//   - marius_render::packfile_builder (écriture)
+//   - marius_projection::packfile_reader (lecture)
+//
+// Toute modification de layout est répercutée sur les deux côtés sans risque
+// de dérive silencieuse.
+// =============================================================================
+
+/// Header du store.bin — exactement 64B (une cache line).
+/// Placé en tête du fichier, lu au montage par PackfileReader.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PackfileStoreHeader {
+    pub magic:                [u8; 8],  // b"MARIUSDB"
+    pub version:              u32,      // = 1
+    pub stride:               u32,      // sizeof(P::Record)
+    pub row_count:            u64,
+    pub varlena_field_count:  u16,
+    pub _pad:                 [u8; 6],
+    pub id_index_section:     u64,
+    pub varlena_toc_section:  u64,
+    pub varlena_heap_section: u64,
+    pub varlena_heap_len:     u64,
+}
+
+const _: () = assert!(
+    std::mem::size_of::<PackfileStoreHeader>() == 64,
+    "PackfileStoreHeader doit être exactement 64B"
+);
+
+/// Arrondit `x` au prochain multiple de 8.
+/// Utilisé par Builder (écriture des sections) et Reader (validation des offsets).
+#[inline(always)]
+pub const fn align8(x: u64) -> u64 { (x + 7) & !7 }
+
+// =============================================================================
+// PackfileReader — lecteur zero-copie via memmap2
+// =============================================================================
+
+pub mod packfile_reader {
+    use std::fs::File;
+    use std::marker::PhantomData;
+    use std::mem;
+    use std::path::Path;
+
+    use bytemuck::Pod;
+    use memmap2::Mmap;
+
+    use super::{PackfileStoreHeader, Projection, VarlenSlot};
+
+    /// Vue sur les champs varlena d'un enregistrement.
+    /// Zéro copie — lifetime lié au PackfileReader.
+    pub struct VarlenRefs<'a> {
+        toc:  &'a [VarlenSlot],
+        heap: &'a [u8],
+    }
+
+    impl<'a> VarlenRefs<'a> {
+        /// Accès par index (0-based, ordre attnum).
+        /// None si sentinel (offset == u32::MAX) ou index hors bornes.
+        #[inline(always)]
+        pub fn get(&self, field_idx: usize) -> Option<&'a str> {
+            let slot = self.toc.get(field_idx)?;
+            if slot.offset == u32::MAX {
+                return None;
+            }
+            let start = slot.offset as usize;
+            let end   = start + slot.len as usize;
+            std::str::from_utf8(self.heap.get(start..end)?).ok()
+        }
+    }
+
+    /// Lecteur zero-copie d'un store.bin produit par PackfileBuilder<P>.
+    ///
+    /// Conçu pour être stocké dans un OnceLock<PackfileReader<P>> statique.
+    /// memmap2::Mmap est Send + Sync.
+    pub struct PackfileReader<P: Projection>
+    where
+        P::Record: Pod,
+    {
+        mmap:                Mmap,
+        row_count:           usize,
+        varlena_field_count: usize,
+        rows_offset:         usize,
+        id_index_offset:     usize,
+        toc_offset:          usize,
+        heap_offset:         usize,
+        heap_len:            usize,
+        _proj:               PhantomData<P>,
+    }
+
+    impl<P: Projection> PackfileReader<P>
+    where
+        P::Record: Pod,
+    {
+        /// Ouvre `path`, le mappe en lecture seule, valide le header.
+        /// Appelle madvise(MADV_WILLNEED) pour pré-charger les pages en RAM
+        /// dès le montage — élimine les page faults en hot path Tokio.
+        ///
+        /// # Safety (mmap)
+        /// store.bin est produit atomiquement par marius-dump (INV-6).
+        /// Il n'est pas modifié pendant l'exécution du serveur.
+        pub fn open(path: &Path) -> std::io::Result<Self> {
+            let file = File::open(path)?;
+            let mmap = unsafe { Mmap::map(&file)? };
+
+            // Pré-chargement des pages — hint non bloquant, sans privilège requis.
+            // Élimine les page faults lors des premiers lookups en hot path.
+            let _ = mmap.advise(memmap2::Advice::WillNeed);
+
+            let header_size = mem::size_of::<PackfileStoreHeader>();
+
+            if mmap.len() < header_size {
+                return Err(std::io::Error::other(format!(
+                    "[PackfileReader] fichier trop court : {}B < {}B",
+                    mmap.len(), header_size,
+                )));
+            }
+
+            let header: &PackfileStoreHeader =
+                bytemuck::from_bytes(&mmap[..header_size]);
+
+            if &header.magic != b"MARIUSDB" {
+                return Err(std::io::Error::other(format!(
+                    "[PackfileReader] magic invalide : {:?}", header.magic,
+                )));
+            }
+            if header.version != 1 {
+                return Err(std::io::Error::other(format!(
+                    "[PackfileReader] version non supportée : {}", header.version,
+                )));
+            }
+
+            let expected_stride = mem::size_of::<P::Record>() as u32;
+            if header.stride != expected_stride {
+                return Err(std::io::Error::other(format!(
+                    "[PackfileReader] stride incohérent : header={}B, sizeof(Record)={}B",
+                    header.stride, expected_stride,
+                )));
+            }
+
+            let expected_len =
+                (header.varlena_heap_section + header.varlena_heap_len) as usize;
+            if mmap.len() != expected_len {
+                return Err(std::io::Error::other(format!(
+                    "[PackfileReader] taille incohérente : {}B != {}B (header)",
+                    mmap.len(), expected_len,
+                )));
+            }
+
+            Ok(Self {
+                row_count:           header.row_count           as usize,
+                varlena_field_count: header.varlena_field_count as usize,
+                rows_offset:         header_size,
+                id_index_offset:     header.id_index_section    as usize,
+                toc_offset:          header.varlena_toc_section as usize,
+                heap_offset:         header.varlena_heap_section as usize,
+                heap_len:            header.varlena_heap_len    as usize,
+                mmap,
+                _proj: PhantomData,
+            })
+        }
+
+        #[inline(always)]
+        fn records(&self) -> &[P::Record] {
+            let end = self.rows_offset + self.row_count * mem::size_of::<P::Record>();
+            bytemuck::cast_slice(&self.mmap[self.rows_offset..end])
+        }
+
+        #[inline(always)]
+        fn id_index(&self) -> &[i64] {
+            let end = self.id_index_offset + self.row_count * mem::size_of::<i64>();
+            bytemuck::cast_slice(&self.mmap[self.id_index_offset..end])
+        }
+
+        #[inline(always)]
+        fn toc(&self) -> &[VarlenSlot] {
+            let len = self.row_count
+                * self.varlena_field_count
+                * mem::size_of::<VarlenSlot>();
+            bytemuck::cast_slice(&self.mmap[self.toc_offset..self.toc_offset + len])
+        }
+
+        #[inline(always)]
+        fn heap(&self) -> &[u8] {
+            &self.mmap[self.heap_offset..self.heap_offset + self.heap_len]
+        }
+
+        /// Recherche par ID — O(log N) binary search.
+        /// Zéro allocation — toutes les références pointent dans le mmap.
+        #[inline]
+        pub fn lookup(&self, id: i64) -> Option<(&P::Record, VarlenRefs<'_>)> {
+            let pos     = self.id_index().binary_search(&id).ok()?;
+            let record  = &self.records()[pos];
+            let toc_all = self.toc();
+            let heap    = self.heap();
+
+            let toc_base  = pos * self.varlena_field_count;
+            let toc_slice =
+                &toc_all[toc_base..toc_base + self.varlena_field_count];
+
+            Some((record, VarlenRefs { toc: toc_slice, heap }))
+        }
+
+        #[inline(always)]
+        pub fn row_count(&self) -> usize { self.row_count }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::VarlenSlot;
+
+        #[test]
+        fn sentinel_returns_none() {
+            let slots = [VarlenSlot { offset: u32::MAX, len: 0 }];
+            let refs  = VarlenRefs { toc: &slots, heap: &[] };
+            assert_eq!(refs.get(0), None);
+        }
+
+        #[test]
+        fn valid_slot_returns_str() {
+            let slots = [VarlenSlot { offset: 0, len: 5 }];
+            let refs  = VarlenRefs { toc: &slots, heap: b"hello" };
+            assert_eq!(refs.get(0), Some("hello"));
+        }
+
+        #[test]
+        fn out_of_bounds_field_returns_none() {
+            let slots = [VarlenSlot { offset: 0, len: 2 }];
+            let refs  = VarlenRefs { toc: &slots, heap: b"hi" };
+            assert_eq!(refs.get(1), None);
+        }
+    }
 }

@@ -10,6 +10,7 @@ keywords = ["axum", "web", "dispatcher", "marius"]
 categories = ["web-programming"]
 
 [dependencies]
+memmap2 = "0.9.10"
 bytemuck = { version = "1.14", features = ["derive"] }
 marius-collector = { path = "../../core/collector", version = "0.3.0" }
 marius-projection = { path = "../../core/projection", version = "0.3.0" }

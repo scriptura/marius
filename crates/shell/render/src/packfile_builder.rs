@@ -7,38 +7,20 @@
 // INV-5 : pré-allocation à `capacity` dès new() — aucun resize en hot path.
 // INV-6 : un seul open() + BufWriter<File> passé en paramètre à write().
 // INV-7 : StorageRow est #[repr(C)] + bytemuck::Pod → cast_slice sans unsafe.
+//
+// ── Source de vérité binaire ──────────────────────────────────────────────────
+// PackfileStoreHeader et align8 sont définis dans marius_projection et importés
+// ici. PackfileReader (aussi dans marius_projection) utilise les mêmes types.
+// Toute modification de layout se propage automatiquement aux deux côtés.
 // =============================================================================
 
-use std::io::{self, BufWriter, Seek, Write};
+use std::io::{self, BufWriter, Write};
 use std::marker::PhantomData;
 use std::mem;
 
 use bytemuck::Pod;
 
-use marius_projection::{Projection, VarlenSlot};
-
-// ── Header mmap-ready ─────────────────────────────────────────────────────────
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct PackfileStoreHeader {
-    pub magic:                [u8; 8],  // b"MARIUSDB"
-    pub version:              u32,      // = 1
-    pub stride:               u32,      // sizeof(P::Record)
-    pub row_count:            u64,
-    pub varlena_field_count:  u16,
-    pub _pad:                 [u8; 6],
-    pub id_index_section:     u64,
-    pub varlena_toc_section:  u64,
-    pub varlena_heap_section: u64,
-    pub varlena_heap_len:     u64,
-}
-// sizeof = 64B, align = 8. Exactement une cache line.
-
-const _: () = assert!(
-    mem::size_of::<PackfileStoreHeader>() == 64,
-    "PackfileStoreHeader doit être exactement 64B"
-);
+use marius_projection::{align8, PackfileStoreHeader, Projection, VarlenSlot};
 
 // ── Builder ───────────────────────────────────────────────────────────────────
 
@@ -78,7 +60,6 @@ where
             self.records.push(*record);
             P::encode_varlena(owned, &mut self.varlena_heap, &mut self.varlena_toc);
         }
-        // Invariant post-push :
         debug_assert_eq!(self.records.len(), self.id_index.len());
         debug_assert_eq!(
             self.varlena_toc.len(),
@@ -87,20 +68,20 @@ where
     }
 
     /// Écrit le fichier binaire complet en une passe.
-    /// Le writer doit être `Seek`-able (File). Pas de pipe.
-    pub fn write<W: Write + Seek>(&self, writer: &mut BufWriter<W>) -> io::Result<()> {
+    /// Le writer doit supporter Write (BufWriter<File>).
+    pub fn write<W: Write>(&self, writer: &mut BufWriter<W>) -> io::Result<()> {
         let row_count = self.records.len() as u64;
         let stride    = mem::size_of::<P::Record>() as u32;
         let vf        = P::varlena_field_count() as u64;
 
-        // ── Calcul des offsets de section ────────────────────────────────────
+        // ── Calcul des offsets de section (align8 importé de marius_projection) ─
         let rows_section         = 64u64;
         let id_index_section     = align8(rows_section + row_count * stride as u64);
         let varlena_toc_section  = align8(id_index_section + row_count * 8);
         let varlena_heap_section = align8(varlena_toc_section + row_count * vf * 8);
         let varlena_heap_len     = self.varlena_heap.len() as u64;
 
-        // ── Header ───────────────────────────────────────────────────────────
+        // ── Header (PackfileStoreHeader importé de marius_projection) ────────
         let header = PackfileStoreHeader {
             magic:                *b"MARIUSDB",
             version:              1,
@@ -137,10 +118,7 @@ where
     pub fn row_count(&self) -> usize { self.records.len() }
 }
 
-// ── Helpers IO ────────────────────────────────────────────────────────────────
-
-#[inline(always)]
-const fn align8(x: u64) -> u64 { (x + 7) & !7 }
+// ── Helper IO ─────────────────────────────────────────────────────────────────
 
 fn pad_to<W: Write>(writer: &mut W, n: u64) -> io::Result<()> {
     const ZERO: [u8; 8] = [0u8; 8];

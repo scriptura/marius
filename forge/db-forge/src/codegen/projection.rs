@@ -53,8 +53,10 @@ pub fn write_projection_stub(
         );
     }
 
-    // ── Construction SELECT + FROM ────────────────────────────────────────────
-    let (select, from_clause) = if let Some((vs, vt, _fk)) = varlena_join {
+    // ── Construction SELECT + FROM (conservé pour référence — inutilisé en Phase 2 AOT) ─
+    // fetch_batch Phase 2 lit le store.bin via PackfileReader, pas via SQLx.
+    // Ces variables sont préfixées _ pour supprimer les warnings du compilateur.
+    let (_select, _from_clause) = if let Some((vs, vt, _fk)) = varlena_join {
         let varlena_cols: Vec<String> = varlena.iter()
             .map(|v| format!("{vt}.{}", v.name))
             .collect();
@@ -70,7 +72,7 @@ pub fn write_projection_stub(
         (fixed_cols.join(", "), format!("{schema}.{table}"))
     };
 
-    let where_clause = match pk {
+    let _where_clause = match pk {
         PrimaryKey::Single(col) => format!(
             "WHERE {schema}.{table}.{col} = ANY($1) ORDER BY {schema}.{table}.{col} ASC"
         ),
@@ -127,17 +129,30 @@ pub fn write_projection_stub(
     // Constantes au niveau module (pas dans le bloc impl).
     writeln!(out, "{cap_consts}").unwrap();
 
-    writeln!(out, "// Pool requis : marius_user (SELECT sur {schema}.{table})").unwrap();
+    // ── OnceLock statique — PackfileReader monté au premier appel de fetch_batch ──
+    // Déclaration au niveau module : durée de vie 'static garantie.
+    // OnceLock est thread-safe sans verrou — Mmap est Send + Sync.
+    writeln!(out,
+        "static {screaming}_STORE: std::sync::OnceLock<\
+         marius_projection::PackfileReader<{proj_name}>> = std::sync::OnceLock::new();"
+    ).unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "// Phase 2 AOT : _pool ignoré — lecture via OnceLock<PackfileReader>.").unwrap();
     writeln!(out, "// RLS         : voir 09_rls/01_policies.sql").unwrap();
     writeln!(out, "impl crate::projection::Projection for {proj_name} {{").unwrap();
     writeln!(out, "    type Record = {name}StorageRow;").unwrap();
     writeln!(out, "    type VarlenOwned = {varlen_owned_type};").unwrap();
     writeln!(out).unwrap();
 
-    // ── fetch_batch ───────────────────────────────────────────────────────────
+    // ── fetch_batch (Phase 2 AOT) ─────────────────────────────────────────────
+    // _pool : paramètre de trait conservé pour compatibilité de signature.
+    //         Jamais utilisé en production — le pool SQLx est absent du hot path.
+    //         Fail-fast : si store.bin est absent au premier appel, panic immédiat.
+    //         Pas de fallback réseau — l'absence de store est une erreur fatale AOT.
     writeln!(out, "    async fn fetch_batch(").unwrap();
-    writeln!(out, "        pool: &sqlx::PgPool,").unwrap();
-    writeln!(out, "        ids:  &[i64],").unwrap();
+    writeln!(out, "        _pool: &sqlx::PgPool,").unwrap();
+    writeln!(out, "        ids:   &[i64],").unwrap();
     writeln!(out, "    ) -> Result<Vec<(Self::Record, Self::VarlenOwned)>, sqlx::Error> {{").unwrap();
 
     if fixed_cols.is_empty() {
@@ -145,95 +160,44 @@ pub fn write_projection_stub(
             "        todo!(\"DB-Forge: aucune colonne fixed-length pour {schema}.{table}\")"
         ).unwrap();
     } else {
-        writeln!(out, "        let rows = sqlx::query_as::<_, {name}Row>(").unwrap();
+        // Montage du PackfileReader au premier appel — OnceLock garantit l'unicité.
+        writeln!(out, "        let reader = {screaming}_STORE.get_or_init(|| {{").unwrap();
         writeln!(out,
-            "            \"SELECT {select} FROM {from_clause} {where_clause}\","
+            "            marius_projection::PackfileReader::open(&{proj_name}::store_path())"
         ).unwrap();
-        writeln!(out, "        )").unwrap();
-        writeln!(out, "        .bind(ids)").unwrap();
-        writeln!(out, "        .fetch_all(pool)").unwrap();
-        writeln!(out, "        .await?;").unwrap();
+        writeln!(out,
+            "                .expect(\"[fetch_batch:{schema}.{table}] store.bin absent \
+             — exécuter marius-dump avant de démarrer le serveur\")"
+        ).unwrap();
+        writeln!(out, "        }});").unwrap();
+        writeln!(out).unwrap();
+
+        // Itération sur les ids demandés — lookup O(log N) par binary search.
+        // Les ids absents du store sont silencieusement ignorés (enreg. supprimé).
+        writeln!(out, "        let mut batch = Vec::with_capacity(ids.len());").unwrap();
+        writeln!(out, "        for &id in ids {{").unwrap();
+        writeln!(out, "            if let Some((record, vrefs)) = reader.lookup(id) {{").unwrap();
 
         if varlena.is_empty() {
-            // Pas de varlena : From<Row> consomme r entièrement.
-            writeln!(out,
-                "        Ok(rows.into_iter().map(|r| ({name}StorageRow::from(r), ())).collect())"
-            ).unwrap();
+            // Table sans varlena : copie du Record, VarlenOwned = ().
+            writeln!(out, "                batch.push((*record, ()));").unwrap();
         } else {
-            // Avec varlena : déstructuration complète pour éviter E0382 (partial move).
-            // From<{Name}Row> N'EST PAS appelé ici — logique de conversion reproduite inline.
-            writeln!(out, "        Ok(rows.into_iter().map(|r| {{").unwrap();
-
-            writeln!(out, "            let {name}Row {{").unwrap();
-            for col in columns {
-                let m = map_type(&col.sql_type);
-                if m.is_fixed {
-                    writeln!(out, "                {},", col.name).unwrap();
-                }
+            // Construction VarlenOwned depuis VarlenRefs (vues mmap → String owned).
+            // to_owned() : unique allocation tolérée — bornée, isolée avant render().
+            writeln!(out, "                let owned = {name}VarlenOwned {{").unwrap();
+            for (i, v) in varlena.iter().enumerate() {
+                writeln!(out,
+                    "                    {}: vrefs.get({i}).map(str::to_owned),",
+                    v.name
+                ).unwrap();
             }
-            for v in varlena {
-                writeln!(out, "                {},", v.name).unwrap();
-            }
-            writeln!(out, "                ..").unwrap();
-            writeln!(out, "            }} = r;").unwrap();
-
-            // VarlenOwned depuis les bindings varlena.
-            writeln!(out, "            let owned = {name}VarlenOwned {{").unwrap();
-            for v in varlena {
-                writeln!(out, "                {},", v.name).unwrap();
-            }
-            writeln!(out, "            }};").unwrap();
-
-            // StorageRow depuis les bindings fixed — logique From<Row> inline.
-            writeln!(out, "            let storage = {name}StorageRow {{").unwrap();
-
-            let mut layout_bytes = 0usize;
-            let mut max_align    = 1usize;
-
-            for col in columns {
-                let m = map_type(&col.sql_type);
-                if !m.is_fixed { continue; }
-                // Accumulation binaire pour le calcul du padding
-                layout_bytes += m.size_bytes;
-                max_align     = max_align.max(m.alignment);
-
-                let mut expr = if col.is_notnull {
-                    match m.row_type {
-                        "chrono::DateTime<chrono::Utc>" => {
-                            format!("{}.timestamp_micros()", col.name)
-                        }
-                        "chrono::NaiveDateTime" => {
-                            format!("{}.and_utc().timestamp_micros()", col.name)
-                        }
-                        "chrono::NaiveDate" => {
-                            format!("{}.num_days_from_ce()", col.name)
-                        }
-                        _ => col.name.clone(),
-                    }
-                } else {
-                    m.from_expr.replace("{field}", &col.name)
-                };
-
-                // Cast explicite vers le type compact de destination (u8)
-                if m.row_type == "bool" {
-                    expr = format!("({expr}) as u8");
-                }
-                
-                writeln!(out, "                {}: {},", col.name, expr).unwrap();
-            }
-
-            // Injection du tail padding structurel pour satisfaire l'alignement et bytemuck
-            let padded_size = layout_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
-            let tail_pad = padded_size - layout_bytes;
-            if tail_pad > 0 {
-                writeln!(out, "                _pad: [0u8; {tail_pad}],").unwrap();
-            }
-
-            writeln!(out, "            }};").unwrap();
-
-            writeln!(out, "            (storage, owned)").unwrap();
-            writeln!(out, "        }}).collect())").unwrap();
+            writeln!(out, "                }};").unwrap();
+            writeln!(out, "                batch.push((*record, owned));").unwrap();
         }
+
+        writeln!(out, "            }}").unwrap();
+        writeln!(out, "        }}").unwrap();
+        writeln!(out, "        Ok(batch)").unwrap();
     }
 
     writeln!(out, "    }}").unwrap();
@@ -302,7 +266,12 @@ pub fn write_projection_stub(
     // ── varlena_field_count() + encode_varlena() ─────────────────────────────
     // Émis uniquement si la table a des colonnes varlena.
     // Sans ces overrides, le trait applique les defaults (0 / no-op) →
-    // PackfileBuilder n'écrit ni TOC ni Heap → store tronqué à Header+Rows+IDIdx.
+    // PackfileBuilder n'écrit ni TOC ni Heap → store tronqué.
+    //
+    // Sentinel : offset=u32::MAX, len=0 pour None OU Some("").
+    // Some("") est sémantiquement absent : écrire un slot len=0 dans le heap
+    // consomme une entrée TOC pour zéro octet utile et bloque le chemin sentinel
+    // côté reader (qui teste offset == u32::MAX, pas len == 0).
     if !varlena.is_empty() {
         let vf = varlena.len();
 
@@ -316,16 +285,14 @@ pub fn write_projection_stub(
         writeln!(out, "        toc:   &mut Vec<marius_projection::VarlenSlot>,").unwrap();
         writeln!(out, "    ) {{").unwrap();
         for v in varlena {
-            // Option<String> → heap contiguë + slot TOC.
-            // None → sentinel offset=u32::MAX, len=0 (convention VarlenSlot).
-            writeln!(out, "        match &owned.{} {{", v.name).unwrap();
-            writeln!(out, "            Some(s) => {{").unwrap();
+            writeln!(out, "        match owned.{}.as_deref() {{", v.name).unwrap();
+            writeln!(out, "            Some(s) if !s.is_empty() => {{").unwrap();
             writeln!(out, "                let offset = heap.len() as u32;").unwrap();
             writeln!(out, "                let len    = s.len() as u32;").unwrap();
             writeln!(out, "                heap.extend_from_slice(s.as_bytes());").unwrap();
             writeln!(out, "                toc.push(marius_projection::VarlenSlot {{ offset, len }});").unwrap();
             writeln!(out, "            }}").unwrap();
-            writeln!(out, "            None => toc.push(marius_projection::VarlenSlot {{ offset: u32::MAX, len: 0 }}),").unwrap();
+            writeln!(out, "            _ => toc.push(marius_projection::VarlenSlot {{ offset: u32::MAX, len: 0 }}),").unwrap();
             writeln!(out, "        }}").unwrap();
         }
         writeln!(out, "    }}").unwrap();
