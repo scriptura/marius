@@ -14,3 +14,4 @@ categories = ["database"]
 # Phase 2 (SHM) : fetch_batch utilisera mmap — sqlx sera retiré du trait.
 sqlx = { workspace = true }
 bytemuck = { version = "1.14", features = ["derive"] }
+memmap2 = "0.9.10"

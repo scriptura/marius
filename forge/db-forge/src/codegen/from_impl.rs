@@ -75,4 +75,3 @@ pub fn write_from_impl(
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}\n").unwrap();
 }
-

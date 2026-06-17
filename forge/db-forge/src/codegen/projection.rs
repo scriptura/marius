@@ -176,7 +176,7 @@ pub fn write_projection_stub(
         // Les ids absents du store sont silencieusement ignorés (enreg. supprimé).
         writeln!(out, "        let mut batch = Vec::with_capacity(ids.len());").unwrap();
         writeln!(out, "        for &id in ids {{").unwrap();
-        writeln!(out, "            if let Some((record, vrefs)) = reader.lookup(id) {{").unwrap();
+        writeln!(out, "            if let Some((record, _vrefs)) = reader.lookup(id) {{").unwrap();
 
         if varlena.is_empty() {
             // Table sans varlena : copie du Record, VarlenOwned = ().
@@ -187,7 +187,7 @@ pub fn write_projection_stub(
             writeln!(out, "                let owned = {name}VarlenOwned {{").unwrap();
             for (i, v) in varlena.iter().enumerate() {
                 writeln!(out,
-                    "                    {}: vrefs.get({i}).map(str::to_owned),",
+                    "                    {}: _vrefs.get({i}).map(str::to_owned),",
                     v.name
                 ).unwrap();
             }

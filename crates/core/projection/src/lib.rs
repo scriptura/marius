@@ -74,6 +74,8 @@ pub struct VarlenSlot {
 // de dérive silencieuse.
 // =============================================================================
 
+pub use packfile_reader::PackfileReader;
+
 /// Header du store.bin — exactement 64B (une cache line).
 /// Placé en tête du fichier, lu au montage par PackfileReader.
 #[repr(C)]

@@ -12,9 +12,8 @@
 use std::fs;
 use std::mem;
 
-use marius_render::packfile_builder::PackfileStoreHeader;
 use marius_schema::{ContentCoreProjection, ContentCoreStorageRow};
-use marius_projection::{Projection, VarlenSlot};
+use marius_projection::{Projection, VarlenSlot, PackfileStoreHeader};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store_path = ContentCoreProjection::store_path();
