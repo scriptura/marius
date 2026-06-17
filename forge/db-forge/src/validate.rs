@@ -80,7 +80,13 @@ mod tests {
     use crate::mapping::Column;
 
     fn col(name: &str, sql_type: &str, is_notnull: bool) -> Column {
-        Column { attnum: 1, name: name.to_string(), sql_type: sql_type.to_string(), is_notnull }
+        Column {
+            attnum: 1,
+            name: name.to_string(),
+            sql_type: sql_type.to_string(),
+            is_notnull,
+            sentinel: None,
+        }
     }
 
     /// Cas nominal : layout cohérent avec intent_density.

@@ -28,7 +28,8 @@ pub async fn fetch_columns(
              a.attnum::smallint,
              a.attname::text,
              format_type(a.atttypid, a.atttypmod),
-             a.attnotnull
+             a.attnotnull,
+             COALESCE(col_description(c.oid, a.attnum), '')::text
          FROM  pg_attribute  a
          JOIN  pg_class      c ON a.attrelid = c.oid
          JOIN  pg_namespace  n ON c.relnamespace = n.oid
@@ -48,6 +49,7 @@ pub async fn fetch_columns(
         name:       r.get::<String, _>(1),
         sql_type:   r.get::<String, _>(2),
         is_notnull: r.get::<bool,   _>(3),
+        sentinel:   parse_sentinel(&r.get::<String, _>(4)),
     }).collect())
 }
 
@@ -292,6 +294,29 @@ pub(crate) fn parse_check_length_limit(consrc: &str) -> Option<usize> {
         .ok()
 }
 
+// =============================================================================
+// Utilitaire : extraction du sentinel depuis pg_description
+// =============================================================================
+
+/// Extrait la valeur sentinel depuis le commentaire de colonne PostgreSQL.
+///
+/// Convention Phase 3 :
+///   `COMMENT ON COLUMN schema.table.col IS 'marius:sentinel=<valeur>';`
+///
+/// Supporte les commentaires composés (séparés par ';') :
+///   `'Description lisible ; marius:sentinel=-1'` → Some("-1")
+///
+/// Retourne None si la clé `marius:sentinel=` est absente.
+pub(crate) fn parse_sentinel(description: &str) -> Option<String> {
+    const KEY: &str = "marius:sentinel=";
+    description
+        .split(';')
+        .map(str::trim)
+        .find(|s| s.starts_with(KEY))
+        .map(|s| s[KEY.len()..].trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +334,41 @@ mod tests {
     #[test]
     fn parse_check_unknown() {
         assert_eq!(parse_check_length_limit("(label IS NOT NULL)"), None);
+    }
+
+    // ── Tests parse_sentinel ─────────────────────────────────────────────────
+
+    #[test]
+    fn sentinel_simple() {
+        assert_eq!(parse_sentinel("marius:sentinel=0"), Some("0".to_string()));
+    }
+
+    #[test]
+    fn sentinel_negative() {
+        assert_eq!(parse_sentinel("marius:sentinel=-1"), Some("-1".to_string()));
+    }
+
+    #[test]
+    fn sentinel_composite_comment() {
+        assert_eq!(
+            parse_sentinel("Colonne de liaison ; marius:sentinel=0"),
+            Some("0".to_string())
+        );
+    }
+
+    #[test]
+    fn sentinel_absent() {
+        assert_eq!(parse_sentinel("Description sans annotation"), None);
+    }
+
+    #[test]
+    fn sentinel_empty_comment() {
+        assert_eq!(parse_sentinel(""), None);
+    }
+
+    #[test]
+    fn sentinel_key_without_value() {
+        // Clé présente mais valeur vide → None (filtre sur is_empty)
+        assert_eq!(parse_sentinel("marius:sentinel="), None);
     }
 }
