@@ -1,7 +1,7 @@
 // =============================================================================
 // marius-render · dumper.rs
 //
-// Full dump AOT : lit toutes les entités d'une table via Projection::fetch_batch,
+// Full dump AOT : lit toutes les entités d'une table via Projection::fetch_from_pg,
 // les sérialise en binary store (PackfileBuilder), écrit le fichier une fois.
 //
 // Point d'entrée : dump_table<P>(). Appelé par le binaire marius-dump au runtime,
@@ -11,6 +11,10 @@
 //   INV-5 : PackfileBuilder::new(capacity) pré-alloue — aucun resize si
 //            capacity >= nombre réel d'entités.
 //   INV-6 : un seul File::create() + BufWriter::flush() par table.
+//
+// Voie d'Extraction (cold path) — séparée de la Voie d'Exécution (hot path).
+// fetch_from_pg : réseau PG, allocations, SQLx.
+// fetch_batch   : mmap, zéro allocation, OnceLock — réservé au serveur.
 // =============================================================================
 
 use std::fs::File;
@@ -23,15 +27,13 @@ use marius_projection::Projection;
 use crate::packfile_builder::PackfileBuilder;
 
 /// Taille d'un chunk de fetch. 4096 ids par aller-retour réseau.
-/// Ajustable selon la latence PG et la taille des tuples.
 const CHUNK_SIZE: usize = 4096;
 
-/// Exécute le full dump d'une table : fetch par chunks, accumulation,
-/// écriture binaire unique.
+/// Exécute le full dump d'une table : fetch par chunks depuis PostgreSQL,
+/// accumulation, écriture binaire unique.
 ///
-/// `all_ids`  : slice trié ASC des ids à exporter (produit par Collector
-///              ou par SELECT id FROM schema.table ORDER BY id).
-/// `capacity` : hint de pré-allocation (typiquement fetch_max_id() + 20%).
+/// Utilise P::fetch_from_pg() — Voie d'Extraction AOT.
+/// N'appelle jamais P::fetch_batch() (Voie d'Exécution mmap/serveur).
 pub async fn dump_table<P>(
     pool:     &PgPool,
     all_ids:  &[i64],
@@ -43,9 +45,9 @@ where
 {
     let mut builder = PackfileBuilder::<P>::new(capacity);
 
-    // ── Fetch par chunks ──────────────────────────────────────────────────────
+    // ── Fetch par chunks depuis PostgreSQL ────────────────────────────────────
     for chunk in all_ids.chunks(CHUNK_SIZE) {
-        let batch = P::fetch_batch(pool, chunk)
+        let batch = P::fetch_from_pg(pool, chunk)
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 

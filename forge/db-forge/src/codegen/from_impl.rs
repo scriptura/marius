@@ -80,7 +80,11 @@ pub fn write_from_impl(
             expr = format!("({expr}) as u8");
         }
 
-        writeln!(out, "            {}: {},", col.name, expr).unwrap();
+        if col.name == expr {
+            writeln!(out, "            {},", col.name).unwrap();
+        } else {
+            writeln!(out, "            {}: {},", col.name, expr).unwrap();
+        }
     }
 
     // Tail padding calculé statiquement pour satisfaire bytemuck::Pod.

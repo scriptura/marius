@@ -53,10 +53,10 @@ pub fn write_projection_stub(
         );
     }
 
-    // ── Construction SELECT + FROM (conservé pour référence — inutilisé en Phase 2 AOT) ─
-    // fetch_batch Phase 2 lit le store.bin via PackfileReader, pas via SQLx.
-    // Ces variables sont préfixées _ pour supprimer les warnings du compilateur.
-    let (_select, _from_clause) = if let Some((vs, vt, _fk)) = varlena_join {
+    // ── Construction SELECT + FROM (Voie d'Extraction — fetch_from_pg) ────────
+    // Ces variables alimentent le corps SQLx de fetch_from_pg ci-dessous.
+    // Non utilisées par fetch_batch (Voie d'Exécution mmap).
+    let (select, from_clause) = if let Some((vs, vt, _fk)) = varlena_join {
         let varlena_cols: Vec<String> = varlena.iter()
             .map(|v| format!("{vt}.{}", v.name))
             .collect();
@@ -72,7 +72,7 @@ pub fn write_projection_stub(
         (fixed_cols.join(", "), format!("{schema}.{table}"))
     };
 
-    let _where_clause = match pk {
+    let where_clause = match pk {
         PrimaryKey::Single(col) => format!(
             "WHERE {schema}.{table}.{col} = ANY($1) ORDER BY {schema}.{table}.{col} ASC"
         ),
@@ -134,7 +134,7 @@ pub fn write_projection_stub(
     // OnceLock est thread-safe sans verrou — Mmap est Send + Sync.
     writeln!(out,
         "static {screaming}_STORE: std::sync::OnceLock<\
-         marius_projection::PackfileReader<{proj_name}>> = std::sync::OnceLock::new();"
+         marius_projection::packfile_reader::PackfileReader<{proj_name}>> = std::sync::OnceLock::new();"
     ).unwrap();
     writeln!(out).unwrap();
 
@@ -163,7 +163,7 @@ pub fn write_projection_stub(
         // Montage du PackfileReader au premier appel — OnceLock garantit l'unicité.
         writeln!(out, "        let reader = {screaming}_STORE.get_or_init(|| {{").unwrap();
         writeln!(out,
-            "            marius_projection::PackfileReader::open(&{proj_name}::store_path())"
+            "            marius_projection::packfile_reader::PackfileReader::open(&{proj_name}::store_path())"
         ).unwrap();
         writeln!(out,
             "                .expect(\"[fetch_batch:{schema}.{table}] store.bin absent \
@@ -198,6 +198,113 @@ pub fn write_projection_stub(
         writeln!(out, "            }}").unwrap();
         writeln!(out, "        }}").unwrap();
         writeln!(out, "        Ok(batch)").unwrap();
+    }
+
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // ── fetch_from_pg (Voie d'Extraction — cold path marius-dump) ─────────────
+    // Corps SQLx identique à l'ancien fetch_batch Phase 1.
+    // pool : utilisé (requête réseau réelle vers PostgreSQL).
+    // Appelée uniquement par dumper::dump_table — jamais par le Dispatcher.
+    writeln!(out, "    async fn fetch_from_pg(").unwrap();
+    writeln!(out, "        pool: &sqlx::PgPool,").unwrap();
+    writeln!(out, "        ids:  &[i64],").unwrap();
+    writeln!(out, "    ) -> Result<Vec<(Self::Record, Self::VarlenOwned)>, sqlx::Error> {{").unwrap();
+
+    if fixed_cols.is_empty() {
+        writeln!(out,
+            "        todo!(\"DB-Forge: aucune colonne fixed-length pour {schema}.{table}\")"
+        ).unwrap();
+    } else {
+        writeln!(out, "        let rows = sqlx::query_as::<_, {name}Row>(").unwrap();
+        writeln!(out, "            \"SELECT {select} FROM {from_clause} {where_clause}\",").unwrap();
+        writeln!(out, "        )").unwrap();
+        writeln!(out, "        .bind(ids)").unwrap();
+        writeln!(out, "        .fetch_all(pool)").unwrap();
+        writeln!(out, "        .await?;").unwrap();
+
+        if varlena.is_empty() {
+            // Pas de varlena : From<Row> pour la conversion.
+            writeln!(out,
+                "        Ok(rows.into_iter().map(|r| ({name}StorageRow::from(r), ())).collect())"
+            ).unwrap();
+        } else {
+            // Avec varlena : déstructuration complète (évite E0382 partial move).
+            writeln!(out, "        Ok(rows.into_iter().map(|r| {{").unwrap();
+
+            writeln!(out, "            let {name}Row {{").unwrap();
+            for col in columns {
+                let m = map_type(&col.sql_type);
+                if m.is_fixed {
+                    writeln!(out, "                {},", col.name).unwrap();
+                }
+            }
+            for v in varlena {
+                writeln!(out, "                {},", v.name).unwrap();
+            }
+            writeln!(out, "                ..").unwrap();
+            writeln!(out, "            }} = r;").unwrap();
+
+            // VarlenOwned depuis les bindings varlena.
+            writeln!(out, "            let owned = {name}VarlenOwned {{").unwrap();
+            for v in varlena {
+                writeln!(out, "                {},", v.name).unwrap();
+            }
+            writeln!(out, "            }};").unwrap();
+
+            // StorageRow depuis les bindings fixed — sentinel Phase 3 intégré.
+            writeln!(out, "            let storage = {name}StorageRow {{").unwrap();
+
+            let mut layout_bytes = 0usize;
+            let mut max_align    = 1usize;
+
+            for col in columns {
+                let m = map_type(&col.sql_type);
+                if !m.is_fixed { continue; }
+
+                layout_bytes += m.size_bytes;
+                max_align     = max_align.max(m.alignment);
+
+                let sentinel = col.sentinel.as_deref().unwrap_or(m.default_sentinel);
+
+                let mut expr = if col.is_notnull {
+                    match m.row_type {
+                        "chrono::DateTime<chrono::Utc>" =>
+                            format!("{}.timestamp_micros()", col.name),
+                        "chrono::NaiveDateTime" =>
+                            format!("{}.and_utc().timestamp_micros()", col.name),
+                        "chrono::NaiveDate" =>
+                            format!("{}.num_days_from_ce()", col.name),
+                        _ => col.name.clone(),
+                    }
+                } else {
+                    m.from_expr
+                        .replace("{field}", &col.name)
+                        .replace("{sentinel}", sentinel)
+                };
+
+                if m.row_type == "bool" {
+                    expr = format!("({expr}) as u8");
+                }
+
+                if col.name == expr {
+                    writeln!(out, "                {},", col.name).unwrap();
+                } else {
+                    writeln!(out, "                {}: {},", col.name, expr).unwrap();
+                }
+            }
+
+            let padded_size = layout_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
+            let tail_pad    = padded_size - layout_bytes;
+            if tail_pad > 0 {
+                writeln!(out, "                _pad: [0u8; {tail_pad}],").unwrap();
+            }
+
+            writeln!(out, "            }};").unwrap();
+            writeln!(out, "            (storage, owned)").unwrap();
+            writeln!(out, "        }}).collect())").unwrap();
+        }
     }
 
     writeln!(out, "    }}").unwrap();

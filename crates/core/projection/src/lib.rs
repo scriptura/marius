@@ -32,6 +32,24 @@ pub trait Projection: Sized + Send + Sync + 'static {
     type Record: Sized + Send + 'static;
     type VarlenOwned: Sized + Send + 'static;
 
+    // ── Voie d'Extraction (cold path — marius-dump) ───────────────────────────
+    //
+    // Accès PostgreSQL direct via SQLx. Allocations autorisées.
+    // Appelée exclusivement par dumper::dump_table pour peupler le store.bin.
+    // Default : retourne Err — la Forge génère l'override pour chaque Projection.
+    fn fetch_from_pg(
+        _pool: &sqlx::PgPool,
+        _ids:  &[i64],
+    ) -> impl std::future::Future<Output = BatchResult<Self>> + Send {
+        std::future::ready(Err(sqlx::Error::Configuration(
+            "[fetch_from_pg] override SQLx non généré — exécuter cargo build".into()
+        )))
+    }
+
+    // ── Voie d'Exécution (hot path — serveur) ────────────────────────────────
+    //
+    // Lecture mmap via OnceLock<PackfileReader>. Zéro allocation.
+    // Fail-fast si store.bin absent : exécuter marius-dump d'abord.
     fn fetch_batch(
         pool: &sqlx::PgPool,
         ids:  &[i64],
@@ -74,8 +92,6 @@ pub struct VarlenSlot {
 // de dérive silencieuse.
 // =============================================================================
 
-pub use packfile_reader::PackfileReader;
-
 /// Header du store.bin — exactement 64B (une cache line).
 /// Placé en tête du fichier, lu au montage par PackfileReader.
 #[repr(C)]
@@ -117,7 +133,7 @@ pub mod packfile_reader {
     use memmap2::Mmap;
 
     use super::{PackfileStoreHeader, Projection, VarlenSlot};
-
+    
     /// Vue sur les champs varlena d'un enregistrement.
     /// Zéro copie — lifetime lié au PackfileReader.
     pub struct VarlenRefs<'a> {
