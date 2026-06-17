@@ -271,3 +271,7 @@ La question qui guide le projet reste finalement très simple :
 Quelle est la structure minimale capable de produire les propriétés recherchées ?
 
 Toutes les décisions architecturales, toutes les expérimentations et tous les outils développés dans le cadre du projet constituent des tentatives de réponse à cette question.
+
+---
+
+Document rédigé le 17 juin 2026.
