@@ -126,4 +126,32 @@ mod tests {
         // payload = 8, total = 32
         assert!(validate_layout(&columns, 32).is_ok());
     }
+
+    /// Cas table sans aucune colonne fixed-length (uniquement varlena).
+    /// payload = 0B, max_align = 1 → padded = 0B.
+    /// n_total = 1 → header = MAXALIGN(23 + 1) = 24B. Total = 24B.
+    #[test]
+    fn zero_fixed_columns_all_varlena() {
+        let columns = vec![col("slug", "text", false)];
+        assert!(validate_layout(&columns, 24).is_ok());
+    }
+
+    /// Cas table vide (zéro colonnes).
+    /// n_total = 0 → header = MAXALIGN(ceil(23/8) × 8) = MAXALIGN(24) = 24B.
+    /// payload = 0B. Total = 24B.
+    #[test]
+    fn zero_columns_layout() {
+        let columns: Vec<Column> = vec![];
+        assert!(validate_layout(&columns, 24).is_ok());
+    }
+
+    /// Message d'erreur contient les valeurs calculé/enregistré (débogage).
+    #[test]
+    fn error_message_contains_computed_and_registered() {
+        let columns = vec![col("id", "int8", true)];
+        let err = validate_layout(&columns, 99).unwrap_err();
+        assert!(err.contains("32"),  "message doit mentionner la valeur calculée (32B)");
+        assert!(err.contains("99"),  "message doit mentionner la valeur enregistrée (99B)");
+        assert!(err.contains("diverge"), "message doit mentionner la divergence");
+    }
 }

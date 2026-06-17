@@ -38,4 +38,9 @@ mod tests {
     fn screaming_simple() {
         assert_eq!(to_screaming("content_core"), "CONTENT_CORE");
     }
+
+    #[test]
+    fn screaming_compound() {
+        assert_eq!(to_screaming("commerce_product_core"), "COMMERCE_PRODUCT_CORE");
+    }
 }

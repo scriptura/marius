@@ -372,3 +372,85 @@ mod tests {
         assert_eq!(parse_sentinel("marius:sentinel="), None);
     }
 }
+
+// =============================================================================
+// Tests d'intégration — Phase 4.4
+// Marqués #[ignore] : requièrent DATABASE_URL + schéma marius opérationnel.
+// Exécution : cargo test -p marius-db-forge -- --ignored
+// =============================================================================
+
+#[cfg(test)]
+mod integration {
+    use super::*;
+    use crate::registry::fetch_component_list;
+    use crate::validate::validate_layout;
+
+    async fn connect() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL requis pour les tests d'intégration");
+        sqlx::PgPool::connect(&url).await
+            .expect("Connexion PgPool échouée")
+    }
+
+    /// fetch_component_list() retourne au moins 2 composants.
+    /// Invariant : meta.containment_intent contient au minimum
+    /// content.core et commerce.product_core.
+    #[tokio::test]
+    #[ignore]
+    async fn fetch_component_list_returns_at_least_two() {
+        let pool  = connect().await;
+        let comps = fetch_component_list(&pool).await
+            .expect("fetch_component_list échoué");
+        assert!(
+            comps.len() >= 2,
+            "Moins de 2 composants — meta.containment_intent vide ou incomplet : {:?}",
+            comps.iter().map(|c| format!("{}.{}", c.schema, c.table)).collect::<Vec<_>>()
+        );
+    }
+
+    /// fetch_columns() pour content.core retourne les colonnes triées attnum ASC.
+    /// Invariant de Symétrie Mécanique : l'ordre attnum == l'ordre StorageRow.
+    #[tokio::test]
+    #[ignore]
+    async fn fetch_columns_content_core_ordered_by_attnum() {
+        let pool = connect().await;
+        let cols = fetch_columns(&pool, "content", "core").await
+            .expect("fetch_columns échoué");
+        assert!(
+            !cols.is_empty(),
+            "Aucune colonne pour content.core — table absente ou vide"
+        );
+        for w in cols.windows(2) {
+            assert!(
+                w[0].attnum < w[1].attnum,
+                "Colonnes non triées par attnum : {} ({}) >= {} ({})",
+                w[0].name, w[0].attnum,
+                w[1].name, w[1].attnum,
+            );
+        }
+    }
+
+    /// validate_layout() passe pour tous les composants enregistrés
+    /// avec intent_density != 0.
+    /// Régression directe de Phase 2 : aucune divergence tolérée post-correction.
+    #[tokio::test]
+    #[ignore]
+    async fn validate_layout_passes_for_all_registered_components() {
+        let pool  = connect().await;
+        let comps = fetch_component_list(&pool).await
+            .expect("fetch_component_list échoué");
+
+        for comp in &comps {
+            if comp.intent_density == 0 { continue; }
+
+            let cols = fetch_columns(&pool, &comp.schema, &comp.table).await
+                .expect(&format!("fetch_columns échoué pour {}.{}", comp.schema, comp.table));
+
+            validate_layout(&cols, comp.intent_density)
+                .unwrap_or_else(|msg| panic!(
+                    "{}.{} : {}",
+                    comp.schema, comp.table, msg
+                ));
+        }
+    }
+}

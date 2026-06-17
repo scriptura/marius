@@ -30,6 +30,7 @@ use marius_db_forge::{
     PrimaryKey,
     fetch_component_list,
     fetch_columns, fetch_max_id, fetch_pk_column, fetch_varlena_cols,
+    validate_layout,
     write_collector, write_from_impl, write_projection_stub,
     write_row_struct, write_section_header, write_store_struct,
     write_varlen_owned_struct,
@@ -109,8 +110,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None    => vec![],
         };
 
-        // Phase 2 : insérer ici validate_layout(&columns, comp.intent_density)?;
-        // et émettre cargo:error si Err (intent_density != 0 requis).
+        // ── Phase 2 : validation layout ───────────────────────────────────────
+        // Garde : intent_density == 0 signifie que la densité n'est pas déclarée
+        // dans le registre — skip silencieux (composant en cours de configuration).
+        // Tout autre écart est une erreur de build fatale (cargo:error).
+        if comp.intent_density != 0
+            && let Err(msg) = validate_layout(&columns, comp.intent_density) {
+                println!(
+                    "cargo:error=DB-Forge [{}.{}] : {}",
+                    comp.schema, comp.table, msg
+                );
+                std::process::exit(1);
+            }
 
         write_section_header(&mut output, &comp.schema, &comp.table, &pk);
         write_row_struct(&mut output, &comp.schema, &comp.table, &columns, &varlena);

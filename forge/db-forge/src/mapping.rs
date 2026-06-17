@@ -174,3 +174,99 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Vérifie is_fixed, size_bytes, alignment et default_sentinel pour un type SQL.
+    fn check(sql: &str, is_fixed: bool, size: usize, align: usize, sentinel: &str) {
+        let m = map_type(sql);
+        assert_eq!(m.is_fixed,   is_fixed, "is_fixed   pour {sql}");
+        assert_eq!(m.size_bytes, size,     "size_bytes pour {sql}");
+        assert_eq!(m.alignment,  align,    "alignment  pour {sql}");
+        assert_eq!(m.default_sentinel, sentinel, "default_sentinel pour {sql}");
+    }
+
+    // ── Entiers ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn map_int8()    { check("int8",    true,  8, 8, "-1"); }
+    #[test]
+    fn map_bigint()  { check("bigint",  true,  8, 8, "-1"); }
+    #[test]
+    fn map_int4()    { check("int4",    true,  4, 4, "0");  }
+    #[test]
+    fn map_integer() { check("integer", true,  4, 4, "0");  }
+    #[test]
+    fn map_serial()  { check("serial",  true,  4, 4, "0");  }
+    #[test]
+    fn map_int2()    { check("int2",    true,  2, 2, "0");  }
+    #[test]
+    fn map_smallint(){ check("smallint",true,  2, 2, "0");  }
+
+    // ── Booléen ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn map_bool()    { check("bool",    true,  1, 1, "false"); }
+    #[test]
+    fn map_boolean() { check("boolean", true,  1, 1, "false"); }
+
+    // ── UUID ─────────────────────────────────────────────────────────────────
+    // alignment = 1 : [u8; 16] est un tableau d'octets, pas de contrainte sup.
+
+    #[test]
+    fn map_uuid()    { check("uuid",    true, 16, 1, "[0u8; 16]"); }
+
+    // ── Temporels ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn map_timestamptz()          { check("timestamptz",                  true, 8, 8, "0"); }
+    #[test]
+    fn map_timestamp_with_tz()    { check("timestamp with time zone",     true, 8, 8, "0"); }
+    #[test]
+    fn map_timestamp()            { check("timestamp",                    true, 8, 8, "0"); }
+    #[test]
+    fn map_timestamp_without_tz() { check("timestamp without time zone",  true, 8, 8, "0"); }
+    #[test]
+    fn map_date()                 { check("date",                         true, 4, 4, "0"); }
+
+    // ── Flottants ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn map_float4()           { check("float4",           true, 4, 4, "0.0"); }
+    #[test]
+    fn map_real()             { check("real",             true, 4, 4, "0.0"); }
+    #[test]
+    fn map_float8()           { check("float8",           true, 8, 8, "0.0"); }
+    #[test]
+    fn map_double_precision() { check("double precision", true, 8, 8, "0.0"); }
+
+    // ── Varlena (non fixed) ───────────────────────────────────────────────────
+
+    #[test]
+    fn map_text()    { check("text",    false, 0, 0, ""); }
+    #[test]
+    fn map_varchar() { check("varchar", false, 0, 0, ""); }
+    #[test]
+    fn map_character_varying()            { check("character varying",      false, 0, 0, ""); }
+    #[test]
+    fn map_character_varying_precision()  { check("character varying(255)", false, 0, 0, ""); }
+    #[test]
+    fn map_jsonb()   { check("jsonb",   false, 0, 0, ""); }
+    #[test]
+    fn map_json()    { check("json",    false, 0, 0, ""); }
+    #[test]
+    fn map_bytea()   { check("bytea",   false, 0, 0, ""); }
+
+    // ── Précision ignorée (normalisation split '(') ───────────────────────────
+
+    #[test]
+    fn map_varchar_precision_strips_to_varlena() {
+        // "character varying(255)" → même résultat que "character varying"
+        let a = map_type("character varying(255)");
+        let b = map_type("character varying");
+        assert_eq!(a.is_fixed,   b.is_fixed);
+        assert_eq!(a.size_bytes, b.size_bytes);
+    }
+}
