@@ -36,11 +36,11 @@ Ne jamais modifier ce fichier manuellement.
 
 Déclare les tables gérées par le pipeline AOT.
 
-| Colonne                | Type        | Description                                                                |
-| ---------------------- | ----------- | -------------------------------------------------------------------------- |
-| `component_id`         | `text` PK   | `schema.table` — doit correspondre à une table existante                   |
-| `intent_density_bytes` | `int2`      | Taille totale du layout `#[repr(C)]` en octets (header PG + payload fixed) |
-| `rls_guard_bitmask`    | `int4` NULL | Réservé Guard-Forge                                                        |
+| Colonne                | Type        | Description                                                                                                                                                 |
+| ---------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `component_id`         | `text` PK   | `schema.table` — doit correspondre à une table existante                                                                                                    |
+| `intent_density_bytes` | `int2`      | Empreinte matérielle de la table dans PostgreSQL : header tuple MVCC + payload fixed-length aligné. **Distinct du `stride` du store.bin** (voir section 6). |
+| `rls_guard_bitmask`    | `int4` NULL | Réservé Guard-Forge                                                                                                                                         |
 
 ```sql
 -- Ajouter un composant
@@ -143,8 +143,18 @@ COMMENT ON COLUMN content.identity.description
 
 ## 4. Calcul de `intent_density_bytes`
 
-`intent_density_bytes` doit correspondre exactement au layout `#[repr(C)]`
-calculé par `validate_layout()` dans `forge/db-forge/src/validate.rs`.
+**Deux concepts distincts à ne pas confondre :**
+
+| Grandeur               | Valeur              | Contenu                                                                          |
+| ---------------------- | ------------------- | -------------------------------------------------------------------------------- |
+| `intent_density_bytes` | header PG + payload | Empreinte d'un tuple dans le heap PostgreSQL. Validée par `validate_layout()`.   |
+| `stride` (store.bin)   | payload seul        | `sizeof(StorageRow)` — la struct `#[repr(C)]` ne contient jamais le header MVCC. |
+
+`intent_density_bytes` sert à vérifier que le DDL est maîtrisé et cohérent avec
+la Forge. Le `stride` du store.bin est calculé indépendamment par `mem::size_of::<P::Record>()`.
+
+`intent_density_bytes` doit correspondre exactement au layout calculé
+par `validate_layout()` dans `forge/db-forge/src/validate.rs`.
 
 **Formule :**
 
@@ -219,6 +229,12 @@ cargo run --bin marius-dump
 
 # 9. Valider le store.bin
 cargo run --bin marius-verify
+
+# 10. Démarrer (ou redémarrer) le serveur
+cargo run --bin marius-server
+# Au premier appel de fetch_batch, OnceLock::get_or_init() monte le PackfileReader
+# et déclenche madvise(MADV_WILLNEED) — pages du store.bin pré-chargées en RAM.
+# Les lookups suivants ne génèrent aucun page fault.
 ```
 
 ---
@@ -237,6 +253,11 @@ align8   ID Index           row_count × 8B (i64), trié ASC
 align8   Varlena TOC        row_count × varlena_field_count × 8B (VarlenSlot)
 align8   Varlena Heap       bytes UTF-8 concaténés des champs varlena
 ```
+
+L'**ID Index est une section séparée** (et non entrelacé dans les StorageRow)
+pour permettre une recherche binaire O(log N) sur les IDs sans charger les données.
+`PackfileReader::lookup(id)` opère exclusivement sur l'ID Index, puis accède
+au StorageRow correspondant par index direct — aucun scan séquentiel.
 
 `VarlenSlot { offset: u32::MAX, len: 0 }` = sentinel null (champ absent ou vide).
 
@@ -269,4 +290,4 @@ cargo test -p marius-schema
 
 ---
 
-_Dernière mise à jour : Phase 4 db-forge — Juillet 2026._
+_Dernière mise à jour : Phase 4 db-forge — 17 Juin 2026._
