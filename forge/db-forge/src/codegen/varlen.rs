@@ -38,11 +38,22 @@ pub fn write_varlen_owned_struct(
     writeln!(out, "pub struct {name}VarlenOwned {{").unwrap();
 
     for v in varlena {
+        // max_len est Option<usize> depuis ADR-007 (frontière Hot/Cold) :
+        // None signifie "pas de borne connue dans le schéma PostgreSQL"
+        // (TEXT sans VARCHAR(N) ni CHECK reconnu). Affiché explicitement
+        // dans le commentaire généré plutôt que masqué — un mainteneur
+        // lisant generated_schema.rs doit voir immédiatement qu'un champ
+        // non borné existe, avant même qu'il ne déclenche éventuellement
+        // un ResolverError::UnboundedField s'il est référencé par un template.
+        let bound_descr = match v.max_len {
+            Some(n) => format!("VARCHAR({n})"),
+            None    => "TEXT (non borné — Cold sauf si référencé)".to_string(),
+        };
         writeln!(out,
-            "    /// VARCHAR({}) — {} × {}.",
-            v.max_len,
-            if v.is_pre_escaped { "pré-échappé, facteur" } else { "escape HTML, facteur" },
-            if v.is_pre_escaped { 1 } else { VarlenField::HTML_ESCAPE_FACTOR },
+            "    /// {} — {} × {}.",
+            bound_descr,
+            if v.pre_escaped { "pré-échappé, facteur" } else { "escape HTML, facteur" },
+            if v.pre_escaped { 1 } else { VarlenField::HTML_ESCAPE_FACTOR },
         ).unwrap();
         writeln!(out, "    pub {}: Option<String>,", v.name).unwrap();
     }

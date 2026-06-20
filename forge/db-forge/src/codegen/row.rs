@@ -63,9 +63,15 @@ pub fn write_row_struct(
 
     // Champs varlena de la table jointe : toujours Option<String> (LEFT JOIN possible NULL).
     for v in varlena {
+        // max_len: Option<usize> depuis ADR-007 — None affiché explicitement
+        // (TEXT non borné) plutôt que masqué. Cohérent avec varlen.rs.
+        let bound_descr = match v.max_len {
+            Some(n) => format!("VARCHAR({n})"),
+            None    => "TEXT non borné".to_string(),
+        };
         writeln!(out,
-            "    pub {}: Option<String>,  // varlena JOIN VARCHAR({}) — → as_deref()",
-            v.name, v.max_len
+            "    pub {}: Option<String>,  // varlena JOIN {} — → as_deref()",
+            v.name, bound_descr
         ).unwrap();
     }
 

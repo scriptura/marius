@@ -1,39 +1,33 @@
 // =============================================================================
-// DB-Forge — crates/core/schema/build.rs  (Phase 0 — orchestrateur mince)
+// DB-Forge — crates/core/schema/build.rs
 //
-// Responsabilité unique : orchestrer les appels à marius_db_forge et écrire
-// generated_schema.rs dans $OUT_DIR.
-//
-// ─── Ce que ce fichier NE fait plus ──────────────────────────────────────────
-//
-//   Toute la logique d'introspection et de génération a été extraite vers
-//   forge/db-forge/src/. Ce fichier ne contient plus que la séquence de build.
-//
-// ─── Phase 0 : liste hardcodée ───────────────────────────────────────────────
-//
-//   La liste des composants reste hardcodée (même comportement qu'avant).
-//   Phase 1 : remplacée par fetch_component_list(&pool).await?
-//             qui lit meta.containment_intent + meta.component_varlena_join.
-//
-// ─── Phase 2 : validation layout ─────────────────────────────────────────────
-//
-//   validate_layout() est disponible dans marius_db_forge mais non appelé ici.
-//   intent_density = 0 dans la liste Phase 0. Phase 2 : lire depuis meta +
-//   appeler validate_layout() avant write_section_header().
+// Orchestrateur build-time. Responsabilités :
+//   1. Registry driver (Phase 1)      : fetch_component_list()
+//   2. Validation layout (Phase 2)    : validate_layout()
+//   3. Pipeline template Voie B       : lecture .marius, parse, résolution,
+//      génération du corps render() — TOUTE l'I/O disque vit ici.
+//      db-forge (write_projection_stub) reste un générateur pur : il reçoit
+//      le résultat déjà calculé (Option<(&str, &TemplateMetrics)>).
 //
 // Prérequis : DATABASE_URL pointe vers marius avec rôle marius_admin.
 // =============================================================================
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use marius_db_forge::{
     PrimaryKey,
+    build_field_specs,
     fetch_component_list,
     fetch_columns, fetch_max_id, fetch_pk_column, fetch_varlena_cols,
     validate_layout,
     write_collector, write_from_impl, write_projection_stub,
     write_row_struct, write_section_header, write_store_struct,
     write_varlen_owned_struct,
+};
+
+use marius_fragment_forge::{
+    scan, parse_tokens, validate_ast, resolve_and_measure, generate_aot_snippet,
+    SchemaIndex, TemplateMetrics, VarlenField,
 };
 
 // En-tête statique du fichier généré — pas de couplage sur fragment-forge pour
@@ -74,19 +68,96 @@ fn push_varlen_slot(field: &Option<String>, heap: &mut Vec<u8>, toc: &mut Vec<cr
     }\n\
 }\n\n";
 
+/// Tente de résoudre le template `.marius` d'une table via le pipeline complet
+/// Fragment-Forge : scan → parse_tokens → validate_ast → resolve_and_measure →
+/// generate_aot_snippet.
+///
+/// Chemin attendu : `{manifest_dir}/templates/{schema}/{table}.marius`.
+///
+/// Retourne :
+///   `Ok(None)`        : fichier absent — cargo:warning émis, fallback stub.
+///   `Ok(Some((body, metrics)))` : template résolu avec succès.
+///   `Err(())`         : toute erreur de parsing/validation/résolution.
+///                       cargo:error déjà émis ; l'appelant doit exit(1).
+fn resolve_template(
+    manifest_dir: &str,
+    schema:       &str,
+    table:        &str,
+    fixed:        &[marius_fragment_forge::FieldSpec],
+    varlena:      &[VarlenField],
+) -> Result<Option<(String, TemplateMetrics)>, ()> {
+    let template_path: PathBuf = Path::new(manifest_dir)
+        .join("templates")
+        .join(schema)
+        .join(format!("{table}.marius"));
+
+    if !template_path.exists() {
+        println!(
+            "cargo:warning=DB-Forge [{schema}.{table}] : aucun template trouvé \
+             ({}) — render() vide (capacité 0).",
+            template_path.display(),
+        );
+        return Ok(None);
+    }
+
+    // Invalidation du cache build si le template change.
+    println!("cargo:rerun-if-changed={}", template_path.display());
+
+    let src = std::fs::read_to_string(&template_path).map_err(|e| {
+        println!(
+            "cargo:error=DB-Forge [{schema}.{table}] : lecture du template échouée : {e}"
+        );
+    })?;
+
+    let spans = scan(&src);
+    let mut tokens = parse_tokens(spans).map_err(|e| {
+        println!(
+            "cargo:error=DB-Forge [{schema}.{table}] : erreur de parsing template : {e:?}"
+        );
+    })?;
+
+    validate_ast(&tokens).map_err(|errors| {
+        println!(
+            "cargo:error=DB-Forge [{schema}.{table}] : template sémantiquement invalide : {errors:?}"
+        );
+    })?;
+
+    let schema_index = SchemaIndex { fixed, varlena };
+
+    // Résout les inclusions {% include path %} relativement au manifeste.
+    // Aucun {% include %} dans les templates actuels — closure prête pour usage futur.
+    let manifest_dir_owned = manifest_dir.to_string();
+    let get_file_size = move |rel_path: &str| -> Result<usize, String> {
+        std::fs::metadata(Path::new(&manifest_dir_owned).join(rel_path))
+            .map(|m| m.len() as usize)
+            .map_err(|e| e.to_string())
+    };
+
+    let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size).map_err(|errors| {
+        println!(
+            "cargo:error=DB-Forge [{schema}.{table}] : résolution du template échouée : {errors:?}"
+        );
+    })?;
+
+    let body = generate_aot_snippet(&tokens, &schema_index);
+
+    Ok(Some((body, metrics)))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Invalider le cache Cargo si DATABASE_URL ou ce fichier changent.
     println!("cargo:rerun-if-env-changed=DATABASE_URL");
     println!("cargo:rerun-if-changed=build.rs");
 
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("DB-Forge : CARGO_MANIFEST_DIR non définie (toujours fournie par Cargo).");
+
     let database_url = std::env::var("DATABASE_URL")
         .expect("DB-Forge : DATABASE_URL non définie.");
     let pool = sqlx::PgPool::connect(&database_url).await?;
 
     // ── Phase 1 : registry driver ─────────────────────────────────────────────
-    // Toute erreur (DATABASE_URL inaccessible, schéma absent, component_id malformé)
-    // remonte via ? → Box<dyn Error> → cargo:error. Aucun panic.
     let components = fetch_component_list(&pool).await?;
 
     let out_dir  = PathBuf::from(std::env::var("OUT_DIR")?);
@@ -111,9 +182,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // ── Phase 2 : validation layout ───────────────────────────────────────
-        // Garde : intent_density == 0 signifie que la densité n'est pas déclarée
-        // dans le registre — skip silencieux (composant en cours de configuration).
-        // Tout autre écart est une erreur de build fatale (cargo:error).
         if comp.intent_density != 0
             && let Err(msg) = validate_layout(&columns, comp.intent_density) {
                 println!(
@@ -122,6 +190,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 std::process::exit(1);
             }
+
+        // ── Voie B : pipeline template .marius ────────────────────────────────
+        // Toute l'I/O disque (lecture du template) vit ici. db-forge ne touche
+        // jamais le système de fichiers — il reçoit le résultat déjà calculé.
+        let field_specs = build_field_specs(&columns);
+        let render = resolve_template(
+            &manifest_dir,
+            &comp.schema,
+            &comp.table,
+            &field_specs,
+            &varlena,
+        )
+        .unwrap_or_else(|()| {
+            // cargo:error déjà émis par resolve_template — arrêt immédiat.
+            std::process::exit(1);
+        });
 
         write_section_header(&mut output, &comp.schema, &comp.table, &pk);
         write_row_struct(&mut output, &comp.schema, &comp.table, &columns, &varlena);
@@ -143,6 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             comp.varlena_join.as_ref().map(|j| {
                 (j.schema.as_str(), j.table.as_str(), j.fk_col.as_str())
             }),
+            render.as_ref().map(|(body, metrics)| (body.as_str(), metrics)),
         );
     }
 

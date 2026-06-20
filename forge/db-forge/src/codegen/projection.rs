@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use crate::mapping::{Column, PrimaryKey, map_type};
 use crate::naming::{to_pascal, to_screaming};
-use marius_fragment_forge::{FieldSpec, FieldKind, VarlenField, generate_render, generate_capacity_consts};
+use marius_fragment_forge::{FieldSpec, VarlenField, TemplateMetrics};
 
 /// Génère le stub `impl Projection` complet pour une table.
 ///
@@ -21,6 +21,15 @@ use marius_fragment_forge::{FieldSpec, FieldKind, VarlenField, generate_render, 
 ///      - artifact_path()
 ///
 /// `varlena_join` : Option<(schema, table, fk_col)> — None si pas de JOIN.
+///
+/// `render` : Option<(render_body, metrics)> — résultat du pipeline Voie B
+/// (scan → parse_tokens → validate_ast → resolve_and_measure → generate_aot_snippet),
+/// orchestré par build.rs (lecture disque du template `.marius`).
+///   `Some((body, metrics))` : template trouvé et résolu — émet les vraies
+///     constantes de capacité et le corps réel de render().
+///   `None` : aucun template pour cette table — émet un stub vide avec
+///     capacités à zéro (comportement de transition, render() ne fait rien).
+#[allow(clippy::too_many_arguments)]
 pub fn write_projection_stub(
     out:          &mut String,
     schema:       &str,
@@ -29,6 +38,7 @@ pub fn write_projection_stub(
     pk:           &PrimaryKey,
     varlena:      &[VarlenField],
     varlena_join: Option<(&str, &str, &str)>,
+    render:       Option<(&str, &TemplateMetrics)>,
 ) {
     let name      = to_pascal(&format!("{schema}_{table}"));
     let proj_name = format!("{name}Projection");
@@ -81,22 +91,11 @@ pub fn write_projection_stub(
 
     // ── Fragment-Forge : corps render() + constantes capacité ────────────────
     // ── Construction des FieldSpecs ───────────────────────────────────────────
-    // Seules les colonnes fixed-length connues de FieldKind sont incluses.
-    // Les types PHASE2_ONLY (pg_lsn) ou inconnus sont silencieusement exclus.
-    let field_specs: Vec<FieldSpec> = columns.iter()
-        .filter(|c| map_type(&c.sql_type).is_fixed)
-        .filter_map(|c| {
-            FieldKind::from_sql_type(&c.sql_type).map(|kind| FieldSpec {
-                name:   c.name.clone(),
-                kind,
-                attnum: c.attnum,
-            })
-        })
-        .collect();
+    // Helper partagé (crate::build_field_specs) — même logique que build.rs
+    // utilise pour construire le SchemaIndex passé à resolve_and_measure.
+    let field_specs: Vec<FieldSpec> = crate::build_field_specs(columns);
 
-    // pk_field : &FieldSpec — contrat generate_render (signature scellée).
-    // Résolution : chercher dans field_specs le champ portant le nom PK.
-    // Fallback sur le premier FieldSpec si PK composite (cas dégradé).
+    // pk_field : résolution pour record_id() (invariant : PK Single dans field_specs).
     let pk_col_name: &str = match pk {
         PrimaryKey::Single(col) => col.as_str(),
         PrimaryKey::Composite   => fixed_cols.first().copied().unwrap_or("id"),
@@ -105,22 +104,40 @@ pub fn write_projection_stub(
         .iter()
         .find(|f| f.name == pk_col_name)
         .unwrap_or_else(|| {
-            // Invariant : toute table avec PK Single a son champ PK dans field_specs.
-            // Un panic ici indique un type PK non supporté par FieldKind (ex: uuid).
             panic!(
                 "DB-Forge [{schema}.{table}]: champ PK '{pk_col_name}' \
-                 absent des FieldSpecs — type PK non supporté par FieldKind. \
-                 Déclarer la colonne PK avec un type fixed-length reconnu."
+                 absent des FieldSpecs — type PK non supporté par FieldKind."
             )
         });
 
-    let (static_cap, dynamic_cap, render_body) = generate_render(
-        schema, table, &name,
-        &field_specs,
-        pk_field,
-        varlena,
-    );
-    let cap_consts = generate_capacity_consts(&screaming, static_cap, dynamic_cap);
+    // ── Voie B : constantes de capacité + corps de render() ───────────────────
+    // `render` vient de build.rs (pipeline complet exécuté sur le template
+    // .marius, si trouvé). Pas de stub Voie A : soit le template est résolu,
+    // soit la table reste à zéro-capacité (render() vide) en attendant un template.
+    let (cap_consts, render_body) = match render {
+        Some((body, metrics)) => {
+            let total = metrics.total_static_bytes + metrics.total_dynamic_bytes;
+            let consts = format!(
+                "pub const {screaming}_STATIC_CAP:  usize = {};\n\
+                 pub const {screaming}_DYNAMIC_CAP: usize = {};\n\
+                 pub const {screaming}_TOTAL_CAP:   usize = {};\n",
+                metrics.total_static_bytes, metrics.total_dynamic_bytes, total,
+            );
+            (consts, body.to_string())
+        }
+        None => {
+            // Pas de warning ici : build.rs (responsable de l'I/O disque) a déjà
+            // signalé l'absence de template via cargo:warning au moment de la
+            // lecture. write_projection_stub reste un générateur pur, sans avis
+            // sur la raison du None.
+            let consts = format!(
+                "pub const {screaming}_STATIC_CAP:  usize = 0;\n\
+                 pub const {screaming}_DYNAMIC_CAP: usize = 0;\n\
+                 pub const {screaming}_TOTAL_CAP:   usize = 0;\n"
+            );
+            (consts, String::new())
+        }
+    };
 
     // ── Émission ──────────────────────────────────────────────────────────────
     writeln!(out, "pub struct {proj_name};").unwrap();
@@ -311,16 +328,33 @@ pub fn write_projection_stub(
     writeln!(out).unwrap();
 
     // ── render() ─────────────────────────────────────────────────────────────
+    // varlena param : "_varlena" tant qu'aucun corps réel ne le consomme
+    // (stub Voie B) ou que la table n'a pas de varlena. Dès qu'un template
+    // résolu (render.is_some()) référence varlena, le préfixe disparaît —
+    // generate_aot_snippet émet `varlena.{field}.as_deref()` qui exige le nom.
+    let body_is_real = render.is_some();
     let varlena_param = if varlena.is_empty() {
         "_varlena: &()".to_string()
-    } else {
+    } else if body_is_real {
         format!("varlena: &{name}VarlenOwned")
+    } else {
+        format!("_varlena: &{name}VarlenOwned")
     };
     writeln!(out,
         "    fn render(record: &Self::Record, {varlena_param}, buf: &mut String) {{"
     ).unwrap();
-    for line in render_body.lines() {
-        writeln!(out, "    {line}").unwrap();
+    if render_body.is_empty() {
+        // Aucun template .marius trouvé pour cette table — stub neutre.
+        writeln!(out, "        let _ = (record, buf);").unwrap();
+    } else {
+        // Template résolu par build.rs (Voie B complète) : buf.reserve()
+        // référence la constante de capacité totale émise plus haut, puis
+        // le corps généré par generate_aot_snippet (qui n'émet pas reserve
+        // lui-même — c'est la responsabilité de l'appelant, ici ce bloc).
+        writeln!(out, "        buf.reserve({screaming}_TOTAL_CAP);").unwrap();
+        for line in render_body.lines() {
+            writeln!(out, "    {line}").unwrap();
+        }
     }
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();

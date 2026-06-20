@@ -372,7 +372,7 @@ mod tests {
 
                         // Structure HTML minimale.
                         assert!(buf.starts_with("<article"), "tag ouvrant absent");
-                        assert!(buf.ends_with("</article>"), "tag fermant absent");
+                        assert!(buf.trim_end().ends_with("</article>"), "tag fermant absent");
 
                     } else {
                         // ── Rendus suivants : invariant no-realloc inter-itération ─

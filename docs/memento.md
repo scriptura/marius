@@ -47,6 +47,4 @@ Si un jour Marius doit évoluer, on ne modifie pas 10 000 lignes de code métier
 
 ## V. Conclusion pour l'avenir
 
-Si vous lisez ceci dans deux ans et que vous vous demandez pourquoi vous avez rendu le système si "rigide" en apparence : rappelez-vous que cette rigidité au build-time est ce qui garantit la **fluidité absolue au runtime**.
-
-La Forge n'est pas une contrainte, c'est la libération de l'esprit du concepteur par l'automatisation de la rigueur.
+Cette rigidité au build-time est ce qui garantit la **fluidité absolue au runtime**. La Forge n'est pas une contrainte, c'est la libération de l'esprit du concepteur par l'automatisation de la rigueur.

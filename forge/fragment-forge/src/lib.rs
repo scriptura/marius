@@ -47,7 +47,7 @@
 //   Champ pre_escaped : facteur × 1  (tag COMMENT ON COLUMN 'marius:pre_escaped')
 //
 //   La détection du tag est effectuée dans build.rs à l'introspection.
-//   Fragment-Forge reçoit l'information via VarlenField::is_pre_escaped.
+//   Fragment-Forge reçoit l'information via VarlenField::pre_escaped.
 //
 // ─── Contraintes (directives Session 5 / no_std-attitude) ───────────────────
 //
@@ -177,8 +177,8 @@ pub struct FieldSpec {
 ///
 /// ─── Politique d'escape HTML ─────────────────────────────────────────────────
 ///
-///   Facteur normal     : HTML_ESCAPE_FACTOR = 5
-///     Pire cas : chaque caractère source est remplacé par "&amp;" (5 chars).
+///   Facteur normal     : HTML_ESCAPE_FACTOR = 6
+///     Pire cas : '"' → "&quot;" (6 chars). C'est le pire de tous les escapes.
 ///     S'applique à tout champ sans annotation.
 ///
 ///   Facteur pre_escaped : 1
@@ -197,33 +197,142 @@ pub struct FieldSpec {
 #[derive(Debug, Clone)]
 pub struct VarlenField {
     /// Nom de la colonne dans la table jointe.
-    pub name:          String,
-    /// Longueur maximale en octets (contrainte DDL ou fallback selon politique).
-    pub max_len:       usize,
+    pub name:                    String,
+    /// Borne supérieure en octets, si elle existe dans le schéma PostgreSQL
+    /// (VARCHAR(N) via atttypmod, ou TEXT avec CHECK(length(col) <= N) parsable).
+    ///
+    /// `None` (ADR-007) : la colonne est un TEXT sans contrainte exploitable —
+    /// ni VARCHAR(N), ni CHECK reconnu. Ce n'est PAS une erreur en soi : la
+    /// classification Hot/Cold/Erreur est tranchée par resolve_and_measure
+    /// selon que le champ est référencé ou non par le template résolu.
+    /// Aucun fallback numérique n'est jamais substitué à None — une absence
+    /// de borne reste une absence de borne jusqu'à la frontière de résolution.
+    pub max_len:                  Option<usize>,
     /// true si le contenu est certifié pré-échappé (tag 'marius:pre_escaped').
-    /// Facteur de capacité = 1 au lieu de 5.
-    pub is_pre_escaped: bool,
+    /// Facteur de capacité = 1 au lieu de HTML_ESCAPE_FACTOR.
+    pub pre_escaped:               bool,
+    /// true si la colonne DDL est nullable (Option<String> dans VarlenOwned).
+    /// En v1, toujours true (LEFT JOIN produit systématiquement Option).
+    /// Réservé v2 : champ NOT NULL → String directe, court-circuite l'Option.
+    pub nullable:                  bool,
+    /// Surcharge manuelle de max_escaped_len. None = calculé (max_len × facteur).
+    /// Utile quand la borne théorique est trop conservative pour un champ donné.
+    /// Sans effet si `max_len` est également `None` — il n'y a alors rien à
+    /// surcharger, `max_escaped_len()` retourne None indépendamment de ce champ.
+    pub max_escaped_len_override:  Option<usize>,
 }
 
 impl VarlenField {
     /// Facteur d'escape HTML pire cas (champ non annoté).
     ///
-    /// '&' → '&amp;' = 1 char source → 5 chars HTML.
-    /// Tout le contenu pourrait être des '&', d'où le facteur 5.
-    pub const HTML_ESCAPE_FACTOR: usize = 5;
+    /// '"' → '&quot;' = 1 char source → 6 chars HTML. Pire cas parmi
+    /// les 5 caractères escapés (&, <, >, ", '). Garantit l'invariant
+    /// no-realloc même si le contenu est rempli de guillemets.
+    pub const HTML_ESCAPE_FACTOR: usize = 6;
 
-    /// Longueur maximale après escape HTML, en octets.
+    /// Longueur maximale après escape HTML, en octets — si elle est connue.
     ///
     /// Composante varlena de DYNAMIC_CAP.
-    /// Facteur 1 si is_pre_escaped (contenu certifié sans '&<>"\'').
-    /// Facteur 5 sinon (pire cas).
-    pub fn max_escaped_len(&self) -> usize {
-        if self.is_pre_escaped {
-            self.max_len
-        } else {
-            self.max_len * Self::HTML_ESCAPE_FACTOR
+    /// Priorité : max_escaped_len_override > pre_escaped > facteur HTML.
+    ///
+    /// Retourne `None` si `max_len` est `None` (ADR-007) : il n'existe pas de
+    /// borne à propager, quelle que soit la valeur de `max_escaped_len_override`
+    /// ou `pre_escaped`. L'appelant (resolve_and_measure) est responsable de
+    /// traiter ce `None` selon la table de vérité Hot/Cold/Erreur — cette
+    /// méthode ne décide jamais d'une valeur de repli.
+    pub fn max_escaped_len(&self) -> Option<usize> {
+        if let Some(override_len) = self.max_escaped_len_override {
+            return Some(override_len);
         }
+        let n = self.max_len?;
+        Some(if self.pre_escaped {
+            n
+        } else {
+            n * Self::HTML_ESCAPE_FACTOR
+        })
     }
+}
+
+/// Index du schéma passé à resolve_and_measure et generate_aot_snippet.
+///
+/// Permet la résolution et la validation des tokens Field/IfBool du template
+/// contre le schéma réel de la table. Passé par référence — zéro copie.
+///
+/// Recherche O(n) sur les slices : les tables ont < 30 colonnes en pratique,
+/// ce qui rend un HashMap superflu et moins cache-friendly.
+pub struct SchemaIndex<'a> {
+    /// Champs fixed-length du StorageRow, dans l'ordre attnum.
+    pub fixed:   &'a [FieldSpec],
+    /// Champs varlena de la table jointe.
+    pub varlena: &'a [VarlenField],
+}
+
+impl<'a> SchemaIndex<'a> {
+    /// Recherche un champ fixed-length par nom. Retourne None si absent.
+    #[inline]
+    pub fn find_fixed(&self, name: &str) -> Option<&'a FieldSpec> {
+        self.fixed.iter().find(|f| f.name == name)
+    }
+
+    /// Recherche un champ varlena par nom. Retourne None si absent.
+    #[inline]
+    pub fn find_varlena(&self, name: &str) -> Option<&'a VarlenField> {
+        self.varlena.iter().find(|v| v.name == name)
+    }
+}
+
+// =============================================================================
+// I.bis Utilitaires de chemin — préparation I/O disque (templates .marius)
+// =============================================================================
+
+/// Convertit un chemin de fichier en identifiant Rust valide pour une
+/// constante statique (`static_partials::IDENT`).
+///
+/// Règles :
+///   - Tout caractère non [A-Za-z0-9_] devient '_'.
+///   - Le résultat est mis en SCREAMING_SNAKE_CASE.
+///   - Un préfixe '_' est ajouté si le premier caractère est un chiffre
+///     (un identifiant Rust ne peut pas commencer par un chiffre).
+///
+/// Exemples :
+///   "partials/nav.html"      → "PARTIALS_NAV_HTML"
+///   "fragments/2024/foo.htm" → "_FRAGMENTS_2024_FOO_HTM"
+pub fn static_const_ident(path: &str) -> String {
+    let mut ident: String = path
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect::<String>()
+        .to_uppercase();
+
+    if ident.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        ident.insert(0, '_');
+    }
+
+    ident
+}
+
+/// Calcule le chemin à utiliser dans `include_str!()` pour un template
+/// référencé depuis le fichier généré (`{out_dir}/{table}_render.rs`).
+///
+/// `include_str!` résout ses chemins relativement au fichier source qui
+/// contient la macro, pas relativement à `CARGO_MANIFEST_DIR`. Le plus
+/// robuste est donc d'émettre un chemin absolu : `include_str!` l'accepte
+/// aussi bien qu'un chemin relatif, et ça évite tout calcul de profondeur
+/// fragile entre OUT_DIR (profond, sous target/debug/build/.../out) et
+/// la racine du manifeste.
+///
+/// `manifest_dir`       : CARGO_MANIFEST_DIR du crate appelant build.rs.
+/// `rel_from_manifest`  : chemin du template relatif au manifeste
+///                        (ex: "templates/page.marius").
+pub fn relative_path_for_include_str(
+    manifest_dir:      &str,
+    rel_from_manifest: &str,
+) -> String {
+    use std::path::Path;
+    Path::new(manifest_dir)
+        .join(rel_from_manifest)
+        .to_string_lossy()
+        .into_owned()
 }
 
 // =============================================================================
@@ -254,7 +363,13 @@ impl VarlenField {
 ///   Tag fermant : `</dl></article>` (15)
 ///
 /// Note : les valeurs dynamiques (PK, champs) ne sont PAS comptées ici.
-/// Elles sont comptabilisées dans dynamic_capacity().
+/// Leur capacité est désormais calculée par `resolve_and_measure` (Voie B),
+/// pas par une fonction `dynamic_capacity` dédiée — supprimée avec ce patch
+/// (ADR-007) : elle était un résidu Voie A sans appelant, et sa signature
+/// (`.sum::<usize>()` sur `VarlenField::max_escaped_len()`) ne pouvait plus
+/// compiler une fois cette méthode passée à `Option<usize>` (champs non
+/// bornés). `TemplateMetrics::total_dynamic_bytes` est l'unique source de
+/// vérité pour la capacité dynamique.
 pub fn static_capacity(
     schema:  &str,
     table:   &str,
@@ -289,210 +404,9 @@ pub fn static_capacity(
     cap
 }
 
-/// Somme des largeurs maximales de toutes les valeurs dynamiques.
-///
-/// Composé de trois sous-totaux :
-///
-///   1. data-id (PK dans le tag ouvrant) : max_display_width du champ PK.
-///      Le champ PK est identifié par son nom (pk_field), pas par sa position.
-///      Fallback : 11 (max i32) si le nom PK ne correspond à aucun FieldSpec.
-///
-///   2. Corps fixed-length : somme des max_display_width de tous les FieldSpec.
-///      Inclut la PK une deuxième fois (elle apparaît aussi dans le corps <dl>).
-///
-///   3. Corps varlena : somme des max_escaped_len de tous les VarlenField.
-///      Tient compte du facteur d'escape (5 ou 1 selon is_pre_escaped).
-///
-/// Invariant : buf.reserve(STATIC_CAP + DYNAMIC_CAP) doit suffire pour tout
-/// enregistrement possible. Une sous-estimation provoque un realloc.
-pub fn dynamic_capacity(
-    fields:   &[FieldSpec],
-    pk_field: &str,
-    varlena:  &[VarlenField],
-) -> usize {
-    // Contribution PK dans data-id (tag ouvrant).
-    // Recherche par nom, pas par position attnum, car la PK peut être en attnum=2.
-    let data_id_cap: usize = fields.iter()
-        .find(|f| f.name == pk_field)
-        .map(|f| f.kind.max_display_width())
-        .unwrap_or(11); // fallback i32::MIN pour PK INT4 implicite
-
-    // Contribution des champs fixed-length dans le corps <dl>.
-    let fixed_cap: usize = fields.iter()
-        .map(|f| f.kind.max_display_width())
-        .sum();
-
-    // Contribution des champs varlena dans le corps <dl>.
-    // max_escaped_len() applique le bon facteur selon is_pre_escaped.
-    let varlena_cap: usize = varlena.iter()
-        .map(|v| v.max_escaped_len())
-        .sum();
-
-    data_id_cap + fixed_cap + varlena_cap
-}
-
 // =============================================================================
 // III. Génération du corps de render()
 // =============================================================================
-
-/// Génère le corps complet de la fonction render().
-///
-/// Signature de la fonction générée (conforme au trait Projection ADR-003) :
-/// ```text
-/// fn render(record: &{Name}StorageRow, varlena: &{Name}VarlenOwned, buf: &mut String)
-/// ```
-///
-/// ─── Paramètres ──────────────────────────────────────────────────────────────
-///
-///   schema, table : identifiants DDL → classe CSS et data-id.
-///   fields        : champs fixed-length dans l'ordre attnum.
-///   pk_field      : nom du champ PK (depuis pg_constraint, pas l'ordre attnum).
-///   varlena       : champs varlena de la table jointe, avec leurs bornes.
-///
-/// ─── Corps généré ────────────────────────────────────────────────────────────
-///
-///   1. buf.reserve(STATIC_CAP + DYNAMIC_CAP)  — pré-allocation exacte.
-///   2. Reconstruction locale du RenderPayload via as_deref() (zéro copie).
-///      let {nom}_ref: Option<&str> = varlena.{nom}.as_deref();
-///      Durée de vie locale à render() : pas de traversée de frontière de thread.
-///   3. push_str("<article ...>")              — balise ouvrante statique.
-///   4. write_fmt(record.pk_field)             — valeur PK dynamique.
-///   5. push_str("><dl>")                      — transition statique.
-///   6. Pour chaque champ fixed-length :
-///      push_str("<dt>nom</dt><dd>")
-///      write_fmt(record.nom)
-///      push_str("</dd>")
-///   7. Pour chaque champ varlena :
-///      push_str("<dt>nom</dt><dd>")
-///      if let Some(s) = {nom}_ref { marius_html_escape(s, buf); }
-///      push_str("</dd>")
-///   8. push_str("</dl></article>")           — balise fermante statique.
-///
-/// ─── Pourquoi as_deref() local et non &RenderPayload<'_> dans la signature ───
-///
-///   Le trait Projection déclare render(&Self::Record, &Self::VarlenOwned, &mut String).
-///   VarlenOwned est 'static + Send (Option<String> possédées).
-///   RenderPayload<'a> (Option<&'a str>) n'est pas 'static, ne traverse pas
-///   les threads Rayon, et n'appartient pas à l'interface publique du trait.
-///   Fragment-Forge reconstruit les &str localement dans le corps de render() :
-///   le lifetime est inféré depuis varlena (paramètre de render), jamais exposé.
-///
-/// ─── Retour ──────────────────────────────────────────────────────────────────
-///
-///   (static_cap, dynamic_cap, corps_render) — les deux premières valeurs
-///   permettent à build.rs d'émettre les constantes de capacité au niveau module.
-pub fn generate_render(
-    schema:   &str,
-    table:    &str,
-    _name:    &str,
-    fields:   &[FieldSpec],
-    pk_field: &FieldSpec,
-    varlena:  &[VarlenField],
-) -> (usize, usize, String) {
-    let sc      = static_capacity(schema, table, fields, varlena);
-    let dc      = dynamic_capacity(fields, &pk_field.name, varlena);
-    let css     = format!("{schema}-{table}");
-    let mut c   = String::new();
-
-    // ─── Pré-allocation ───────────────────────────────────────────────────────
-    // STATIC_CAP + DYNAMIC_CAP = borne supérieure exacte calculée à la compilation.
-    // Invariant : buf.capacity() ne doit pas croître pendant render().
-    // Le test no-realloc vérifie cet invariant avec les valeurs pires cas.
-    c.push_str(&format!(
-        "// Capacités calculées par Fragment-Forge à la compilation.\n\
-         // STATIC_CAP : somme exacte des octets HTML statiques (balises + noms de champs).\n\
-         // DYNAMIC_CAP : somme des largeurs maximales des valeurs (fixed × width, varlena × escape_factor).\n\
-         // Invariant : buf.capacity() NE DOIT PAS augmenter pendant render().\n\
-         const STATIC_CAP:  usize = {sc};\n\
-         const DYNAMIC_CAP: usize = {dc};\n\
-         buf.reserve(STATIC_CAP + DYNAMIC_CAP);\n"
-    ));
-
-    // ─── Reconstruction locale du RenderPayload ───────────────────────────────
-    // as_deref() : Option<String> → Option<&str> sans copie (réaffectation de fat pointer).
-    // Durée de vie des &str : liée à `varlena` (paramètre de render), inférée par le
-    // compilateur. Aucune traversée de frontière de thread — uniquement local à render().
-    // VarlenOwned est 'static et traverse Rayon ; ces &str locaux ne le font pas.
-    if !varlena.is_empty() {
-        c.push_str("// Reconstruction locale des &str depuis VarlenOwned (as_deref, zéro copie).\n");
-        for v in varlena {
-            let n = &v.name;
-            c.push_str(&format!(
-                "let {n}_ref: Option<&str> = varlena.{n}.as_deref();\n"
-            ));
-        }
-    }
-
-    // ─── Tag ouvrant + PK (data-id) ──────────────────────────────────────────
-    // La PK est lue depuis record (StorageRow, repr(C), champ fixed-length).
-    // Elle n'est jamais dans varlena (VarlenOwned ne porte que les champs texte JOIN).
-    c.push_str(&format!(
-        "buf.push_str(\"<article class=\\\"{css}\\\" data-id=\\\"\");\n\
-         ::std::fmt::Write::write_fmt(buf, format_args!(\"{{}}\", record.{pk_field})).ok();\n\
-         buf.push_str(\"\\\"><dl>\");\n",
-        pk_field = pk_field.name
-    ));
-
-    // ─── Champs fixed-length ─────────────────────────────────────────────────
-    // Lus depuis record (StorageRow, repr(C)).
-    // write_fmt() : zéro allocation — écrit directement dans buf via fmt::Write.
-    for f in fields {
-        let n = &f.name;
-        c.push_str(&format!(
-            "buf.push_str(\"<dt>{n}</dt><dd>\");\n\
-             ::std::fmt::Write::write_fmt(buf, format_args!(\"{{}}\", record.{n})).ok();\n\
-             buf.push_str(\"</dd>\");\n"
-        ));
-    }
-
-    // ─── Champs varlena ──────────────────────────────────────────────────────
-    // Lus depuis les {n}_ref locaux construits par as_deref() ci-dessus.
-    // marius_html_escape() : boucle char par char dans buf, zéro allocation.
-    // Le branchement Option est inévitable (LEFT JOIN peut retourner NULL).
-    // Aucune autre logique conditionnelle n'est autorisée dans le corps généré.
-    for v in varlena {
-        let n = &v.name;
-        c.push_str(&format!(
-            "buf.push_str(\"<dt>{n}</dt><dd>\");\n\
-             if let Some(s) = {n}_ref {{ marius_html_escape(s, buf); }}\n\
-             buf.push_str(\"</dd>\");\n"
-        ));
-    }
-
-    // ─── Tag fermant ─────────────────────────────────────────────────────────
-    c.push_str("buf.push_str(\"</dl></article>\");\n");
-
-    (sc, dc, c)
-}
-
-// =============================================================================
-// IV. Constantes de capacité émises au niveau module
-// =============================================================================
-
-/// Génère les trois constantes de capacité au niveau du module (pas dans un impl).
-///
-/// Ces constantes sont émises entre la définition de la struct Projection
-/// et le bloc impl, pour deux raisons :
-///
-///   1. Les constantes associées déclarées dans un impl doivent figurer dans le trait.
-///      Projection ne déclare pas STATIC_CAP etc. → elles ne peuvent pas être
-///      des items du impl.
-///
-///   2. Les tests unitaires no-realloc les référencent directement depuis le module,
-///      sans instancier la Projection.
-///
-/// Nommage : {SCREAMING_SNAKE_TABLE}_STATIC_CAP, _DYNAMIC_CAP, _TOTAL_CAP.
-pub fn generate_capacity_consts(screaming: &str, sc: usize, dc: usize) -> String {
-    format!(
-        "/// Octets HTML statiques (balises + noms de champs) pour {screaming}.\n\
-         pub const {screaming}_STATIC_CAP:  usize = {sc};\n\
-         /// Largeurs maximales des valeurs dynamiques pour {screaming} (pire cas).\n\
-         pub const {screaming}_DYNAMIC_CAP: usize = {dc};\n\
-         /// Capacité totale = STATIC_CAP + DYNAMIC_CAP. Utiliser pour String::with_capacity().\n\
-         pub const {screaming}_TOTAL_CAP:   usize = {total};\n",
-        total = sc + dc,
-    )
-}
 
 // =============================================================================
 // V. En-tête du fichier généré
@@ -1438,7 +1352,11 @@ mod tests_phase_1_4 {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TemplateMetrics {
     /// Somme exacte en octets de tous les `Static` et `StaticInclude` résolus.
-    pub total_static_bytes: usize,
+    pub total_static_bytes:  usize,
+    /// Somme des pires cas d'affichage de tous les champs Field du template.
+    /// Fixed-length : FieldKind::max_display_width().
+    /// Varlena : VarlenField::max_escaped_len() (facteur escape × max_len).
+    pub total_dynamic_bytes: usize,
     /// Nombre de fichiers externes inclus résolus avec succès.
     pub include_count: usize,
 }
@@ -1450,7 +1368,20 @@ pub struct TemplateMetrics {
 /// d'erreur OS doit être formaté en `String` (build-time uniquement).
 #[derive(Debug, PartialEq, Eq)]
 pub enum ResolverError<'src> {
+    /// Fichier inclus introuvable ou illisible.
     IoError { path: &'src str, details: String },
+    /// Token Field ou IfBool référençant un champ absent du schéma.
+    /// Erreur AOT fatale : cargo:error dans build.rs.
+    UnknownField { entity: &'src str, field: &'src str },
+    /// Champ varlena référencé par le template mais sans borne connue
+    /// (`VarlenField.max_len == None`) — ADR-007, disjoncteur Hot/Cold/Erreur.
+    ///
+    /// Distinct de `UnknownField` : le champ existe bien dans le schéma
+    /// PostgreSQL (visible dans `SchemaIndex.varlena`), mais aucune contrainte
+    /// exploitable (VARCHAR(N) ou CHECK reconnu) ne borne sa longueur. Un champ
+    /// non référencé avec la même absence de borne ne produit jamais cette
+    /// erreur — il reste Cold, invisible au calcul de capacité.
+    UnboundedField { entity: &'src str, field: &'src str },
 }
 
 /// Résout les inclusions, mute l'AST en place, calcule les métriques statiques.
@@ -1468,35 +1399,30 @@ pub enum ResolverError<'src> {
 /// Un projet sans fichier manquant traverse cette fonction sans allocation.
 pub fn resolve_and_measure<'src>(
     tokens:        &mut [FlatPageToken<'src>],
+    schema:        &SchemaIndex<'_>,
     get_file_size: impl Fn(&str) -> Result<usize, String>,
 ) -> Result<TemplateMetrics, Vec<ResolverError<'src>>> {
-    let mut metrics = TemplateMetrics { total_static_bytes: 0, include_count: 0 };
+    let mut metrics = TemplateMetrics {
+        total_static_bytes:  0,
+        total_dynamic_bytes: 0,
+        include_count:       0,
+    };
     let mut errors:  Vec<ResolverError<'src>> = Vec::new();
 
     for token in tokens.iter_mut() {
         match token {
 
             // Octets HTML connus statiquement : contribution directe.
-            // `s : &mut &'src str` — auto-deref vers (&'src str).len().
             FlatPageToken::Static(s) => {
                 metrics.total_static_bytes += s.len();
             }
 
             // Inclusion externe : résolution I/O et mutation en place.
-            //
-            // Décomposition des borrows :
-            //   rel_from_manifest : &mut &'src str  (champ A)
-            //   len               : &mut usize      (champ B)
-            //
-            // `let path = *rel_from_manifest` copie le &'src str hors du borrow
-            // (Copy). NLL libère immédiatement le borrow de `rel_from_manifest`.
-            // `*len = size` opère sur le champ B, indépendant (field splitting).
-            // Pas de conflit de borrow.
             FlatPageToken::StaticInclude { rel_from_manifest, len, .. } => {
-                let path = *rel_from_manifest;          // &'src str, copie sans alloc
-                match get_file_size(path) {             // coercion &'src str → &str
+                let path = *rel_from_manifest;
+                match get_file_size(path) {
                     Ok(size) => {
-                        *len = size;                    // mutation en place du champ len
+                        *len = size;
                         metrics.total_static_bytes += size;
                         metrics.include_count      += 1;
                     }
@@ -1506,9 +1432,40 @@ pub fn resolve_and_measure<'src>(
                 }
             }
 
-            // Field, IfBool, EndIf : coût mémoire runtime-dépendant.
-            // Non comptabilisés dans PAGE_STATIC_CAP. Phase 2.2.
-            _ => {}
+            // Champ dynamique : disjoncteur Hot / Cold / Erreur (ADR-007).
+            //
+            // Table de vérité (un champ varlena est visité ici uniquement s'il
+            // est référencé par l'AST — un champ jamais référencé n'entre jamais
+            // dans cette branche, il reste Cold par construction, sans code dédié) :
+            //
+            //   référencé + fixed-length            → Hot, max_display_width()
+            //   référencé + varlena, max_len=Some(n) → Hot, max_escaped_len()
+            //   référencé + varlena, max_len=None    → Erreur, UnboundedField
+            //   absent du schéma (ni fixed ni varlena) → Erreur, UnknownField
+            FlatPageToken::Field { entity, field } => {
+                if let Some(f) = schema.find_fixed(field) {
+                    metrics.total_dynamic_bytes += f.kind.max_display_width();
+                } else if let Some(v) = schema.find_varlena(field) {
+                    match v.max_escaped_len() {
+                        Some(n) => metrics.total_dynamic_bytes += n,
+                        None    => errors.push(ResolverError::UnboundedField { entity, field }),
+                    }
+                } else {
+                    errors.push(ResolverError::UnknownField { entity, field });
+                }
+            }
+
+            // Bloc conditionnel : validation schéma uniquement.
+            // Le champ sert de condition booléenne, il n'est pas affiché —
+            // pas de contribution à total_dynamic_bytes.
+            FlatPageToken::IfBool { entity, field } => {
+                if schema.find_fixed(field).is_none() {
+                    errors.push(ResolverError::UnknownField { entity, field });
+                }
+            }
+
+            // EndIf : aucun effet sur les métriques.
+            FlatPageToken::EndIf => {}
         }
     }
 
@@ -1521,7 +1478,7 @@ pub fn resolve_and_measure<'src>(
 
 #[cfg(test)]
 mod tests_phase_2_1 {
-    use super::{resolve_and_measure, ResolverError, TemplateMetrics, FlatPageToken};
+    use super::{resolve_and_measure, ResolverError, TemplateMetrics, FlatPageToken, SchemaIndex, FieldSpec, FieldKind, VarlenField};
 
     /// Construit un StaticInclude avec len = 0 (valeur provisoire Phase 1.3).
     /// Les deux paths sont identiques : l'orchestrateur n'a pas encore calculé
@@ -1544,7 +1501,8 @@ mod tests_phase_2_1 {
             make_include("a.html"),
         ];
 
-        let result = resolve_and_measure(&mut tokens, |path| match path {
+        let schema = SchemaIndex { fixed: &[], varlena: &[] };
+        let result = resolve_and_measure(&mut tokens, &schema, |path| match path {
             "a.html" => Ok(10),
             other    => Err(format!("unknown : {other}")),
         });
@@ -1552,7 +1510,7 @@ mod tests_phase_2_1 {
         // Métriques correctes.
         assert_eq!(
             result,
-            Ok(TemplateMetrics { total_static_bytes: 16, include_count: 1 }),
+            Ok(TemplateMetrics { total_static_bytes: 16, total_dynamic_bytes: 0, include_count: 1 }),
         );
 
         // Preuve de mutation en place : len vaut 10, pas 0.
@@ -1585,7 +1543,8 @@ mod tests_phase_2_1 {
             make_include("missing.html"),
         ];
 
-        let result = resolve_and_measure(&mut tokens, |path| match path {
+        let schema = SchemaIndex { fixed: &[], varlena: &[] };
+        let result = resolve_and_measure(&mut tokens, &schema, |path| match path {
             "a.html" => Ok(10),
             other    => Err(format!("introuvable : {other}")),
         });
@@ -1602,6 +1561,12 @@ mod tests_phase_2_1 {
                     "details doit identifier le fichier : {details:?}",
                 );
             }
+            ResolverError::UnknownField { entity, field } => {
+                panic!("UnknownField inattendu dans ce test : {entity}.{field}");
+            }
+            ResolverError::UnboundedField { entity, field } => {
+                panic!("UnboundedField inattendu dans ce test : {entity}.{field}");
+            }
         }
 
         // Invariant fail-slow : "a.html" a bien été muté malgré l'erreur suivante.
@@ -1616,7 +1581,7 @@ mod tests_phase_2_1 {
     /// Cas limite : AST sans inclusion.
     /// `get_file_size` ne doit jamais être appelé — vérifié par `unreachable!`.
     /// total_static_bytes = 3 ("<p>") + 4 ("</p>") = 7.
-    /// Field ne contribue pas.
+    /// Field contribue désormais à total_dynamic_bytes (Phase 3 — SchemaIndex).
     #[test]
     fn test_resolve_no_includes() {
         let mut tokens = vec![
@@ -1625,13 +1590,121 @@ mod tests_phase_2_1 {
             FlatPageToken::Static("</p>"),
         ];
 
+        let fixed = vec![FieldSpec { name: "name".to_string(), kind: FieldKind::I32, attnum: 1 }];
+        let schema = SchemaIndex { fixed: &fixed, varlena: &[] };
+
         assert_eq!(
             resolve_and_measure(
                 &mut tokens,
+                &schema,
                 |_| unreachable!("get_file_size ne doit pas être appelé sans StaticInclude"),
             ),
-            Ok(TemplateMetrics { total_static_bytes: 7, include_count: 0 }),
+            Ok(TemplateMetrics {
+                total_static_bytes:  7,
+                total_dynamic_bytes: FieldKind::I32.max_display_width(),
+                include_count:       0,
+            }),
         );
+    }
+
+    // =========================================================================
+    // Disjoncteur Hot / Cold / Erreur — ADR-007
+    //
+    // Table de vérité complète d'un champ varlena, les trois lignes possibles.
+    // Zéro dépendance PostgreSQL : SchemaIndex est construit à la main, comme
+    // tous les autres tests de ce module. L'invariant central de l'ADR — "un
+    // champ non borné référencé par une projection provoque un échec explicite
+    // de résolution" — est une propriété pure de resolve_and_measure, qui ne
+    // dépend en rien de la fidélité de l'introspection PostgreSQL elle-même
+    // (fetch_varlena_cols, hors périmètre de ces trois tests).
+    // =========================================================================
+
+    fn unbounded_field(name: &str) -> VarlenField {
+        VarlenField {
+            name: name.to_string(),
+            max_len: None,
+            pre_escaped: false,
+            nullable: true,
+            max_escaped_len_override: None,
+        }
+    }
+
+    fn bounded_field(name: &str, max_len: usize) -> VarlenField {
+        VarlenField {
+            name: name.to_string(),
+            max_len: Some(max_len),
+            pre_escaped: false,
+            nullable: true,
+            max_escaped_len_override: None,
+        }
+    }
+
+    /// Ligne 1 de la table de vérité : champ non borné, RÉFÉRENCÉ par l'AST.
+    /// → Err([UnboundedField]). C'est l'invariant central de l'ADR-007 :
+    /// un champ sans borne connue ne peut jamais contribuer silencieusement
+    /// à total_dynamic_bytes — la compilation doit échouer explicitement.
+    #[test]
+    fn unbounded_field_referenced_fails_resolution() {
+        let mut tokens = vec![
+            FlatPageToken::Field { entity: "record", field: "description" },
+        ];
+        let varlena = vec![unbounded_field("description")];
+        let schema = SchemaIndex { fixed: &[], varlena: &varlena };
+
+        let result = resolve_and_measure(
+            &mut tokens, &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+        );
+
+        assert_eq!(
+            result,
+            Err(vec![ResolverError::UnboundedField { entity: "record", field: "description" }]),
+        );
+    }
+
+    /// Ligne 2 de la table de vérité : champ borné, RÉFÉRENCÉ par l'AST.
+    /// → Ok, contribue normalement à total_dynamic_bytes via max_escaped_len().
+    /// Comportement Hot — inchangé depuis avant ADR-007, vérifié explicitement
+    /// pour garantir qu'il n'a pas régressé avec le passage à Option<usize>.
+    #[test]
+    fn bounded_field_referenced_contributes_normally() {
+        let mut tokens = vec![
+            FlatPageToken::Field { entity: "record", field: "headline" },
+        ];
+        let varlena = vec![bounded_field("headline", 100)];
+        let schema = SchemaIndex { fixed: &[], varlena: &varlena };
+
+        let metrics = resolve_and_measure(
+            &mut tokens, &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+        ).expect("champ borné référencé : résolution attendue en succès");
+
+        assert_eq!(metrics.total_dynamic_bytes, 100 * VarlenField::HTML_ESCAPE_FACTOR);
+        assert_eq!(metrics.total_static_bytes, 0);
+    }
+
+    /// Ligne 3 de la table de vérité : champ non borné, JAMAIS référencé.
+    /// → Ok, comportement Cold. Le champ existe dans SchemaIndex.varlena
+    /// (visible, comme le produit désormais fetch_varlena_cols depuis ADR-007 —
+    /// il n'est plus exclu du Vec en amont) mais n'apparaît dans aucune erreur
+    /// ni dans total_dynamic_bytes, précisément parce que l'AST ne le mentionne
+    /// jamais. Seule la conjonction "non borné + référencé" déclenche l'erreur —
+    /// "non borné" seul ne suffit jamais.
+    #[test]
+    fn unbounded_field_not_referenced_is_cold() {
+        let mut tokens = vec![
+            FlatPageToken::Static("<article></article>"),
+        ];
+        let varlena = vec![unbounded_field("description")];
+        let schema = SchemaIndex { fixed: &[], varlena: &varlena };
+
+        let metrics = resolve_and_measure(
+            &mut tokens, &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+        ).expect("champ Cold non référencé : résolution attendue en succès");
+
+        assert_eq!(metrics.total_dynamic_bytes, 0, "champ Cold ne doit jamais contribuer");
+        assert_eq!(metrics.total_static_bytes, 19); // "<article></article>".len()
     }
 }
 
@@ -1657,86 +1730,69 @@ mod tests_phase_2_1 {
 
 /// Transpile l'AST en un bloc d'instructions Rust natif.
 ///
-/// # Sortie
-/// Une `String` de code source Rust. Chaque ligne est terminée par `\n`.
-/// Le snippet est prévu pour être encapsulé dans le corps d'une fonction
-/// `render_page()` par l'orchestrateur `build.rs`.
+/// N'émet PAS `buf.reserve()` — c'est la responsabilité de l'orchestrateur
+/// qui référence PAGE_TOTAL_CAP (calculé depuis les métriques).
 ///
-/// # Allocation de `out` (build-time uniquement)
-/// La contrainte "zéro allocation" s'applique au code *généré* (runtime).
-/// Le générateur lui-même s'exécute à la compilation et peut allouer librement.
-/// La capacité initiale de `out` est estimée pour éviter les réallocations
-/// internes à la génération : un `with_capacity` par invocation de la fonction.
+/// Délègue le choix d'émission à SchemaIndex :
+///   Field fixe   → write_fmt (pas d'allocation).
+///   Field varlena → html_escape via ref locale as_deref().
+///   IfBool        → `if record.field != 0` (u8 dans StorageRow, pas bool).
 pub fn generate_aot_snippet<'src>(
-    tokens:  &[FlatPageToken<'src>],
-    metrics: &TemplateMetrics,
+    tokens: &[FlatPageToken<'src>],
+    schema: &SchemaIndex<'_>,
 ) -> String {
-    // Import du trait Write pour `writeln!` sur String.
-    // `as _` : trait importé pour ses méthodes uniquement,
-    // nom non introduit dans le scope (évite le conflit avec std::io::Write).
     use std::fmt::Write as _;
+    let mut out = String::with_capacity(25 + tokens.len() * 60);
 
-    // Estimation de la taille du code source généré :
-    //   ~25 bytes pour le prologue buf.reserve()
-    //   ~40 bytes par token (heuristique conservative)
-    // Surestimer → zéro réallocation de `out` dans le cas nominal.
-    let mut out = String::with_capacity(25 + tokens.len() * 40);
+    // ── Déclarations de références varlena ────────────────────────────────────
+    let mut varlena_seen: Vec<&str> = tokens.iter()
+        .filter_map(|t| match t {
+            FlatPageToken::Field { field, .. }
+                if schema.find_varlena(field).is_some() => Some(*field),
+            _ => None,
+        })
+        .collect();
+    varlena_seen.sort_unstable();
+    varlena_seen.dedup();
+    for name in &varlena_seen {
+        writeln!(out, "let {name}_ref: Option<&str> = varlena.{name}.as_deref();").unwrap();
+    }
 
-    // ── Prologue : instruction de pré-allocation ──────────────────────────────
-    // Invariant DOD : toujours la première ligne du snippet.
-    writeln!(out, "buf.reserve({});", metrics.total_static_bytes).unwrap();
-
-    // ── État d'indentation ────────────────────────────────────────────────────
-    // Deux valeurs possibles (Phase 1.4 garantit zéro imbrication) :
-    //   ""     → flux principal
-    //   "    " → intérieur d'un bloc IfBool
-    //
-    // `&'static str` : aucune allocation pour l'indentation elle-même.
     let mut indent: &str = "";
 
-    // ── Parcours linéaire de l'AST ─────────────────────────────────────────
     for token in tokens {
         match token {
-
-            // ── Static ─────────────────────────────────────────────────────
-            // `{:?}` sur &str → littéral Rust entre guillemets avec escapes.
-            // Exemples :
-            //   "<div>"         →  buf.push_str("<div>");
-            //   "O'Brien & Co." →  buf.push_str("O'Brien & Co.");
-            //   "a\nb"          →  buf.push_str("a\nb");
             FlatPageToken::Static(s) => {
                 writeln!(out, "{}buf.push_str({:?});", indent, s).unwrap();
             }
 
-            // ── Field ──────────────────────────────────────────────────────
-            // L'appelant garantit que `entity.field` implémente AsRef<str>
-            // ou expose une méthode retournant &str.
-            FlatPageToken::Field { entity, field } => {
-                writeln!(out, "{}buf.push_str(&{}.{});", indent, entity, field).unwrap();
+            FlatPageToken::Field { field, .. } => {
+                if schema.find_varlena(field).is_some() {
+                    writeln!(
+                        out,
+                        "{}if let Some(s) = {field}_ref {{ marius_html_escape(s, buf); }}",
+                        indent,
+                    ).unwrap();
+                } else {
+                    writeln!(
+                        out,
+                        r#"{}::std::fmt::Write::write_fmt(buf, format_args!("{{}}", record.{field})).ok();"#,
+                        indent,
+                    ).unwrap();
+                }
             }
 
-            // ── IfBool ─────────────────────────────────────────────────────
-            // Émet la ligne `if e.f {` AU NIVEAU COURANT,
-            // puis bascule l'indentation au niveau 1 pour les tokens suivants.
-            FlatPageToken::IfBool { entity, field } => {
-                writeln!(out, "{}if {}.{} {{", indent, entity, field).unwrap();
+            FlatPageToken::IfBool { field, .. } => {
+                // u8 dans StorageRow (bytemuck::Pod interdit bool).
+                writeln!(out, "{}if record.{field} != 0 {{", indent).unwrap();
                 indent = "    ";
             }
 
-            // ── EndIf ──────────────────────────────────────────────────────
-            // Rétablit le niveau 0 AVANT d'émettre `}` :
-            // l'accolade fermante est toujours au niveau principal.
-            // `push_str` évite le formatage inutile sur un littéral connu.
             FlatPageToken::EndIf => {
                 indent = "";
                 out.push_str("}\n");
             }
 
-            // ── StaticInclude ──────────────────────────────────────────────
-            // `include_str!` est une macro Rust résolue à la compilation du
-            // code *généré* (second passage du compilateur).
-            // `{:?}` sur le chemin → guillemets + échappement des backslashes
-            // (chemins Windows : r"dir\file" → "dir\\file" dans le source).
             FlatPageToken::StaticInclude { rel_from_manifest, .. } => {
                 writeln!(
                     out,
@@ -1756,99 +1812,81 @@ pub fn generate_aot_snippet<'src>(
 
 #[cfg(test)]
 mod tests_phase_2_2 {
-    use super::{generate_aot_snippet, FlatPageToken, TemplateMetrics};
+    use super::{generate_aot_snippet, SchemaIndex, FieldSpec, FieldKind, VarlenField, FlatPageToken};
 
-    /// Jalon Vert Phase 2.2 — sortie caractère par caractère.
-    ///
-    /// Séquence : Static, Field, IfBool, Static (indenté), EndIf, StaticInclude.
-    /// Vérifie l'exactitude du prologue, des niveaux d'indentation,
-    /// des guillemets injectés par {;?} et du format include_str!.
+    fn make_schema<'a>(fixed: &'a [FieldSpec], varlena: &'a [VarlenField]) -> SchemaIndex<'a> {
+        SchemaIndex { fixed, varlena }
+    }
+
+    /// Snippet avec champ fixed (write_fmt) et champ varlena (html_escape).
+    /// IfBool émet != 0 (u8 dans StorageRow).
+    /// Aucun buf.reserve dans le snippet — c'est la responsabilité de l'orchestrateur.
     #[test]
-    fn test_generate_aot_snippet() {
-        let metrics = TemplateMetrics { total_static_bytes: 120, include_count: 1 };
+    fn test_generate_aot_snippet_typed() {
+        let fixed = vec![
+            FieldSpec { name: "title".to_string(),     kind: FieldKind::I32, attnum: 1 },
+            FieldSpec { name: "is_published".to_string(), kind: FieldKind::Bool, attnum: 2 },
+        ];
+        let varlena = vec![
+            VarlenField {
+                name: "body".to_string(),
+                max_len: Some(1000),
+                pre_escaped: false,
+                nullable: true,
+                max_escaped_len_override: None,
+            },
+        ];
+        let schema = make_schema(&fixed, &varlena);
 
         let tokens: &[FlatPageToken<'_>] = &[
-            FlatPageToken::Static("<div>"),
-            FlatPageToken::Field  { entity: "user", field: "name"   },
-            FlatPageToken::IfBool { entity: "user", field: "active" },
-            FlatPageToken::Static("<p>ON</p>"),
+            FlatPageToken::Static("<article>"),
+            FlatPageToken::Field   { entity: "record", field: "title" },
+            FlatPageToken::Field   { entity: "varlena", field: "body" },
+            FlatPageToken::IfBool  { entity: "record", field: "is_published" },
+            FlatPageToken::Static("<span>publié</span>"),
             FlatPageToken::EndIf,
             FlatPageToken::StaticInclude {
                 original_path:     "...",
-                rel_from_manifest: "../frag.html",
-                len:               42,
+                rel_from_manifest: "frag.html",
+                len: 42,
             },
         ];
 
-        let got = generate_aot_snippet(tokens, &metrics);
+        let got = generate_aot_snippet(tokens, &schema);
 
-        // Le raw string r#"..."# préserve les `"` littéraux,
-        // ce qui permet d'asserter les guillemets injectés par {;?}
-        // sans séquences d'échappement supplémentaires dans le test.
-        let expected = r#"buf.reserve(120);
-buf.push_str("<div>");
-buf.push_str(&user.name);
-if user.active {
-    buf.push_str("<p>ON</p>");
-}
-buf.push_str(include_str!("../frag.html"));
-"#;
-
-        assert_eq!(
-            got, expected,
-            "\n\nSortie obtenue :\n{got}\n\nSortie attendue :\n{expected}"
-        );
+        // Varlena ref déclarée en tête, triée.
+        assert!(got.contains("let body_ref: Option<&str> = varlena.body.as_deref();"),
+            "déclaration varlena absente:\n{got}");
+        // Fixed → write_fmt.
+        assert!(got.contains(r#"::std::fmt::Write::write_fmt(buf, format_args!("{}", record.title)).ok();"#),
+            "write_fmt absent:\n{got}");
+        // Varlena → html_escape.
+        assert!(got.contains("if let Some(s) = body_ref { marius_html_escape(s, buf); }"),
+            "html_escape absent:\n{got}");
+        // IfBool → != 0 (u8).
+        assert!(got.contains("if record.is_published != 0 {"),
+            "condition u8 absente:\n{got}");
+        // StaticInclude.
+        assert!(got.contains(r#"buf.push_str(include_str!("frag.html"));"#),
+            "include_str absent:\n{got}");
+        // Pas de buf.reserve dans le snippet.
+        assert!(!got.contains("buf.reserve"),
+            "buf.reserve ne doit pas être dans le snippet:\n{got}");
     }
 
-    /// Snippet sans bloc conditionnel : vérifie que l'indentation reste à 0
-    /// et que la sortie ne contient aucune accolade.
+    /// Snippet sans varlena : aucune déclaration de ref.
     #[test]
-    fn test_generate_flat_snippet() {
-        let metrics = TemplateMetrics { total_static_bytes: 13, include_count: 0 };
-
+    fn test_generate_aot_snippet_no_varlena() {
+        let fixed = vec![FieldSpec { name: "id".to_string(), kind: FieldKind::I64, attnum: 1 }];
+        let schema = make_schema(&fixed, &[]);
         let tokens: &[FlatPageToken<'_>] = &[
             FlatPageToken::Static("<p>"),
-            FlatPageToken::Field { entity: "article", field: "title" },
+            FlatPageToken::Field { entity: "record", field: "id" },
             FlatPageToken::Static("</p>"),
         ];
-
-        let got = generate_aot_snippet(tokens, &metrics);
-
-        let expected = r#"buf.reserve(13);
-buf.push_str("<p>");
-buf.push_str(&article.title);
-buf.push_str("</p>");
-"#;
-
-        assert_eq!(got, expected);
-        assert!(
-            !got.contains('{'),
-            "un snippet sans IfBool ne doit contenir aucune accolade",
-        );
-    }
-
-    /// Vérifie l'échappement automatique via Debug :
-    /// une chaîne contenant `"` et `\n` doit produire un littéral Rust valide.
-    #[test]
-    fn test_debug_escaping_in_static() {
-        let metrics  = TemplateMetrics { total_static_bytes: 0, include_count: 0 };
-        let tokens: &[FlatPageToken<'_>] = &[
-            FlatPageToken::Static("a\"b\nc"),
-        ];
-
-        let got = generate_aot_snippet(tokens, &metrics);
-
-        // {;?} sur r#"a"b\nc"# produit "a\"b\nc" (littéral Rust syntaxiquement valide).
-        assert!(
-            got.contains(r#""a\"b\nc""#),
-            "les guillemets et newlines doivent être échappés par Debug : {got:?}",
-        );
+        let got = generate_aot_snippet(tokens, &schema);
+        assert!(!got.contains("_ref"), "pas de déclaration ref sans varlena:\n{got}");
+        assert!(got.contains("record.id"), "champ id absent:\n{got}");
+        assert!(!got.contains("buf.reserve"), "buf.reserve hors scope:\n{got}");
     }
 }
-
-
-
-
-
-
-

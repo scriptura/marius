@@ -95,16 +95,6 @@ marius/
 │   └── 11_audit/    # Sentinelles de performance et de santé
 │
 ├── src/             # Couche Rust : serveur, collecteur, projection, données
-│   ├── main.rs
-│   ├── server/      # Routes Axum + middleware Tower
-│   ├── collector/   # LISTEN/NOTIFY → Table de présence → Dispatcher
-│   ├── projection/  # Génération AOT : struct → HTML (push_str)
-│   └── data/        # Requêtes SQLx + structs mappés
-│
-├── assets/          # Sources CSS et JS (traités par build.rs)
-├── dist/            # Artéfacts générés (ignoré par git)
-├── doc/adr/         # Architecture Decision Records
-├── build.rs         # Pipeline AOT des assets statiques
 └── Cargo.toml
 ```
 

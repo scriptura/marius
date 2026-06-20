@@ -37,13 +37,10 @@ VALUES
 
 -- ── DOMAINE IDENTITY ──────────────────────────────────────────────────────────
 
--- identity.auth — hot path, fillfactor=70, BRIN created_at
--- Layout : 3×TSTZ(24B) + entity_id INT4(4) + role_id INT2(2) + is_banned BOOL(1)
---          + 1B slot libre + password_hash varlena(~101B inline) + 3B tail pad
--- Tuple padded : 160B — 34 tpp @ ff=70%
+-- identity.auth
 (
     'identity.auth',
-    160,
+    56,
     1,
     ARRAY[
         'identity.create_account(character varying,character varying,character varying,smallint,character varying)',
@@ -55,12 +52,10 @@ VALUES
     NULL
 ),
 
--- identity.person_identity — v2.1 : 72 → 80B
--- Header 32B (10 cols, null bitmap 2B, MAXALIGN) + entity_id(4) + gender(2)
--- + nationality(2) + 7×varlena × avg~5.7B ≈ 80B → MAXALIGN(80) = 80B.
+-- identity.person_identity
 (
     'identity.person_identity',
-    80,
+    40,
     256,
     ARRAY[
         'identity.create_person(character varying,character varying,smallint,smallint)'
@@ -70,11 +65,10 @@ VALUES
     NULL
 ),
 
--- identity.person_biography — v2.1 : 44 → 48B
--- Header 24B + 5×INT4(20B) = 44B brut → MAXALIGN(44) = 48B (tail pad omis v1)
+-- identity.person_biography
 (
     'identity.person_biography',
-    48,
+    44,
     256,
     NULL,
     ARRAY['entity_id'::name],
@@ -83,11 +77,9 @@ VALUES
 ),
 
 -- identity.role — exempt_bloat_check = true
--- Table de configuration structurelle : 7 lignes, REVOKE INSERT/UPDATE/DELETE.
--- 7 × ~49B ≈ 343B → fraction d'une page 8kB → bloat inévitable et inoffensif.
 (
     'identity.role',
-    49,
+    32,
     NULL,
     NULL,
     NULL,
@@ -140,11 +132,10 @@ VALUES
     NULL
 ),
 
--- content.tag_hierarchy — ancestor_id INT4 + descendant_id INT4 + depth INT2 + 2B pad
--- Header 24B (3 cols) + 10B = 34B → MAXALIGN = 40B
+-- content.tag_hierarchy
 (
     'content.tag_hierarchy',
-    40,
+    36,
     2048,
     ARRAY[
         'content.create_tag(character varying,character varying,integer)'
@@ -174,14 +165,10 @@ VALUES
     NULL
 ),
 
--- commerce.transaction_core — Layout : 2×TSTZ(16B) + id INT4(4) + client INT4(4)
---                                      + seller INT4(4) + status INT2(2)
---                                      + 2×BOOL(2B) + description varlena(4B)
--- Header 32B (9 cols, bitmap 2B, MAXALIGN 32B) + 40B = 72B → arrondi à 56B sans varlena
--- Déclaration conservatrice : 56B (sans description inline) — réévaluer post-ANALYZE
+-- commerce.transaction_core
 (
     'commerce.transaction_core',
-    56,
+    64,
     NULL,
     ARRAY[
         'commerce.create_transaction(integer,integer,smallint,smallint,text)'
@@ -244,15 +231,10 @@ VALUES
 
 -- ── DOMAINE GEO ───────────────────────────────────────────────────────────────
 
--- geo.place_core — Layout : id INT4(4) + elevation INT2(2) + type_id INT2(2)
---                           + name varlena + coordinates geometry varlena
--- Header 24B (5 cols, bitmap 1B, MAXALIGN 24B) + 8B fixe + 2×varlena(4B+4B) = 44B → MAXALIGN = 48B
--- Post-ANALYZE avec données réelles (GPS + nom ~15B) : ~96B → réévaluer
--- Déclaration conservatrice pré-ANALYZE : 48B (varlena = 4B fallback)
--- Note meta_data.sql v2.1 déclare 96B — valeur post-ANALYZE recommandée
+-- geo.place_core
 (
     'geo.place_core',
-    96,
+    32,
     NULL,
     ARRAY[
         'geo.create_place(character varying,smallint,smallint,double precision,double precision,smallint,character varying,character varying,character varying,character varying)'

@@ -196,14 +196,14 @@ CREATE TABLE identity.person_biography (
 
 -- PERSON CONTENT — FK cross-schéma RETIRÉE : media_id → content.media_core (→ 07_cross_fk)
 CREATE TABLE identity.person_content (
-  entity_id   INT           NOT NULL,
-  media_id    INT           NULL,
-  occupation  VARCHAR(30)   NULL,
-  bias        VARCHAR(30)   NULL,
-  hobby       VARCHAR(64)   NULL,
-  award       VARCHAR(128)  NULL,
-  devise      VARCHAR(100)  NULL,
-  description TEXT          NULL,
+  entity_id   INT            NOT NULL,
+  media_id    INT            NULL,
+  occupation  VARCHAR(30)    NULL,
+  bias        VARCHAR(30)    NULL,
+  hobby       VARCHAR(64)    NULL,
+  award       VARCHAR(128)   NULL,
+  devise      VARCHAR(100)   NULL,
+  description VARCHAR(5000)  NULL,
   PRIMARY KEY (entity_id),
   FOREIGN KEY (entity_id) REFERENCES identity.entity(id) ON DELETE CASCADE
   -- FOREIGN KEY (media_id) REFERENCES content.media_core(id) ON DELETE SET NULL
@@ -212,10 +212,10 @@ CREATE TABLE identity.person_content (
 
 -- GROUP
 CREATE TABLE identity.group (
-  created_at   TIMESTAMPTZ   NOT NULL DEFAULT now(),
-  id           INT           GENERATED ALWAYS AS IDENTITY,
-  name         VARCHAR(32)   NOT NULL UNIQUE,
-  description  TEXT          NULL,
+  created_at   TIMESTAMPTZ    NOT NULL DEFAULT now(),
+  id           INT            GENERATED ALWAYS AS IDENTITY,
+  name         VARCHAR(32)    NOT NULL UNIQUE,
+  description  VARCHAR(2000)  NULL,
   PRIMARY KEY (id)
 );
 

@@ -58,8 +58,8 @@ CREATE INDEX postal_address_country_locality ON geo.postal_address (country_code
 
 -- Corps textuel isolé : TOAST systématique (toast_tuple_target = 128)
 CREATE TABLE geo.place_content (
-  place_id     INT   NOT NULL,
-  description  TEXT  NULL,
+  place_id     INT            NOT NULL,
+  description  VARCHAR(5000)  NULL,
   PRIMARY KEY (place_id),
   FOREIGN KEY (place_id) REFERENCES geo.place_core(id) ON DELETE CASCADE
 ) WITH (toast_tuple_target = 128);

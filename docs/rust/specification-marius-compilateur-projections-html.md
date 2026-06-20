@@ -355,43 +355,29 @@ PAGE_TOTAL_CAP = page_sc_build_time + page_dc
 
 `PAGE_TOTAL_CAP` est une borne supérieure **sans marge arbitraire** — calculée analytiquement sur les maxima théoriques de chaque champ, atteignable au pire cas (tous champs à leur maximum, toutes branches `{% if %}` prises). L'absence de marge est un invariant fondateur (voir §0.5) : toute marge ajoutée masquerait une sous-estimation dans `max_escaped_len` ou `max_display_width`. Le mécanisme de validation est le test `no_realloc` (§11) et le fuzz test `max_escaped_len` (§5.8).
 
-### 4.2 Pré-indexation `FieldInfo`
+### 4.2 Invariant de passe unique — résolution sémantique et mesure de capacité fusionnées
 
-La construction d'une table de lookup avant le parcours de `flat` rend l'intent explicite (résolution de champ = opération de map) et élimine la recherche séquentielle répétée.
+La résolution sémantique (validation des entités/champs référencés, résolution des `StaticInclude`) et le calcul de capacité (`PAGE_STATIC_CAP`, `PAGE_DYNAMIC_CAP`) ne sont **pas** deux parcours distincts de `flat`. Itérer deux fois sur le même AST — une fois pour résoudre la structure, une fois pour mesurer la capacité — gaspillerait des cycles CPU et de la localité de cache pour un gain de modularité illusoire : les deux opérations consomment le même flux de tokens dans le même ordre.
+
+`resolve_and_measure` fusionne les deux responsabilités en une seule passe `O(N)` :
 
 ```rust
-enum FieldInfo { Fixed(usize), Varlena(usize) }
-
-fn build_field_index<'a>(
-    fields:  &'a [FieldSpec],
-    varlena: &'a [VarlenField],
-) -> std::collections::HashMap<&'a str, FieldInfo> {
-    let mut map = std::collections::HashMap::with_capacity(fields.len() + varlena.len());
-    for f in fields  { map.insert(f.name.as_str(), FieldInfo::Fixed(f.kind.max_display_width())); }
-    for v in varlena { map.insert(v.name.as_str(), FieldInfo::Varlena(v.max_escaped_len())); }
-    map
-}
-
-pub fn page_capacity(
-    flat: &[FlatPageToken], fields: &[FieldSpec], varlena: &[VarlenField],
-) -> (usize, usize) {
-    let index = build_field_index(fields, varlena);
-    let (mut sc, mut dc) = (0usize, 0usize);
-    for token in flat {
-        match token {
-            FlatPageToken::Static(s)                  => sc += s.len(),
-            FlatPageToken::StaticInclude { len, .. }  => sc += len,
-            FlatPageToken::Field { field, .. } => match index.get(field.as_str()) {
-                Some(FieldInfo::Fixed(w))   => dc += w,
-                Some(FieldInfo::Varlena(w)) => dc += w,
-                None => unreachable!("validé à l'étape 5"),
-            },
-            FlatPageToken::IfBool { .. } | FlatPageToken::EndIf => {}
-        }
-    }
-    (sc, dc)
-}
+pub fn resolve_and_measure<'src>(
+    tokens: &mut [FlatPageToken<'src>],
+    schema: &SchemaIndex<'_>,
+    get_file_size: impl Fn(&str) -> Result<usize, String>,
+) -> Result<TemplateMetrics, Vec<ResolverError<'src>>>;
 ```
+
+Pour chaque token, dans le même parcours :
+
+- `Static(s)` → accumule `s.len()` dans `total_static_bytes`.
+- `StaticInclude { rel_from_manifest, len, .. }` → résout `len` via `get_file_size`, accumule dans `total_static_bytes`.
+- `Field { field, .. }` → recherche `field` dans `SchemaIndex` (fixed ou varlena) ; absent → `ResolverError::UnknownField` ; présent → accumule `max_display_width` ou `max_escaped_len` dans `total_dynamic_bytes`.
+- `IfBool { field, .. }` → validation de présence dans le schéma uniquement (pas de contribution à la capacité — le bloc est mesuré au pire cas via ses tokens internes, comptés normalement).
+- `EndIf` → aucun effet.
+
+La formule mathématique de capacité (§4.1) est inchangée : `PAGE_TOTAL_CAP = page_sc_build_time + page_dc`. Seul le mécanisme de calcul change — une passe au lieu de deux, ce qui maximise la localité du cache CPU sur l'itération de l'AST. `TemplateMetrics { total_static_bytes, total_dynamic_bytes, include_count }` est l'unique structure produite ; il n'existe plus de fonction de capacité indépendante de la résolution sémantique.
 
 ---
 
@@ -411,9 +397,15 @@ pub fn parse_page_template(
     varlena:       &[VarlenField],
 ) -> Result<Vec<FlatPageToken>, PageParseError>;
 
-pub fn page_capacity(
-    flat: &[FlatPageToken], fields: &[FieldSpec], varlena: &[VarlenField],
-) -> (usize, usize);  // (page_sc_build_time, page_dc)
+/// Unique point de vérité pour la résolution sémantique et la capacité (§4.2).
+/// Remplace toute fonction de capacité indépendante — il n'existe pas de
+/// `page_capacity` distinct : la mesure est fusionnée dans la même passe que
+/// la validation des champs/entités référencés par l'AST.
+pub fn resolve_and_measure<'src>(
+    tokens: &mut [FlatPageToken<'src>],
+    schema: &SchemaIndex<'_>,
+    get_file_size: impl Fn(&str) -> Result<usize, String>,
+) -> Result<TemplateMetrics, Vec<ResolverError<'src>>>;
 
 /// "templates/partials/nav.html" → "PARTIALS_NAV"
 pub fn static_const_ident(original_path: &str) -> String;
@@ -815,7 +807,7 @@ impl marius_projection::PageProjection for ContentCoreProjection {
 ## 9. Intégration dans `build.rs` de `marius-schema`
 
 ```rust
-use marius_fragment_forge::{detect_extends, parse_page_template, page_capacity,
+use marius_fragment_forge::{detect_extends, parse_page_template, resolve_and_measure, SchemaIndex,
     generate_page_render, generate_page_capacity_consts,
     generate_static_partials_module, static_const_ident};
 use std::collections::HashMap;
@@ -862,11 +854,15 @@ let static_idents: HashMap<String, String> = unique_statics.into_iter()
     .map(|(path, (_, ident))| (path, ident)).collect();
 
 if let Some(flat) = &content_core_flat {
-    let output = generate_page_render(flat, &content_core_fields, &content_core_varlena, &static_idents);
-    debug_assert_eq!(output.page_sc_build_time,
-        page_capacity(flat, &content_core_fields, &content_core_varlena).0);
+    let mut flat_mut = flat.clone();
+    let schema_index = SchemaIndex { fixed: &content_core_fields, varlena: &content_core_varlena };
+    let metrics = resolve_and_measure(&mut flat_mut, &schema_index, get_file_size)
+        .unwrap_or_else(|e| panic!("\n\n[fragment-forge] Erreur de résolution :\n{e:?}\n"));
 
-    out.push_str(&generate_page_capacity_consts("CONTENT_CORE", &output.static_cap_expr, output.page_dc));
+    let output = generate_page_render(flat, &content_core_fields, &content_core_varlena, &static_idents);
+    debug_assert_eq!(output.page_sc_build_time, metrics.total_static_bytes);
+
+    out.push_str(&generate_page_capacity_consts("CONTENT_CORE", &output.static_cap_expr, metrics.total_dynamic_bytes));
     out.push_str(&format!(
         "impl marius_projection::PageProjection for ContentCoreProjection {{\n\
              const PAGE_TOTAL_CAP: usize = CONTENT_CORE_PAGE_TOTAL_CAP;\n\
@@ -906,7 +902,7 @@ fn bench_certify_zero_alloc_page(bencher: Bencher) {
             ContentCoreProjection::render_page(&storage, &varlena, &mut buf);
             assert_eq!(CountingAlloc::alloc_count(), 0,
                 "CERTIFICATION ÉCHOUÉE render_page. \
-                 Vérifier : (1) multiplicité Field tokens dans page_capacity(), \
+                 Vérifier : (1) multiplicité Field tokens dans resolve_and_measure(), \
                  (2) VarlenField::max_escaped_len(), (3) len StaticInclude, \
                  (4) is_readable=true pour branche {% if %}.");
             black_box(&buf);
@@ -1193,33 +1189,58 @@ mod tests_rel_path {
 }
 ```
 
-### 15.4 `page_capacity`
+### 15.4 `resolve_and_measure` — capacité
 
 ```rust
 #[cfg(test)]
 mod tests_capacity {
     use super::*;
+
     #[test] fn field_counted_per_occurrence() {
-        let flat = vec![
-            FlatPageToken::Field { entity: "e".into(), field: "title".into() },
-            FlatPageToken::Field { entity: "e".into(), field: "title".into() },
+        let mut flat = vec![
+            FlatPageToken::Field { entity: "e", field: "title" },
+            FlatPageToken::Field { entity: "e", field: "title" },
         ];
         let varlena = vec![VarlenField { name: "title".into(), max_len: 100,
             max_escaped_len_override: None, pre_escaped: false, nullable: true }];
-        let (_, dc) = page_capacity(&flat, &[], &varlena);
-        assert_eq!(dc, 2 * 100 * 6);  // deux occurrences × facteur 6
+        let schema = SchemaIndex { fixed: &[], varlena: &varlena };
+
+        let metrics = resolve_and_measure(
+            &mut flat, &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+        ).expect("résolution attendue en succès");
+
+        // Deux occurrences du même champ → comptées deux fois (pas de déduplication
+        // de la contribution à la capacité — seule la déclaration de _ref est dédupliquée
+        // côté génération de code, voir generate_aot_snippet).
+        assert_eq!(metrics.total_dynamic_bytes, 2 * 100 * 6);  // facteur HTML_ESCAPE_FACTOR = 6
+        assert_eq!(metrics.total_static_bytes, 0);
     }
+
     #[test] fn static_include_len_counted() {
-        let flat = vec![
+        let mut flat = vec![
             FlatPageToken::StaticInclude {
-                original_path: "templates/partials/nav.html".into(),
-                rel_from_manifest: "/../../../templates/partials/nav.html".into(),
-                len: 50,
+                original_path:      "templates/partials/nav.html",
+                rel_from_manifest:  "templates/partials/nav.html",
+                len: 0,  // valeur initiale sans importance — résolue par get_file_size
             }
         ];
-        let (sc, dc) = page_capacity(&flat, &[], &[]);
-        assert_eq!(sc, 50);
-        assert_eq!(dc, 0);
+        let schema = SchemaIndex { fixed: &[], varlena: &[] };
+
+        let metrics = resolve_and_measure(
+            &mut flat, &schema,
+            |path| if path == "templates/partials/nav.html" { Ok(50) } else { Err("chemin inattendu".into()) },
+        ).expect("résolution attendue en succès");
+
+        assert_eq!(metrics.total_static_bytes, 50);
+        assert_eq!(metrics.total_dynamic_bytes, 0);
+        assert_eq!(metrics.include_count, 1);
+
+        // Le token est muté en place : `len` reflète désormais la taille résolue.
+        match &flat[0] {
+            FlatPageToken::StaticInclude { len, .. } => assert_eq!(*len, 50),
+            _ => unreachable!(),
+        }
     }
 }
 ```

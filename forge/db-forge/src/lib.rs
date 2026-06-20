@@ -49,3 +49,32 @@ pub use codegen::{
     write_store_struct,
     write_varlen_owned_struct,
 };
+
+// ── Résolution de schéma partagée (Voie B — templates .marius) ───────────────
+//
+// Utilisée par write_projection_stub (résolution de pk_field pour record_id())
+// ET par build.rs (construction du SchemaIndex passé à resolve_and_measure /
+// generate_aot_snippet). Définie une seule fois ici pour éviter la divergence
+// entre les deux call sites — la même logique de mapping doit produire le
+// même résultat partout.
+use marius_fragment_forge::{FieldKind, FieldSpec};
+
+/// Construit la liste des `FieldSpec` (champs fixed-length avec leur `FieldKind`)
+/// depuis les colonnes introspectées.
+///
+/// Filtre : uniquement les colonnes `is_fixed` (exclut varlena et types Phase 2).
+/// Filtre : uniquement les types reconnus par `FieldKind::from_sql_type` —
+/// un type fixed sans FieldKind correspondant (cas théorique, tous les types
+/// fixed de mapping.rs ont un FieldKind) serait silencieusement exclu.
+pub fn build_field_specs(columns: &[Column]) -> Vec<FieldSpec> {
+    columns.iter()
+        .filter(|c| map_type(&c.sql_type).is_fixed)
+        .filter_map(|c| {
+            FieldKind::from_sql_type(&c.sql_type).map(|kind| FieldSpec {
+                name:   c.name.clone(),
+                kind,
+                attnum: c.attnum,
+            })
+        })
+        .collect()
+}

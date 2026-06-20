@@ -1,0 +1,7 @@
+<article class="content-core" id="{{ record.document_id }}">
+  <h1>{{ record.headline }}</h1>
+  <h2>{{ record.alternative_headline }}</h2>
+  {% if record.is_readable %}
+  <p class="body">{{ record.description }}</p>
+  {% endif %}
+</article>

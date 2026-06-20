@@ -143,17 +143,28 @@ pub async fn fetch_max_id(
 
 /// Colonnes varlena (varchar, bpchar, text) d'une table.
 ///
-/// ─── Politique max_len ───────────────────────────────────────────────────────
+/// ─── Politique max_len (ADR-007) ─────────────────────────────────────────────
 ///
-///   VARCHAR(N)           : max_len = atttypmod - 4.
-///   TEXT avec CHECK      : max_len extrait de pg_constraint (consrc).
-///   TEXT sans contrainte : exclu (cargo:warning). Fallback 10 000 si force.
-///   max_escaped_len > 64 KB : panic! (seuil AOT).
+///   VARCHAR(N)           : max_len = Some(atttypmod - 4).
+///   TEXT avec CHECK       : max_len extrait de pg_get_constraintdef(oid).
+///                           Si non parsable → None (jamais de fallback numérique).
+///   TEXT sans contrainte  : max_len = None.
 ///
-/// ─── Politique is_pre_escaped ─────────────────────────────────────────────────
+///   `None` n'exclut PLUS le champ du listing render (changement vs Phase 4) :
+///   le champ reste visible dans le Vec<VarlenField> retourné. La frontière
+///   Hot/Cold/Erreur est tranchée plus loin dans le pipeline, par
+///   resolve_and_measure (marius-fragment-forge), selon que le champ est
+///   référencé ou non par le template résolu — pas ici. Voir ADR-007.
+///
+///   max_escaped_len > 64 KB : panic! (seuil AOT). Vérifié seulement si
+///   max_len = Some(_) — un champ non borné n'a rien à valider ici, sa
+///   validation est différée à la résolution (ResolverError::UnboundedField
+///   si jamais référencé sans borne).
+///
+/// ─── Politique pre_escaped ─────────────────────────────────────────────────
 ///
 ///   Si COMMENT ON COLUMN ... IS 'marius:pre_escaped' → facteur escape = 1.
-///   Sinon : facteur = VarlenField::HTML_ESCAPE_FACTOR (5).
+///   Sinon : facteur = VarlenField::HTML_ESCAPE_FACTOR (6).
 pub async fn fetch_varlena_cols(
     pool:   &sqlx::PgPool,
     schema: &str,
@@ -192,24 +203,37 @@ pub async fn fetch_varlena_cols(
         let typmod:      i32    = row.get(1);
         let description: String = row.get(2);
 
-        let is_pre_escaped = description.trim() == "marius:pre_escaped";
+        let pre_escaped = description.trim() == "marius:pre_escaped";
 
-        // ── Résolution de max_len ─────────────────────────────────────────────
-        let max_len: usize = if typmod > 4 {
-            // Cas 1 : VARCHAR(N) → atttypmod = N + 4.
-            (typmod - 4) as usize
+        // ── Résolution de max_len — Option<usize>, jamais de fallback ─────────
+        let max_len: Option<usize> = if typmod > 4 {
+            // Cas 1 : VARCHAR(N) → atttypmod = N + 4. Borne structurelle, fiable.
+            Some((typmod - 4) as usize)
         } else {
             // Cas 2 : TEXT/BPCHAR sans précision → chercher CHECK (length(col) <= N).
+            // pg_get_constraintdef(oid) : pg_constraint.consrc a été supprimée en
+            // PostgreSQL 12 — c'est l'API stable depuis, retournant le texte complet
+            // de la contrainte (ex: "CHECK ((length(description) <= 2000))").
+            //
+            // Hypothèses non garanties par PostgreSQL pour ce chemin (cf. ADR-007,
+            // audit H1–H10) : au plus une contrainte CHECK pertinente par colonne
+            // (H1, non vérifié ici — fetch_optional reste volontairement simple
+            // dans cette PR, la grammaire stricte est différée), forme canonique
+            // `length(col) <= N` (H2/H3/H9, non vérifiée — parse_check_length_limit
+            // reste un parsing best-effort), stabilité du format pg_get_constraintdef
+            // inter-versions majeures (H4). Aucune heuristique supplémentaire n'est
+            // ajoutée dans cette PR — un échec de parsing devient None, pas un panic
+            // ni un fallback numérique.
             let check_row = sqlx::query(
-                "SELECT con.consrc::text
+                "SELECT pg_get_constraintdef(con.oid)::text
                  FROM   pg_constraint  con
                  JOIN   pg_class       cls ON cls.oid = con.conrelid
                  JOIN   pg_namespace   ns  ON ns.oid  = cls.relnamespace
                  WHERE  ns.nspname  = $1
                    AND  cls.relname = $2
                    AND  con.contype = 'c'
-                   AND  (con.consrc LIKE '%length(' || $3 || ')%'
-                      OR con.consrc LIKE '%char_length(' || $3 || ')%')",
+                   AND  (pg_get_constraintdef(con.oid) LIKE '%length(' || $3 || ')%'
+                      OR pg_get_constraintdef(con.oid) LIKE '%char_length(' || $3 || ')%')",
             )
             .bind(schema)
             .bind(table)
@@ -217,60 +241,89 @@ pub async fn fetch_varlena_cols(
             .fetch_optional(pool)
             .await?;
 
-            if let Some(check_r) = check_row {
-                let consrc: String = check_r.get(0);
-                parse_check_length_limit(&consrc).unwrap_or_else(|| {
+            match check_row {
+                Some(check_r) => {
+                    let consrc: String = check_r.get(0);
+                    match parse_check_length_limit(&consrc) {
+                        Some(n) => Some(n),
+                        None => {
+                            println!(
+                                "cargo:warning=DB-Forge [{schema}.{table}.{name}]: \
+                                 CHECK trouvé mais longueur non parsable : `{consrc}`. \
+                                 Traité comme non borné (max_len=None) — voir ADR-007."
+                            );
+                            None
+                        }
+                    }
+                }
+                None => {
+                    // Cas 3 : TEXT sans contrainte. Le champ N'EST PLUS exclu du
+                    // Vec<VarlenField> (changement ADR-007) : il reste visible pour
+                    // que resolve_and_measure puisse le classer Cold (non référencé,
+                    // aucun impact) ou échouer explicitement avec UnboundedField
+                    // (référencé sans borne) plutôt que de disparaître silencieusement
+                    // ou de subir un fallback arbitraire.
                     println!(
                         "cargo:warning=DB-Forge [{schema}.{table}.{name}]: \
-                         CHECK trouvé mais longueur non parsable : `{consrc}`. \
-                         Fallback max_len=10000."
+                         TEXT sans contrainte de longueur — champ non borné (Cold sauf \
+                         si référencé par un template, alors erreur de compilation)."
                     );
-                    10_000
-                })
-            } else {
-                // Cas 3 : TEXT sans contrainte → exclu du listing render.
-                println!(
-                    "cargo:warning=DB-Forge [{schema}.{table}.{name}]: \
-                     TEXT sans contrainte de longueur — exclu du listing render."
-                );
-                continue;
+                    None
+                }
             }
         };
 
         // ── Validation AOT : seuil absolu 64 KB ──────────────────────────────
-        let escape_factor = if is_pre_escaped { 1 } else { VarlenField::HTML_ESCAPE_FACTOR };
-        let max_escaped   = max_len * escape_factor;
-        if max_escaped > 65_536 {
-            panic!(
-                "DB-Forge [{schema}.{table}.{name}]: \
-                 max_escaped_len ({max_escaped}B) > 64 KB. \
-                 Réduire la contrainte VARCHAR/CHECK ou exclure du listing render."
-            );
-        }
-
-        // ── Validation AOT : pression avg_width → DYNAMIC_CAP ────────────────
-        let avg_row = sqlx::query(
-            "SELECT avg_width::integer FROM pg_stats
-             WHERE schemaname = $1 AND tablename = $2 AND attname = $3",
-        )
-        .bind(schema)
-        .bind(table)
-        .bind(&name)
-        .fetch_optional(pool)
-        .await?;
-
-        if let Some(r) = avg_row {
-            let avg_width: i32 = r.get(0);
-            if avg_width as usize > max_len * 8 / 10 {
-                println!(
-                    "cargo:warning=DB-Forge [{schema}.{table}.{name}]: \
-                     avg_width observé ({avg_width}B) > 80% de max_len ({max_len}B). \
-                     Pression sur DYNAMIC_CAP."
+        // Seulement si une borne existe — un champ non borné n'a rien à valider
+        // ici ; sa validation est différée à resolve_and_measure (Étape 3).
+        if let Some(n) = max_len {
+            let escape_factor = if pre_escaped { 1 } else { VarlenField::HTML_ESCAPE_FACTOR };
+            let max_escaped   = n * escape_factor;
+            if max_escaped > 65_536 {
+                panic!(
+                    "DB-Forge [{schema}.{table}.{name}]: \
+                     max_escaped_len ({max_escaped}B) > 64 KB. \
+                     Réduire la contrainte VARCHAR/CHECK ou exclure du listing render."
                 );
             }
         }
 
-        fields.push(VarlenField { name, max_len, is_pre_escaped });
+        // ── Validation AOT : pression avg_width → DYNAMIC_CAP ────────────────
+        // Sans objet si max_len est None — pas de borne contre laquelle mesurer
+        // la pression statistique.
+        if let Some(n) = max_len {
+            let avg_row = sqlx::query(
+                "SELECT avg_width::integer FROM pg_stats
+                 WHERE schemaname = $1 AND tablename = $2 AND attname = $3",
+            )
+            .bind(schema)
+            .bind(table)
+            .bind(&name)
+            .fetch_optional(pool)
+            .await?;
+
+            if let Some(r) = avg_row {
+                let avg_width: i32 = r.get(0);
+                if avg_width as usize > n * 8 / 10 {
+                    println!(
+                        "cargo:warning=DB-Forge [{schema}.{table}.{name}]: \
+                         avg_width observé ({avg_width}B) > 80% de max_len ({n}B). \
+                         Pression sur DYNAMIC_CAP."
+                    );
+                }
+            }
+        }
+
+        // nullable=true : toujours le cas en v1, LEFT JOIN peut produire NULL.
+        // max_escaped_len_override=None : valeur calculée (max_len × facteur),
+        // pas de surcharge manuelle pour l'instant.
+        fields.push(VarlenField {
+            name,
+            max_len,
+            pre_escaped,
+            nullable: true,
+            max_escaped_len_override: None,
+        });
     }
 
     Ok(fields)

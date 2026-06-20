@@ -1,0 +1,3 @@
+<article class="product-core" id="{{ record.id }}">
+  <p>Stock disponible : {{ record.stock }}</p>
+</article>
