@@ -86,7 +86,7 @@ ordinaire, hors du périmètre de la Forge. Une fois cette table en place,
   (un singleton est un cas particulier de PK unique, pas une exception).
 - Invalidation via `pg_notify` sur la table de synthèse — pas sur
   `commerce.product_core` directement. Le trigger qui maintient la synthèse
-  décide *quand* la resynchronisation a lieu ; le Dispatcher ne voit qu'une
+  décide _quand_ la resynchronisation a lieu ; le Dispatcher ne voit qu'une
   mutation ordinaire sur une table ordinaire.
 
 **Conséquence directe** : le problème de granularité d'invalidation ("quand
@@ -126,6 +126,6 @@ aurait dupliqué, moins bien, une capacité que la base de données possède dé
 
 ---
 
-*Rédigé à la suite d'un audit croisé (Gemini, GPT) d'ADR-008, isolant cette
+_Rédigé à la suite d'un audit croisé (Gemini, GPT) d'ADR-008, isolant cette
 question comme seul point parmi quatre justifiant un document séparé plutôt
-qu'un amendement — les trois autres ont été intégrés directement à ADR-008.*
+qu'un amendement — les trois autres ont été intégrés directement à ADR-008._

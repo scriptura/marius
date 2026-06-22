@@ -1,17 +1,28 @@
 // =============================================================================
 // crates/shell/render/src/batch_renderer.rs
 //
-// Moteur d'exécution Packfile — Phase 1.
+// Moteur d'exécution Packfile HTML — distinct du store.bin (PackfileBuilder/
+// PackfileReader, marius_projection) qui porte les StorageRow brutes pour
+// fetch_batch. Ce fichier produit l'artefact HTML servi en lecture par sendfile
+// (ADR-006), pas les données sources.
 //
 // Invariants :
-//   O(1) syscalls  : un seul open() par batch via l'appelant (BufWriter externe).
+//   O(1) syscalls  : un seul open() par fichier — fd conservé, jamais réouvert
+//                    par requête (côté lecture, voir specification-marius-render-shell.md).
 //   Zéro-alloc     : buf.clear() entre records (capacity conservée).
 //                    index pré-alloué à batch_len avant la boucle.
-//   Index physique : Vec<PackfileEntry> corrélant chaque ID à (offset, len).
+//   Index physique : Vec<PackfileEntry> corrélant chaque ID à (offset, len),
+//                    bytemuck::Pod — castable directement depuis un mmap.
 //
-// Ajout requis dans crates/shell/render/src/lib.rs :
-//   pub mod batch_renderer;
-//   pub use batch_renderer::{BatchRenderer, PackfileEntry};
+// Format on-disk complet (footer — voir write_packfile_footer) :
+//
+//   [ HTML blob, fragments concatenés, sans padding   ]
+//   [ PackfileEntry[], entry_count × 24B, ID ASC       ]
+//   [ PackfileFooter, 32B fixe, toujours en dernier    ]
+//
+// Footer en fin de fichier (pas en tête) : permet d'écrire le blob en flux
+// (render_batch, potentiellement sur plusieurs chunks/resets) sans connaître
+// par avance sa longueur totale — aucun besoin de Seek, juste Write.
 // =============================================================================
 
 use std::io::{BufWriter, Write};
@@ -25,10 +36,12 @@ use marius_projection::Projection;
 
 /// Entrée d'index physique pour un fragment HTML dans le packfile.
 ///
-/// #[repr(C)] : sérialisable directement sur disque en Phase 2 (mmap).
-/// Taille fixe : 8 + 8 + 4 = 20B, paddé à 24B (align 8).
+/// #[repr(C)] + bytemuck::Pod/Zeroable : castable directement depuis un mmap
+/// au moment de la lecture (cold start du Render Shell), zéro désérialisation.
+/// _pad explicite : bytemuck::Pod interdit tout padding non initialisé —
+/// même discipline que PackfileStoreHeader/VarlenSlot (marius_projection).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PackfileEntry {
     /// PK de l'enregistrement (i64 par convention — downcast depuis record_id).
     pub id:     i64,
@@ -36,6 +49,94 @@ pub struct PackfileEntry {
     pub offset: u64,
     /// Longueur du fragment HTML en octets (u32 : max ~4 GB par fragment).
     pub len:    u32,
+    /// Tail padding explicite — requis par bytemuck::Pod, jamais lu.
+    pub _pad:   [u8; 4],
+}
+
+const _: () = assert!(
+    std::mem::size_of::<PackfileEntry>() == 24,
+    "PackfileEntry doit être exactement 24B (8+8+4+4)"
+);
+
+/// Footer fixe clôturant un packfile HTML — toujours les 32 derniers octets
+/// du fichier. Le lecteur lit ces 32B en dernier (un seul mmap, offset connu
+/// = file_len - 32), valide magic/version, puis dérive index_start =
+/// file_len - 32 - index_len pour localiser l'index sans jamais avoir eu
+/// besoin de le connaître pendant l'écriture.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PackfileFooter {
+    pub magic:       [u8; 8],  // b"MARIUSPK"
+    pub version:     u32,      // = 1
+    pub _pad:        [u8; 4],
+    pub entry_count: u64,
+    pub index_len:   u64,      // = entry_count * size_of::<PackfileEntry>() — redondant
+                                 // mais explicite : permet de faire évoluer la taille
+                                 // d'une entrée sans recalcul implicite côté lecteur.
+}
+
+const _: () = assert!(
+    std::mem::size_of::<PackfileFooter>() == 32,
+    "PackfileFooter doit être exactement 32B"
+);
+
+/// Arrondit `x` au prochain multiple de 8.
+///
+/// Même fonction que `marius_projection::align8` (store.bin) — dupliquée ici
+/// plutôt que partagée : les deux formats vivent dans des crates distinctes
+/// (`marius_render` vs `marius_projection`) sans dépendance dans ce sens.
+#[inline(always)]
+const fn align8(x: u64) -> u64 { (x + 7) & !7 }
+
+/// Écrit l'index physique puis le footer à la suite du blob HTML déjà
+/// streamé par un ou plusieurs appels à `render_batch`.
+///
+/// `blob_len` : offset final retourné par le dernier `render_batch` —
+/// longueur exacte du blob déjà écrit. Requis pour insérer le padding qui
+/// aligne le début de l'index sur une frontière de 8 octets : sans lui,
+/// `bytemuck::from_bytes`/`cast_slice` paniquent au premier blob dont la
+/// longueur n'est pas multiple de 8 (le cas général — un fragment HTML n'a
+/// aucune raison d'avoir une longueur ronde). Même discipline qu'`align8()`
+/// entre les sections de `PackfileStoreHeader` (store.bin) ; absente ici par
+/// omission jusqu'à ce qu'un test (`footer_and_index_roundtrip`) la révèle.
+///
+/// Appelé une seule fois, après la dernière écriture de blob — jamais entre
+/// deux chunks d'un même fichier. `index` doit être l'accumulation complète
+/// de toutes les entrées du fichier (le caller est responsable de l'avoir
+/// collecté lui-même si plusieurs `reset()` ont eu lieu entre-temps — voir
+/// `specification-marius-render-shell.md`, section "Interface d'écriture").
+///
+/// Invariant requis, non vérifié ici (responsabilité de l'appelant) :
+/// `index` trié par `id` ASC — découle naturellement de l'ordre d'itération
+/// déjà garanti par `dumper.rs` (`SELECT id ... ORDER BY id ASC`), réutilisé
+/// sans recalcul.
+pub fn write_packfile_footer<W: Write>(
+    writer:   &mut BufWriter<W>,
+    blob_len: u64,
+    index:    &[PackfileEntry],
+) -> std::io::Result<()> {
+    // Padding jusqu'au prochain multiple de 8 — garantit que l'index, puis
+    // le footer, démarrent tous deux sur une frontière 8B. PackfileEntry
+    // (24B) et PackfileFooter (32B) sont déjà multiples de 8 : aligner
+    // uniquement ce premier point suffit à aligner tout ce qui suit.
+    let pad = align8(blob_len) - blob_len;
+    if pad > 0 {
+        const ZERO: [u8; 8] = [0u8; 8];
+        writer.write_all(&ZERO[..pad as usize])?;
+    }
+
+    writer.write_all(bytemuck::cast_slice(index))?;
+
+    let footer = PackfileFooter {
+        magic:       *b"MARIUSPK",
+        version:     1,
+        _pad:        [0u8; 4],
+        entry_count: index.len() as u64,
+        index_len:   (index.len() * std::mem::size_of::<PackfileEntry>()) as u64,
+    };
+    writer.write_all(bytemuck::bytes_of(&footer))?;
+
+    Ok(())
 }
 
 // =============================================================================
@@ -86,6 +187,9 @@ impl<P: Projection> BatchRenderer<P> {
     ///   1. total_cap == {NAME}_TOTAL_CAP (Fragment-Forge a calculé le pire cas).
     ///   2. batch_len == records.len() au moment de new().
     ///   3. P::render() n'alloue pas en interne (invariant Fragment-Forge).
+    ///
+    /// N'écrit jamais l'index ni le footer — voir `write_packfile_footer`,
+    /// appelée une seule fois par l'orchestrateur après le dernier batch.
     pub fn render_batch<W: Write>(
         &mut self,
         records:      &[(P::Record, P::VarlenOwned)],
@@ -119,6 +223,7 @@ impl<P: Projection> BatchRenderer<P> {
                 id: P::record_id(record),
                 offset,
                 len,
+                _pad: [0u8; 4],
             });
 
             offset += len as u64;
@@ -128,7 +233,13 @@ impl<P: Projection> BatchRenderer<P> {
     }
 
     /// Vide l'index et réinitialise l'offset sans désallouer les buffers.
-    /// Permet de réutiliser le BatchRenderer pour un second batch sur la même table.
+    ///
+    /// Permet de réutiliser le BatchRenderer pour un second batch sur la même
+    /// table. ATTENTION : l'index interne est vidé — si plusieurs chunks
+    /// composent un seul fichier final, l'appelant doit collecter `index()`
+    /// (ou `into_index()` en clonant) AVANT chaque appel à `reset()`, et
+    /// accumuler lui-même la liste complète à passer à
+    /// `write_packfile_footer` une fois tous les chunks traités.
     pub fn reset(&mut self, next_batch_len: usize) {
         self.index.clear();
         if self.index.capacity() < next_batch_len {
@@ -137,7 +248,8 @@ impl<P: Projection> BatchRenderer<P> {
         }
     }
 
-    /// Consomme le renderer, retourne l'index physique.
+    /// Consomme le renderer, retourne l'index physique (du batch courant
+    /// uniquement — voir avertissement sur `reset()`).
     pub fn into_index(self) -> Vec<PackfileEntry> {
         self.index
     }
@@ -187,9 +299,7 @@ mod tests {
         }
 
         fn render(record: &StubRecord, _varlena: &(), buf: &mut String) {
-            // Rendu synthétique — aucune allocation (push_str sur capacité réservée).
             buf.push_str("<article id=\"");
-            // write_fmt via format_args : pas d'allocation si capacity suffisante.
             use std::fmt::Write as _;
             write!(buf, "{}", record.id).unwrap();
             buf.push_str("\"><p>");
@@ -230,7 +340,6 @@ mod tests {
         let index = renderer.index();
         assert_eq!(index.len(), 3);
 
-        // Chaque offset pointe juste après le fragment précédent.
         let mut expected_offset: u64 = 0;
         for entry in index {
             assert_eq!(entry.offset, expected_offset,
@@ -271,20 +380,9 @@ mod tests {
     }
 
     // ── Test 3 : no-realloc — invariant capacité ──────────────────────────────
-    //
-    // Stratégie : capturer buf.capacity() avant et après render().
-    // Un GlobalAlloc counting est impossible en module test (attribut global).
-    // L'invariant de non-réallocation est validé par deux observations :
-    //   a) capacity() stable = render() n'a pas déclenché de resize.
-    //   b) Les benchmarks bench/hot_path_render.rs mesurent les allocs via
-    //      CountingAlloc (déjà en place dans le projet).
-    //
-    // Ce test garantit la propriété structurelle (capacity invariant).
-    // Le bench garantit la propriété de comptage (alloc_count == 0).
 
     #[test]
     fn buf_capacity_stable_across_batch() {
-        // Pires cas : valeurs maximales de chaque type pour maximiser len HTML.
         let records: Vec<(StubRecord, ())> = vec![
             (StubRecord { id: i32::MIN,  price: i64::MIN  }, ()),
             (StubRecord { id: i32::MAX,  price: i64::MAX  }, ()),
@@ -321,7 +419,6 @@ mod tests {
 
         renderer.reset(4);
 
-        // Aucune désallocation : capacités inchangées.
         assert_eq!(renderer.buf.capacity(),   cap_before_reset);
         assert_eq!(renderer.index.capacity(), idx_cap_before);
         assert_eq!(renderer.index.len(), 0, "index doit être vidé par reset()");
@@ -341,11 +438,45 @@ mod tests {
         renderer.reset(3);
         let _offset_after_b2 = renderer.render_batch(&batch2, &mut sink, offset_after_b1).unwrap();
 
-        // Le premier offset du batch2 doit valoir offset_after_b1.
         assert_eq!(
             renderer.index()[0].offset,
             offset_after_b1,
             "offset de début du batch2 incohérent avec la fin du batch1",
         );
+    }
+
+    // ── Test 6 : format on-disk complet — footer + index relisibles ──────────
+
+    #[test]
+    fn footer_and_index_roundtrip() {
+        let records = make_records(3);
+        let mut renderer = BatchRenderer::<StubProjection>::new(STUB_TOTAL_CAP, records.len());
+        let mut sink      = BufWriter::new(Vec::<u8>::new());
+
+        // blob_len = valeur RETOURNÉE par render_batch, jamais interrogée sur
+        // le writer : BufWriter tamponne en interne, sink.get_ref().len() peut
+        // sous-compter tant qu'aucun flush (implicite ou explicite) n'a eu
+        // lieu — source du second bug d'alignement, distinct du premier.
+        let blob_len = renderer.render_batch(&records, &mut sink, 0).unwrap();
+        let index = renderer.into_index();
+        write_packfile_footer(&mut sink, blob_len, &index).unwrap();
+
+        let raw = sink.into_inner().unwrap();
+
+        // Footer = 32 derniers octets.
+        let footer_start = raw.len() - std::mem::size_of::<PackfileFooter>();
+        let footer: &PackfileFooter = bytemuck::from_bytes(&raw[footer_start..]);
+
+        assert_eq!(&footer.magic, b"MARIUSPK");
+        assert_eq!(footer.version, 1);
+        assert_eq!(footer.entry_count, 3);
+        assert_eq!(footer.index_len, 3 * std::mem::size_of::<PackfileEntry>() as u64);
+
+        // Index juste avant le footer.
+        let index_start = footer_start - footer.index_len as usize;
+        let read_index: &[PackfileEntry] =
+            bytemuck::cast_slice(&raw[index_start..footer_start]);
+
+        assert_eq!(read_index, index.as_slice());
     }
 }

@@ -143,15 +143,15 @@ La clause `..` absorbe les champs non nommés (Phase 2, types inconnus) sans les
 
 ## Conséquences
 
-| Invariant | Mécanisme |
-|---|---|
-| Pas d'allocation sur le hot path | `buf` pré-alloué, `as_deref()` sans copie |
-| Traversée de thread sans restriction | `Record + VarlenOwned : Send + 'static` |
-| Aucun GAT dans l'interface publique | `RenderPayload<'a>` local à `render()` |
-| Stabilité Phase 2 | Seul le corps de `fetch_batch` change |
-| Tables sans varlena : coût zéro | `type VarlenOwned = ()` (ZST) |
-| Détection précoce des divergences DDL | `static_assert!(size_of, align_of)` dans `StorageRow` |
-| Empreinte RAM Dispatcher bornée | $O(T)$ allocations — `map_with`, une `String` par thread Rayon |
+| Invariant                             | Mécanisme                                                      |
+| ------------------------------------- | -------------------------------------------------------------- |
+| Pas d'allocation sur le hot path      | `buf` pré-alloué, `as_deref()` sans copie                      |
+| Traversée de thread sans restriction  | `Record + VarlenOwned : Send + 'static`                        |
+| Aucun GAT dans l'interface publique   | `RenderPayload<'a>` local à `render()`                         |
+| Stabilité Phase 2                     | Seul le corps de `fetch_batch` change                          |
+| Tables sans varlena : coût zéro       | `type VarlenOwned = ()` (ZST)                                  |
+| Détection précoce des divergences DDL | `static_assert!(size_of, align_of)` dans `StorageRow`          |
+| Empreinte RAM Dispatcher bornée       | $O(T)$ allocations — `map_with`, une `String` par thread Rayon |
 
 **Calibration du pire cas (_Worst-Case Execution Space_).** Le calcul de `DYNAMIC_CAP` par la Forge est structurellement pessimiste. Pour les colonnes à largeur variable non bornées (`TEXT`), la Forge applique un fallback conservateur multiplié par le facteur d'échappement HTML maximal ($\times 5$). En conséquence, le ratio d'occupation réelle du buffer sur des payloads nominaux courts peut s'effondrer aux alentours de 5%. Ce comportement est nominal et accepté : l'invariant de sécurité absolu est la garantie de non-réallocation au runtime, et non la densité de remplissage du buffer. Le seuil de validation statique est fixé à $> 3\%$ pour absorber les colonnes `TEXT` larges sans déclencher de faux positifs dans la suite de tests.
 

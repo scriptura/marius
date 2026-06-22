@@ -6,15 +6,15 @@ Documents liés : ADR-002 (Projection Réactive & État Hybride), ADR-003 (suppr
 RenderPayload), ADR-007 (frontière Hot/Cold varlena), `core-system-blueprint.md`.
 
 > **Note de révision.** Une première version de ce document (même session)
-> proposait une composition résolue *à la requête*. Une relecture a établi
+> proposait une composition résolue _à la requête_. Une relecture a établi
 > que ce modèle contredit la doctrine fondatrice du projet
 > (`core-system-blueprint.md` §3.A : un seul `sendfile()`, aucune résolution
 > applicative à la lecture). Cette version corrige le modèle : la composition
-> se résout *à l'écriture* (dump/Dispatcher), jamais à la lecture. La
+> se résout _à l'écriture_ (dump/Dispatcher), jamais à la lecture. La
 > délibération complète de ce renversement est archivée séparément — voir
 > §3.3 et le post-mortem qu'il référence.
 >
-> **Amendement (audit croisé Gemini/GPT, même session).** Quatre clarifications
+> **Amendement.** Quatre clarifications
 > intégrées : taxonomie explicite des trois natures de contenu d'une page
 > (§4.3, contenu de session/requête déclaré hors périmètre), taxonomie Forge
 > explicite incluant l'exclusion des partials génériques paramétrés (§4.2),
@@ -29,7 +29,7 @@ RenderPayload), ADR-007 (frontière Hot/Cold varlena), `core-system-blueprint.md
 ## 1. Contexte et question déclenchante
 
 À la clôture d'une session de travail sur le Render Shell, la question posée était :
-*"comment rendre la page HTML à partir des fragments HTMX ?"*
+_"comment rendre la page HTML à partir des fragments HTMX ?"_
 
 Le pipeline construit jusqu'ici (`Projection`, `PackfileBuilder`/`PackfileReader`,
 `resolve_and_measure`, `generate_aot_snippet`) produit un **fragment HTML par
@@ -120,8 +120,8 @@ composant.
 ### 3.3 Renversement requête/écriture — voir post-mortem dédié
 
 Une étape intermédiaire de cette analyse a proposé, puis écarté, un modèle de
-composition résolue *à la requête*, avant de converger vers le modèle retenu
-en §4 (composition résolue *à l'écriture*). Cette volte-face — son
+composition résolue _à la requête_, avant de converger vers le modèle retenu
+en §4 (composition résolue _à l'écriture_). Cette volte-face — son
 motivation, l'erreur qu'elle contenait, et ce qui l'a révélée — est
 documentée intégralement dans
 [`post-mortem/PM-001-composition-pages-resolution-temporelle.md`](../../post-mortem/PM-001-composition-pages-resolution-temporelle.md),
@@ -132,8 +132,8 @@ la conclusion (§4) fait foi.
 
 Une formulation initiale parlait de "Scatter-Gather I/O" pour décrire la
 livraison de plusieurs fragments vers un socket. Imprécis : le scatter-gather
-au sens strict (`readv`/`writev`) rassemble plusieurs *buffers mémoire d'un
-même processus* vers un descripteur, en un seul appel. `sendfile(2)` copie
+au sens strict (`readv`/`writev`) rassemble plusieurs _buffers mémoire d'un
+même processus_ vers un descripteur, en un seul appel. `sendfile(2)` copie
 d'**un seul** fd source vers un fd destination, entièrement noyau. Il n'existe
 pas d'appel système rassemblant N fichiers distincts vers un socket en une
 seule opération via `sendfile`. Livrer N fragments coûte **O(N) appels
@@ -169,9 +169,9 @@ sur mutation).
 Distinction nouvellement explicite, requise par la question posée en tête de
 session ("la compilation doit être un assemblage de fichiers `.marius`") :
 
-| Genre | Lié à une `Projection` ? | Emplacement | Rôle |
-|---|---|---|---|
-| **Template feuille** (existant) | Oui, 1:1 avec `schema.table` | `templates/{schema}/{table}.marius` | Pilote `StorageRow`/`VarlenOwned` → fragment HTML d'un enregistrement. Inchangé. |
+| Genre                                | Lié à une `Projection` ?                         | Emplacement                                           | Rôle                                                                                                                                                |
+| ------------------------------------ | ------------------------------------------------ | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Template feuille** (existant)      | Oui, 1:1 avec `schema.table`                     | `templates/{schema}/{table}.marius`                   | Pilote `StorageRow`/`VarlenOwned` → fragment HTML d'un enregistrement. Inchangé.                                                                    |
 | **Template de page/route** (nouveau) | Non — compose des références vers des composants | `templates/pages/{route}.marius` (namespace distinct) | Décrit l'assemblage d'une page : chrome statique (`Static`/`StaticInclude`, inchangés) + références vers les fragments dynamiques qui la composent. |
 
 `build.rs` doit distinguer les deux genres pour appliquer le bon chemin de
@@ -180,14 +180,13 @@ codegen : un template feuille produit toujours un `impl Projection` via
 d'énumération de lookups (§4.3), jamais un `impl Projection`.
 
 **Taxonomie Forge explicite — un fichier `.marius` ne produit pas
-systématiquement un `packfile` (amendement suite à audit croisé
-Gemini/GPT) :**
+systématiquement un `packfile` (amendement) :**
 
-| Cas | Exemple | Packfile dédié ? |
-|---|---|---|
-| Composant purement statique, sans variation | `Button.marius` sans champ dynamique | **Non** — `StaticInclude`, texte figé à la compilation, jamais de fichier adressable séparé |
-| Composant dynamique lié à la *même* entité que la page qui l'inclut | `data-product-id` du produit affiché sur sa propre page | **Non** — simples tokens `Field` écrits directement dans le template incluant, contre le même `SchemaIndex`. Pas de fichier `.marius` séparé nécessaire |
-| Composant dynamique lié à une entité distincte, réutilisé par plusieurs pages | `ProductCore(id)` référencé depuis plusieurs templates de page | **Oui** — template feuille ordinaire avec son propre `packfile`, référencé via `FragmentRef` |
+| Cas                                                                                                                  | Exemple                                                                                                         | Packfile dédié ?                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Composant purement statique, sans variation                                                                          | `Button.marius` sans champ dynamique                                                                            | **Non** — `StaticInclude`, texte figé à la compilation, jamais de fichier adressable séparé                                                                                                                                                                                                                                                                                                                                                   |
+| Composant dynamique lié à la _même_ entité que la page qui l'inclut                                                  | `data-product-id` du produit affiché sur sa propre page                                                         | **Non** — simples tokens `Field` écrits directement dans le template incluant, contre le même `SchemaIndex`. Pas de fichier `.marius` séparé nécessaire                                                                                                                                                                                                                                                                                       |
+| Composant dynamique lié à une entité distincte, réutilisé par plusieurs pages                                        | `ProductCore(id)` référencé depuis plusieurs templates de page                                                  | **Oui** — template feuille ordinaire avec son propre `packfile`, référencé via `FragmentRef`                                                                                                                                                                                                                                                                                                                                                  |
 | Partial générique, paramétré indépendamment de toute table fixe (fonction de template à arguments typés arbitraires) | Un composant "carte produit" réutilisable avec des paramètres ad hoc, sans `Projection` PostgreSQL sous-jacente | **Explicitement hors périmètre.** Construire ce mécanisme (système de templates à fonctions paramétrées générique) est un effort de Forge largement plus lourd que tout ce qui a été bâti à ce jour. Aucune tentative de le couvrir n'est faite par cet ADR — toute réutilisation de présentation doit, pour l'instant, passer par une `Projection` réelle (3ᵉ ligne) ou par `StaticInclude` (1ʳᵉ ligne), pas par un mécanisme intermédiaire. |
 
 ### 4.3 La composition se résout à l'écriture, jamais à la lecture
@@ -232,10 +231,10 @@ nécessaire suite à un audit croisé ayant révélé qu'une version antérieure
 cet ADR traitait `Header::render()` comme un `FragmentRef`, contredisant
 silencieusement §4.6 :**
 
-| Nature | Mécanisme | Résolu quand |
-|---|---|---|
-| Statique, partagé entre toutes les pages | `StaticInclude` (inchangé) | À la compilation — texte figé dans le binaire |
-| Dynamique, dépendant d'une ligne PostgreSQL (l'entité de la page) | `FragmentRef` (§4.3) | Au dump / à la mutation du composant référencé |
+| Nature                                                                             | Mécanisme                     | Résolu quand                                                                                                                     |
+| ---------------------------------------------------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Statique, partagé entre toutes les pages                                           | `StaticInclude` (inchangé)    | À la compilation — texte figé dans le binaire                                                                                    |
+| Dynamique, dépendant d'une ligne PostgreSQL (l'entité de la page)                  | `FragmentRef` (§4.3)          | Au dump / à la mutation du composant référencé                                                                                   |
 | Dynamique, dépendant de la requête ou de la session (utilisateur connecté, panier) | **Hors périmètre de cet ADR** | N/A — ne peut, par construction, jamais être pré-rendu au dump puisqu'il dépend de qui fait la requête, pas d'une ligne qui mute |
 
 La troisième ligne n'est pas un oubli à combler ici : elle nomme une
@@ -291,7 +290,7 @@ discussion) — résolue par la temporalité, pas par la forme : c'est bien une
 fonction directe, monomorphisée, jamais un plan interprété contre un artefact
 générique (`CompositionIndex` reste écarté, §3.2). Mais elle s'exécute à
 l'écriture (dump/Dispatcher), jamais à la lecture — ce qui élimine à la fois
-le besoin d'un plan runtime *et* le coût de duplication qui semblait
+le besoin d'un plan runtime _et_ le coût de duplication qui semblait
 initialement s'y opposer.
 
 ### 4.4 Indexation par template de page — extension du namespace existant, pas une nouvelle structure
@@ -390,7 +389,7 @@ zéro mécanisme neuf, zéro `packfile` dédié.
   moment d'une requête qui n'existe plus dans ce rôle).
 
 - **Invalidation d'une page lors de la mutation d'un composant qu'elle
-  référence — décision ferme (amendement suite à audit croisé Gemini/GPT),
+  référence — décision ferme (amendement),
   remplaçant l'hypothèse précédemment laissée ouverte.** Le modèle retenu
   (§4.3) exige que le Dispatcher sache, à la mutation d'un composant, quelles
   pages composées le référencent, pour régénérer les deux artefacts
@@ -446,7 +445,10 @@ nettement plus.
 
 ---
 
-*Rédigé à la suite d'une session de conception collaborative (Claude, Gemini,
-GPT) sur la composition de pages HTML depuis des fragments AOT. Conserve la
+_Rédigé à la suite d'une session de conception collaborative sur la composition de pages HTML depuis des fragments AOT. Conserve la
 discussion complète des trois variantes pour référence future — ne pas
-supprimer même si la décision §4 est révisée.*
+supprimer même si la décision §4 est révisée._
+
+---
+
+_22 juin 2026_
