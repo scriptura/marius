@@ -33,7 +33,7 @@ Pour protéger le transformateur, on interpose un système de regroupement (Batc
 - **Le Dispatcher (Tick & Seuil) :**
   Le vidage du Collector (`flush`) est régi par deux invariants stricts pour lisser la charge (Smoothing) :
 - _Volumétrique :_ Déclenchement si la capacité maximale est atteinte (ex: 100 entités).
-- _Temporel :_ Déclenchement périodique forcé (ex: toutes les 500ms).
+- _Temporel :_ Déclenchement périodique forcé (variable ajustée en temps réel selon la télémétrie du système, entre 100ms et 2s).
 
 - **Parallélisme de Rendu :**
   Lors du `flush`, la liste dédoublonnée d'IDs est distribuée sur l'ensemble des cœurs CPU disponibles (via un ordonnanceur comme _Rayon_ ou les workers _Tokio_). La projection de $N$ artéfacts s'exécute en simultané, garantissant une latence de mise à jour stable.
@@ -53,4 +53,4 @@ Le cycle de vie complet d'une donnée suit ce flux directionnel strict :
 ---
 
 Document rédigé le 25 mars 2026.
-Révisé le 6 avril 2026.
+Révisé le 22 juin 2026.

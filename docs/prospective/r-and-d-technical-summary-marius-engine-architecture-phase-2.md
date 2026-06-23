@@ -1,7 +1,3 @@
-Voici la version corrigée et expurgée du document. Les mentions à Pug et Maud ont été radiées au profit du format `.marius` et de la génération native (`push_str` / `write_fmt`), et la mesure de temps de traitement RAM a été mise à jour en conséquence.
-
----
-
 # Synthèse Technique R&D : Architecture du Moteur Marius (Phase 2)
 
 **Préoccupation :** Alignement Système Marius
@@ -56,7 +52,7 @@ Le concept de template HTML subit une refonte complète sous le prisme DOD. Le D
 2. **Calcul de Capacité Statique (O(1) Allocation) :** À la compilation, la Fragment-Forge analyse le fichier `.marius` et calcule à l'octet près la taille cumulative de toutes les chaînes HTML statiques (`<article>`, `</div>`). Elle injecte cet indice de capacité dans le code généré :
 
 ```rust
-let mut buffer = String::with_capacity(STATIC_SIZE_BYTES + ESTIMATED_DYNAMIC_SIZE);
+let mut buffer = String::with_capacity(STATIC_SIZE_BYTES + ESTIMATED_DYNAMIC_SIZE); // édit du 22 juin 2026 : obsolète, le concept de ESTIMATED_DYNAMIC_SIZE est devenu une loi stricte via l'ADR-007. On n'estime plus : si un TEXT n'a pas de borne connue (CHECK SQL ou VARCHAR), la Forge refuse de compiler la page. C'est un disjoncteur matériel.
 
 ```
 
