@@ -19,6 +19,23 @@ use crate::pack_html_format::{PackfileEntry, PackfileFooter};
 const FOOTER_SIZE: usize = std::mem::size_of::<PackfileFooter>();
 const ENTRY_SIZE: usize = std::mem::size_of::<PackfileEntry>();
 
+/// Compteur d'instances vivantes — instrumentation de test exclusivement,
+/// arbitrage Phase 2 (handoff-render-shell-phase2.md, design figé) :
+/// instrumentation interne plutôt qu'un wrapper externe, pour ne pas forcer
+/// LiveRegistry à accepter un type modifié.
+///
+/// Segment BSS, n'affecte pas `sizeof(PackHtmlIndex)`. `pub(crate)` — pas
+/// `pub` : lu depuis le module de test de registry.rs (Jalon 2), jamais
+/// depuis l'extérieur du crate. Visibilité requise uniquement pour cet
+/// accès inter-module ; absente de la formulation littérale du handoff,
+/// ajoutée ici parce que sans elle le pilote de test de registry.rs ne
+/// compile pas (élément privé d'un autre module) — pas une extension de
+/// périmètre, le minimum mécanique pour que le critère d'acceptation déjà
+/// fixé soit exécutable.
+#[cfg(test)]
+pub(crate) static ALIVE_INSTANCES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Lecteur d'un packfile HTML — fd conservé ouvert, mmap borné à la seule
 /// région d'index.
 pub struct PackHtmlIndex {
@@ -108,6 +125,15 @@ impl PackHtmlIndex {
             Some(m)
         };
 
+        // Incrément #[cfg(test)] exactement au point de construction
+        // réussie, juste avant le Ok(Self{...}) retourné — inline, pas de
+        // fonction intermédiaire : aucune branche d'erreur ci-dessus (magic
+        // invalide, version inconnue, index_len incohérent, fichier trop
+        // court) ne passe par cette ligne, donc aucune n'incrémente — ces
+        // branches ne créent aucune instance.
+        #[cfg(test)]
+        ALIVE_INSTANCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Ok(Self {
             file,
             mmap,
@@ -140,6 +166,21 @@ impl PackHtmlIndex {
 
     pub fn entry_count(&self) -> usize {
         self.entry_count
+    }
+}
+
+/// Bloc `impl Drop` entier gated — pas seulement la ligne de décrément. Un
+/// `impl Drop` présent en production, même vide, désactive
+/// `needs_drop::<T>() == false` et empêche certaines élisions de drop du
+/// compilateur — incompatible avec l'exigence de coût nul. En production,
+/// `PackHtmlIndex` garde la glue de drop par défaut : `File` et `Mmap` se
+/// ferment/démappent déjà tout seuls via leur propre `Drop` — rien à
+/// garantir manuellement ici, ce `Drop` ne sert que l'instrumentation,
+/// jamais la libération de ressources.
+#[cfg(test)]
+impl Drop for PackHtmlIndex {
+    fn drop(&mut self) {
+        ALIVE_INSTANCES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
