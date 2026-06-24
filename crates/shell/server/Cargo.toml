@@ -3,7 +3,7 @@ name = "marius-server"
 version = "0.3.0"
 edition = "2024"
 publish = false
-description = "Serveur shell pour le projet Marius"
+description = "Serveur shell pour le projet Marius — frontière réseau Axum/Tokio (Phase 3 : lecture pure depuis packfiles, zéro calcul au runtime)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/scriptura/marius"
 
@@ -12,15 +12,21 @@ repository = "https://github.com/scriptura/marius"
 name = "marius"
 path = "src/main.rs"
 
+# Nettoyage explicite (arbitrage de session — remplacement complet, option 1) :
+# marius-collector, marius-schema, marius-projection, sqlx, tower-http
+# disparaissent avec le prototype ServeDir/PgListener/Dispatcher qu'ils
+# servaient seuls. Phase 4 les réintroduira sous une forme à redéfinir alors
+# (regenerate_and_swap), pas en l'état précédent.
 [dependencies]
-marius-collector = { version = "=0.3.0", path = "../../core/collector" }
-marius-schema = { version = "0.3.0", path = "../../core/schema" }
-marius-projection = { version = "0.3.0", path = "../../core/projection" }
 marius-render = { version = "0.3.0", path = "../../shell/render" }
-sqlx = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 
-# ServeDir : sert les artefacts HTML depuis le disque (read path O(1)).
-# Feature "fs" requise pour tower_http::services::ServeDir.
-tower-http = { version = "0.6", features = ["fs"] }
+[dev-dependencies]
+# Client HTTP pour les tests d'intégration Jalon 3 (requêtes concurrentes
+# contre un vrai TcpListener) — scope dev uniquement, jamais en runtime.
+# default-features = false : aucun backend TLS nécessaire, ces tests ne
+# parlent qu'à 127.0.0.1 en clair. Version vérifiée sur crates.io au moment
+# de l'ajout (max_stable_version 0.13.4) — même discipline que arc-swap en
+# Phase 2.
+reqwest = { version = "0.13", default-features = false }
