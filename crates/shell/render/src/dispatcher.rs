@@ -6,22 +6,74 @@
 // Le Collector<MAX, WORDS> reste dans le Core (marius-collector, zéro dépendance).
 // Le Dispatcher vit ici, dans le Shell, car il orchestre les I/O.
 //
-// ─── Séparation async / sync ──────────────────────────────────────────────────
+// ─── Modification Phase 4 — destruction de l'Append, câblage regenerate_and_swap ──
 //
-//   run()         : boucle asynchrone Tokio. Gère le tick adaptatif, fetch_batch,
-//                   l'écriture des artefacts, et appelle render_batch().
-//   render_batch(): logique de rendu parallèle Rayon, synchrone, générique.
-//                   Extractible hors de la boucle async pour :
-//                     - les benchmarks Divan (pas de runtime Tokio requis),
-//                     - les tests d'intégration (appel direct sans Dispatcher),
-//                     - la lisibilité (hot path isolé du code d'orchestration).
+//   Diagnostic confirmé par lecture (handoff-render-shell-phase4.md) :
+//   l'ancien render_batch() ci-dessous ouvrait le packfile cible en mode
+//   OpenOptions::append, écrivait des fragments à la suite des précédents,
+//   et n'écrivait JAMAIS de footer/index. Deux violations cumulées, pas une :
+//     1. Append est incompatible avec le modèle mmap/ArcSwap (registry.rs,
+//        Phase 2) — un lecteur ayant mmap'd l'ancien footer ne voit jamais
+//        les octets appendés, et aucun mécanisme ne le notifie.
+//     2. Aucun footer n'étant jamais écrit, PackHtmlIndex::open() sur le
+//        résultat de cette fonction échouait systématiquement (fichier
+//        "trop court pour contenir un footer" dès qu'on cherche le footer
+//        aux 32 derniers octets, ou pire : magic invalide si le fichier
+//        dépassait 32B par coïncidence).
+//   render_batch() et son ouverture Append sont donc supprimés ici, pas
+//   corrigés — remplacés par un appel à regenerate_and_swap (regenerate.rs,
+//   nouveau ce fichier-ci), qui réécrit le packfile en entier dans un .tmp,
+//   fsync, rename atomique, puis bascule le LiveRegistry. Deux champs
+//   ajoutés à Dispatcher pour le rendre possible : `registry` (l'Arc cloné
+//   avant le tokio::spawn de ce Dispatcher, partagé avec la frontière Axum
+//   de lecture — main.rs) et `packfile_key` (la clé LiveRegistry/
+//   packfile_path_for ciblée par CE Dispatcher ; absente de l'ancien code,
+//   qui dérivait son chemin de P::packfile_path() — un chemin fixe par type
+//   de Projection, jamais le contrat clé→chemin de packfile_path_for()
+//   qu'utilisent ROUTE_TABLE/LiveRegistry/cold_start. Les deux schémas
+//   d'adressage ne sont pas interchangeables silencieusement : un
+//   Dispatcher doit désormais cibler explicitement la même clé que la
+//   RouteEntry qui sert ses données en lecture).
+//
+//   Second changement structurel, conséquence directe du premier : l'appel
+//   à P::fetch_batch() qui précédait render_batch() dans run() est
+//   supprimé — regenerate_and_swap effectue son propre fetch_batch, par
+//   chunk, en interne (regenerate.rs). Le conserver ici aurait dupliqué la
+//   requête SQL sans jamais consommer son résultat (`records` devenait mort
+//   après ce changement) — pas un oubli, une simplification nécessaire.
+//
+//   ids.sort_unstable() ajouté avant l'appel : précondition du format
+//   on-disk (spec §3, "index trié par id ASC", non vérifiée par le format
+//   lui-même). Défense explicite plutôt que suppposée héritée de l'ordre
+//   d'itération interne de Collector::flush() — jamais lu (marius-collector
+//   non fourni à cette session, cf. handoff "Inconnue critique").
+//
+//   Point signalé, non résolu ici (hors périmètre de cette roadmap,
+//   roadmap "Hors périmètre" — agnosticisme d'invalidation voulu) :
+//   regenerate_and_swap réécrit tout le packfile depuis `ids` à chaque
+//   appel, jamais une fusion incrémentale. Si Collector::flush() retourne
+//   un delta plutôt que l'ensemble complet des ids de cette cible, chaque
+//   régénération ferait disparaître du packfile les ids non touchés à ce
+//   tick. Ce fichier préserve la sémantique préexistante de flush() telle
+//   que l'ancien code l'utilisait (passage direct des ids retournés) —
+//   remplacement du mécanisme d'écriture, pas redéfinition de ce que le
+//   Collector accumule. À confirmer ou arbitrer une fois marius-collector
+//   lu.
+//
+// ─── Séparation async / sync (inchangée) ──────────────────────────────────────
+//
+//   run()              : boucle asynchrone Tokio. Gère le tick adaptatif,
+//                         appelle regenerate_and_swap().
+//   render_batch_pure() : logique de rendu parallèle Rayon pure, synchrone,
+//                         sans I/O disque — utilisée par les benchmarks
+//                         Divan. Non concernée par le bug Append (jamais
+//                         touchait le filesystem) — inchangée par cette
+//                         session.
 
-use std::fs::OpenOptions;
-use std::io::BufWriter;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::BatchRenderer;
+use crate::{regenerate_and_swap, LiveRegistry};
 
 use rayon::prelude::*;
 use tokio::sync::Notify;
@@ -57,23 +109,44 @@ impl Default for DispatcherConfig {
 }
 
 pub struct Dispatcher<P: Projection, const MAX: usize, const WORDS: usize> {
-    collector: &'static Collector<MAX, WORDS>,
-    notify:    Arc<Notify>,
-    pool:      sqlx::PgPool,
-    config:    DispatcherConfig,
-    total_cap: usize, // Ajout du contrat de capacité pour le BatchRenderer
-    _phantom:  std::marker::PhantomData<P>,
+    collector:    &'static Collector<MAX, WORDS>,
+    notify:       Arc<Notify>,
+    pool:         sqlx::PgPool,
+    config:       DispatcherConfig,
+    total_cap:    usize, // Contrat de capacité pour le BatchRenderer interne à regenerate_and_swap.
+    /// Arc partagé avec la frontière Axum de lecture (main.rs) — cloné une
+    /// fois avant le tokio::spawn de ce Dispatcher, jamais reconstruit ici.
+    /// Phase 4 : seul moyen pour ce Dispatcher d'atteindre
+    /// LiveRegistry::store() sans dépendance inverse vers marius-server.
+    registry:     Arc<LiveRegistry>,
+    /// Clé LiveRegistry/packfile_path_for ciblée par ce Dispatcher — doit
+    /// correspondre exactement au packfile_key de la/des RouteEntry qui
+    /// servent ces mêmes données en lecture (ROUTE_TABLE, main.rs). Pas
+    /// dérivée de P::packfile_path() — voir note de module.
+    packfile_key: &'static str,
+    _phantom:     std::marker::PhantomData<P>,
 }
 
 impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WORDS> {
     pub fn new(
-        collector: &'static Collector<MAX, WORDS>,
-        notify:    Arc<Notify>,
-        pool:      sqlx::PgPool,
-        config:    DispatcherConfig,
-        total_cap: usize, // Requis à l'instanciation
+        collector:    &'static Collector<MAX, WORDS>,
+        notify:       Arc<Notify>,
+        pool:         sqlx::PgPool,
+        config:       DispatcherConfig,
+        total_cap:    usize,
+        registry:     Arc<LiveRegistry>,
+        packfile_key: &'static str,
     ) -> Self {
-        Self { collector, notify, pool, config, total_cap, _phantom: std::marker::PhantomData }
+        Self {
+            collector,
+            notify,
+            pool,
+            config,
+            total_cap,
+            registry,
+            packfile_key,
+            _phantom: std::marker::PhantomData,
+        }
     }
 
     pub async fn run(self) {
@@ -86,17 +159,28 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
                 _ = self.notify.notified() => {}
             }
 
-            let ids = self.collector.flush();
+            let mut ids = self.collector.flush();
             if ids.is_empty() { continue; }
 
-            let t0      = Instant::now();
-            let records = match P::fetch_batch(&self.pool, &ids).await {
-                Ok(r)  => r,
-                Err(e) => { eprintln!("[dispatcher] fetch_batch: {e}"); continue; }
-            };
+            // Précondition du format on-disk (spec §3) — voir note de
+            // module : défense explicite, pas une supposition sur l'ordre
+            // d'itération de Collector::flush().
+            ids.sort_unstable();
 
-            // Exécution du batch via le nouveau moteur Packfile (synchrone)
-            render_batch::<P>(records, self.total_cap);
+            let t0 = Instant::now();
+
+            if let Err(e) = regenerate_and_swap::<P>(
+                &self.pool,
+                &ids,
+                self.total_cap,
+                self.packfile_key,
+                &self.registry,
+            )
+            .await
+            {
+                eprintln!("[dispatcher] regenerate_and_swap (\"{}\"): {e}", self.packfile_key);
+                continue;
+            }
 
             let new_tick = self.adapt_tick(ids.len(), t0.elapsed());
             if new_tick != current_tick {
@@ -119,40 +203,8 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
 }
 
 // =============================================================================
-// Hot path : rendu packfile (moteur Phase 1)
+// Rendu parallèle pur — sans I/O disque (inchangé par cette session)
 // =============================================================================
-
-pub fn render_batch<P: Projection>(batch: Vec<(P::Record, P::VarlenOwned)>, total_cap: usize) {
-    if batch.is_empty() { return; }
-
-    let path = P::packfile_path();
-    
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    // O(1) Syscall : Ouverture unique du packfile en mode Append
-    let file = match OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(f) => f,
-        Err(e) => { eprintln!("[dispatcher] write {:?}: {e}", path); return; }
-    };
-
-    // CORRECTION DOD : Extraction de la position réelle (EOF) pour l'adressage absolu
-    let offset_start = file.metadata().map(|m| m.len()).unwrap_or(0);
-
-    let mut writer = BufWriter::new(file);
-
-    // Initialisation du buffer zéro-allocation
-    let mut renderer = BatchRenderer::<P>::new(total_cap, batch.len());
-
-    // Injection de l'offset absolu au lieu de 0
-    if let Err(e) = renderer.render_batch(&batch, &mut writer, offset_start) {
-        eprintln!("[dispatcher] packfile append error: {e}");
-    }
-    
-    // Note Phase 2 : l'index physique (renderer.into_index()) est calculé ici
-    // avec des adresses mémoires physiquement exactes.
-}
 
 /// Rendu parallèle pur — sans I/O disque.
 ///
@@ -162,11 +214,11 @@ pub fn render_batch<P: Projection>(batch: Vec<(P::Record, P::VarlenOwned)>, tota
 ///   syscalls write(2) et create_dir_all(). Utilisée par les benchmarks Divan
 ///   pour mesurer le coût réel du rendu sans le bruit des I/O.
 ///
-///   En production, render_batch() appelle render_batch_pure() conceptuellement
-///   mais fusionne les deux phases pour éviter l'allocation d'un Vec intermédiaire.
-///   render_batch_pure() est une fonction distincte, pas un wrapper de render_batch().
+///   Distincte de regenerate_and_swap (Phase 4, regenerate.rs) qui, lui,
+///   produit l'artefact on-disk complet (footer, index, rename atomique) —
+///   render_batch_pure() ne touche jamais le filesystem, par construction.
 ///
-/// ─── Invariants identiques à render_batch ────────────────────────────────────
+/// ─── Invariants identiques à BatchRenderer::render_batch ────────────────────
 ///
 ///   O(T) allocations, buf.clear() préserve la capacité, Send + 'static requis.
 ///   black_box() dans le benchmark empêche LLVM d'éliminer les push_str

@@ -1,9 +1,9 @@
 [package]
 name = "marius-server"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 publish = false
-description = "Serveur shell pour le projet Marius — frontière réseau Axum/Tokio (Phase 3 : lecture pure depuis packfiles, zéro calcul au runtime)"
+description = "Serveur shell pour le projet Marius — frontière réseau Axum/Tokio (Phase 4 : lecture pure + boucle d'écriture réactive PgListener/Dispatcher, AOT-compliant via regenerate_and_swap)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/scriptura/marius"
 
@@ -12,15 +12,36 @@ repository = "https://github.com/scriptura/marius"
 name = "marius"
 path = "src/main.rs"
 
-# Nettoyage explicite (arbitrage de session — remplacement complet, option 1) :
-# marius-collector, marius-schema, marius-projection, sqlx, tower-http
-# disparaissent avec le prototype ServeDir/PgListener/Dispatcher qu'ils
-# servaient seuls. Phase 4 les réintroduira sous une forme à redéfinir alors
-# (regenerate_and_swap), pas en l'état précédent.
+# Réintroduction Phase 4 (handoff point 4) : sqlx, marius-collector,
+# marius-schema — retirés en Phase 3 faute d'usage (lecture pure), requis de
+# nouveau pour la boucle d'écriture réactive (PgListener + Dispatcher).
+#
+# sqlx : workspace.dependencies (racine) — déjà présent avec les features
+# postgres/runtime-tokio/macros/chrono (vérifié, Cargo.toml racine fourni
+# cette session). Aucune feature supplémentaire requise ici.
+#
+# marius-collector, marius-schema : dépendances de chemin internes au
+# workspace, jamais publiées sur crates.io — pas de `version` ici (rien à
+# vérifier sur un registre externe pour un membre du workspace, à la
+# différence de reqwest/arc-swap en phases précédentes). Chemins déduits de
+# la liste `members` du Cargo.toml racine (`crates/core/collector`,
+# `crates/core/schema`), même convention que marius-render ci-dessous
+# (`../../shell/render`, déjà en place) appliquée à `crates/core/*` :
+# depuis `crates/shell/server/`, la remontée est `../../core/{collector,schema}`.
+#
+# marius-projection n'est PAS réintroduit ici : aucun usage direct identifié
+# dans marius-server à ce stade (Dispatcher/regenerate_and_swap, qui en
+# dépendent, vivent dans marius-render — déjà dépendant de marius-projection
+# en amont, hors périmètre de ce Cargo.toml). À revoir si main.rs venait à
+# nommer le trait Projection directement plutôt que de simplement transmettre
+# des types déjà concrets exposés par marius-schema.
 [dependencies]
 marius-render = { version = "0.3.0", path = "../../shell/render" }
+marius-collector = { path = "../../core/collector" }
+marius-schema = { path = "../../core/schema" }
 tokio = { workspace = true }
 axum = { workspace = true }
+sqlx = { workspace = true }
 
 [dev-dependencies]
 # Client HTTP pour les tests d'intégration Jalon 3 (requêtes concurrentes
@@ -28,5 +49,5 @@ axum = { workspace = true }
 # default-features = false : aucun backend TLS nécessaire, ces tests ne
 # parlent qu'à 127.0.0.1 en clair. Version vérifiée sur crates.io au moment
 # de l'ajout (max_stable_version 0.13.4) — même discipline que arc-swap en
-# Phase 2.
+# Phase 2. Inchangé par cette session.
 reqwest = { version = "0.13", default-features = false }

@@ -11,12 +11,20 @@ pub mod pack_html_format;
 pub mod pack_html_index;
 pub mod registry;
 pub mod dumper;
+pub mod regenerate;
 
 // Ré-export pour la façade
 pub use dispatcher::{Dispatcher, DispatcherConfig};
 pub use batch_renderer::BatchRenderer;
 pub use pack_html_format::PackfileEntry;
 pub use packfile_builder::PackfileBuilder;
+
+// regenerate_and_swap — Phase 4. Même convention que BatchRenderer ci-dessus
+// (fonction principale d'un module, ré-exportée à plat). dispatcher.rs
+// l'appelle via `crate::regenerate_and_swap`, pas
+// `crate::regenerate::regenerate_and_swap` — cohérent avec son usage
+// `crate::BatchRenderer` déjà en place pour batch_renderer.
+pub use regenerate::regenerate_and_swap;
 
 // LiveRegistry, RouteEntry, IdSource, packfile_path_for : même convention que
 // BatchRenderer ci-dessus (type principal d'un module, ré-exporté à plat).
