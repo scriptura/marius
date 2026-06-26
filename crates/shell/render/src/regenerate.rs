@@ -7,14 +7,6 @@
 // l'appellent tous les deux, aucun des deux ne le contient (roadmap, Phase 4
 // — "il n'appartient à aucun des deux fichiers existants").
 //
-// Séquence imposée par la spec, non négociable : fichier .tmp → blob rendu
-// par BatchRenderer → footer (write_packfile_footer) → flush → fsync →
-// rename() atomique → réouverture (PackHtmlIndex::open) → registry.store().
-// LiveRegistry::store() est appelé en toute dernière étape, jamais avant que
-// le nouvel index soit pleinement ouvert et validé — tout Err ci-dessus
-// (fetch, écriture, fsync, rename, réouverture) laisse l'ancien Arc en place,
-// servi sans interruption aux requêtes en vol.
-//
 // Trois divergences entre le pseudocode littéral de la spec §7 et le code
 // réellement compilé des phases précédentes — documentées ici plutôt que
 // silencieuses, même discipline que Phase 3 sur handlers.rs :
@@ -22,155 +14,505 @@
 //   1. P::fetch_from_pg n'existe pas sur le trait Projection réel.
 //      batch_renderer.rs (StubProjection, compilé Phase 1) et dispatcher.rs
 //      (P::fetch_batch(&self.pool, &ids), compilé) confirment tous deux que
-//      la méthode s'appelle fetch_batch. fetch_from_pg n'apparaît que dans
-//      la prose de la spec, jamais dans du code vérifié — résolu en faveur
-//      du code compilé.
+//      la méthode s'appelle fetch_batch.
 //
 //   2. write_packfile_footer(&mut writer, &full_index) — la spec omet
 //      blob_len. La signature réelle (pack_html_format.rs, Phase 1,
-//      compilée) est write_packfile_footer(writer, blob_len, index) —
-//      blob_len requis pour le padding d'alignement 8B avant l'index. La
-//      valeur est déjà disponible : c'est `offset`, l'accumulateur déjà
-//      tenu par cette fonction (valeur de retour de
-//      BatchRenderer::render_batch) — aucune divination nécessaire.
+//      compilée) est write_packfile_footer(writer, blob_len, index).
 //
 //   3. registry.indices[packfile_key].store(...) suppose le champ `indices`
-//      public. Il est privé (registry.rs, encapsulation tranchée Phase 2,
-//      confirmée Phase 3 pour load()). Résolu : registry.store(packfile_key,
-//      Arc::new(new_index)) — la méthode publique existante, inchangée.
+//      public. Il est privé — résolu via registry.store(packfile_key,
+//      Arc::new(new_index)), la méthode publique existante.
+//
+//   4. [PHASE 4.2] Réécriture complète → fusion incrémentale.
+//      handoff-phase-4.2.md, point 0 : `ids` passé à cette fonction n'est
+//      plus l'ensemble complet attendu dans le packfile, mais le DELTA du
+//      tick courant (Collector::flush()) — entités insérées, modifiées ou
+//      supprimées, jamais l'ensemble. L'ancienne stratégie (réécriture
+//      complète du fichier à chaque appel) perdait silencieusement toute
+//      entité non touchée par le tick. Cette version fusionne le delta
+//      contre l'ancien packfile via `sweep::merge_sweep`, au lieu de
+//      reconstruire le fichier en entier.
+//
+//      Conséquence structurelle sur cette fonction : elle reste `async`
+//      (P::fetch_batch est .await-é, sqlx n'a pas de variante bloquante —
+//      aucun pont Tokio disponible ni souhaité dans cette session pour ce
+//      problème), mais toute la plomberie I/O physique qui suit (ftruncate,
+//      mmap, merge_sweep, align8, footer, fsync/msync, rename) est isolée
+//      dans `apply_merge_io_sync`, une fonction privée strictement
+//      synchrone, zéro dépendance Tokio. C'est ce noyau, et lui seul, qu'un
+//      futur `spawn_blocking` (Phase 4.3) encapsulera — signature de
+//      `apply_merge_io_sync` conçue pour rester inchangée par cet
+//      encapsulage.
 // =============================================================================
 
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::collections::HashSet;
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufWriter};
+use std::path::Path;
 use std::sync::Arc;
 
 use marius_projection::Projection;
 
 use crate::batch_renderer::BatchRenderer;
-use crate::pack_html_format::write_packfile_footer;
+use crate::pack_html_format::{PackfileEntry, PackfileFooter};
 use crate::pack_html_index::PackHtmlIndex;
 use crate::registry::{packfile_path_for, LiveRegistry};
+use crate::sweep::{merge_sweep, DeltaBatch, DeltaEntry};
 
-/// Taille de chunk pour le streaming fetch_batch → render_batch. Non
-/// spécifiée par la spec §7 (qui écrit `ids.chunks(CHUNK_SIZE)` sans jamais
-/// définir la constante) — valeur choisie ici, pas héritée d'un document.
-/// Borne la taille de la clause SQL IN côté fetch_batch et la taille du
-/// buffer de rendu en vol, sans incidence sur la correction du format
-/// on-disk produit : le chunking est invisible une fois le footer écrit
-/// (même propriété que chained_batches_offsets_are_contiguous,
-/// batch_renderer.rs).
+/// Taille de chunk pour le streaming fetch_batch → render_batch. Borne la
+/// clause SQL IN côté fetch_batch ; sans incidence sur le format produit —
+/// tous les chunks alimentent le même buffer delta continu (cf.
+/// `chained_batches_offsets_are_contiguous`, batch_renderer.rs).
 const CHUNK_SIZE: usize = 1024;
 
-/// Régénère un packfile HTML complet pour une cible (`packfile_key`), et
-/// bascule atomiquement le `LiveRegistry` vers la nouvelle version.
+/// Régénère un packfile HTML en fusionnant le delta du tick courant avec la
+/// génération actuellement servie, puis bascule atomiquement le
+/// `LiveRegistry` vers la nouvelle version.
 ///
-/// Appelée par le Dispatcher (mutation réactive, ADR-002) ou par un outil de
-/// dump initial — jamais par le chemin de lecture. Générique sur `P` pour
-/// rester partagée entre les deux usages (roadmap Phase 4).
+/// `ids` : DELTA du tick courant (Collector::flush(), sémantique confirmée
+/// Phase 4.2) — entités insérées, modifiées ou supprimées depuis le dernier
+/// appel. Aucune contrainte de tri sur `ids` lui-même : le tri requis par
+/// `merge_sweep` (C1) est reconstruit à l'intérieur de cette fonction,
+/// indépendamment de l'ordre de production du delta côté Collector.
 ///
-/// `ids` : précondition critique, non vérifiée ici (spec §3 — même limite
-/// que le format lui-même) — doit être trié ASC. L'appelant porte la
-/// responsabilité du tri, comme `dumper.rs` le garantit déjà via
-/// `ORDER BY id ASC` côté SQL.
-///
-/// `ids` doit représenter l'ensemble complet attendu dans ce packfile, pas
-/// seulement les enregistrements modifiés depuis le dernier appel : cette
-/// fonction réécrit le fichier en entier à chaque appel, elle ne fusionne
-/// jamais avec le contenu précédent. Un appelant qui ne passerait qu'un
-/// sous-ensemble (un delta) ferait disparaître du packfile tout id absent
-/// de ce sous-ensemble au moment du swap — voir la note sur ce risque dans
-/// le câblage de dispatcher.rs (Collector::flush()).
+/// Panique si `packfile_key` n'a jamais été provisionné à la construction
+/// du `LiveRegistry` — invariant AOT existant (`LiveRegistry::store`), pas
+/// contourné ici par un `Result` silencieux : une clé absente est un bug
+/// d'intégration, pas une erreur de requête.
 pub async fn regenerate_and_swap<P: Projection>(
     pool: &sqlx::PgPool,
     ids: &[i64],
     total_cap: usize,
     packfile_key: &'static str,
     registry: &LiveRegistry,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     let final_path = packfile_path_for(packfile_key);
     let tmp_path = final_path.with_extension("tmp");
 
-    // Cas dump initial : artifacts/ peut ne pas encore exister — absent du
-    // pseudocode de la spec, ajouté ici pour que cette fonction reste
-    // appelable avant tout cold_start() (roadmap : "le dump initial et la
-    // mutation Dispatcher l'appellent tous les deux"). cold_start() ne crée
-    // jamais ce répertoire lui-même (il échoue fort si absent, par
-    // construction — registry.rs) ; cet appel n'est donc pas redondant.
+    // Cas dump initial : artifacts/ peut ne pas encore exister.
     if let Some(parent) = tmp_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let file = File::create(&tmp_path)?;
-    let mut writer = BufWriter::new(file);
+    // Échec rapide et explicite plutôt qu'un Err qui contournerait
+    // l'invariant déjà posé par LiveRegistry::store (même discipline que le
+    // test `regenerate_and_swap_panics_on_unprovisioned_key`, Jalon 4a).
+    let old = registry.load(packfile_key).unwrap_or_else(|| {
+        panic!(
+            "regenerate_and_swap: clé \"{packfile_key}\" absente de la topologie figée \
+             à la construction — violation de l'invariant AOT (clé non provisionnée \
+             par with_indices()/cold_start())"
+        )
+    });
 
-    let mut renderer = BatchRenderer::<P>::new(total_cap, ids.len().min(CHUNK_SIZE));
-    let mut full_index = Vec::with_capacity(ids.len());
-    let mut offset = 0u64;
+    // ---- Partie async : seule section de cette fonction qui .await-e -------
+    let delta = fetch_delta_batch::<P>(pool, ids, total_cap).await?;
 
-    for chunk in ids.chunks(CHUNK_SIZE) {
-        let batch = P::fetch_batch(pool, chunk)
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        offset = renderer.render_batch(&batch, &mut writer, offset)?;
-        full_index.extend_from_slice(renderer.index());
-        renderer.reset(CHUNK_SIZE);
-    }
+    // ---- Noyau synchrone : voir doc de apply_merge_io_sync ------------------
+    let new_index = apply_merge_io_sync(old.as_ref(), &delta, &tmp_path, &final_path)?;
 
-    // blob_len = offset accumulé, jamais sink.get_ref().len() (BufWriter
-    // tamponne en interne — même piège déjà documenté dans
-    // footer_and_index_roundtrip, batch_renderer.rs).
-    write_packfile_footer(&mut writer, offset, &full_index)?;
-    writer.flush()?;
-    writer.get_ref().sync_all()?; // durabilité avant rename — un crash entre
-                                   // les deux ne doit jamais laisser le
-                                   // fichier final tronqué.
-
-    fs::rename(&tmp_path, &final_path)?; // atomique (même filesystem, POSIX)
-
-    let new_index = PackHtmlIndex::open(&final_path)?;
-
-    // Dernière étape, sans exception : tout Err ci-dessus (fetch_batch,
-    // écriture, fsync, rename, réouverture) retourne avant cette ligne —
-    // l'ancien Arc reste servi, aucune requête en vol n'est interrompue.
-    // Panique volontairement si packfile_key n'a jamais été provisionné à
-    // la construction du LiveRegistry — invariant AOT de
-    // LiveRegistry::store(), pas contourné ici.
+    // Dernière étape, sans exception : tout Err ci-dessus (fetch, I/O,
+    // fsync, rename, réouverture) retourne avant cette ligne — l'ancien Arc
+    // reste servi, aucune requête en vol n'est interrompue.
     registry.store(packfile_key, Arc::new(new_index));
 
     Ok(())
 }
 
+/// Construit le `DeltaBatch` (payload local + entries triées) depuis
+/// PostgreSQL — seule section `async` de cette session.
+///
+/// Contrat de détection des suppressions (décision actée Phase 4.2,
+/// résolution Blocage 2) : tout id de `ids` absent du résultat de
+/// `P::fetch_batch` est une suppression — émis comme
+/// `DeltaEntry { offset: 0, length: 0 }`, sentinelle déjà consommée par
+/// `merge_sweep` (sweep.rs, branche `d.length == 0`).
+///
+/// `payload_writer` est un `BufWriter<Vec<u8>>` : obligation de signature de
+/// `BatchRenderer::render_batch` (`&mut BufWriter<W>`, pas `&mut W`), pas un
+/// choix de performance — sur un `Vec<u8>` en mémoire, le tampon de
+/// `BufWriter` n'élimine aucun syscall, juste une indirection supplémentaire
+/// déjà présente dans l'API consommée telle quelle.
+async fn fetch_delta_batch<P: Projection>(
+    pool: &sqlx::PgPool,
+    ids: &[i64],
+    total_cap: usize,
+) -> io::Result<DeltaBatch> {
+    let mut payload_writer = BufWriter::new(Vec::<u8>::new());
+    let mut renderer = BatchRenderer::<P>::new(total_cap, ids.len().min(CHUNK_SIZE));
+    let mut payload_index: Vec<PackfileEntry> = Vec::with_capacity(ids.len());
+    let mut offset = 0u64;
+
+    for chunk in ids.chunks(CHUNK_SIZE) {
+        let batch = P::fetch_batch(pool, chunk)
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        offset = renderer.render_batch(&batch, &mut payload_writer, offset)?;
+        payload_index.extend_from_slice(renderer.index());
+        renderer.reset(CHUNK_SIZE);
+    }
+
+    let payload = payload_writer
+        .into_inner()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let mut entries: Vec<DeltaEntry> = Vec::with_capacity(ids.len());
+    for entry in &payload_index {
+        debug_assert!(
+            entry.offset <= u32::MAX as u64,
+            "delta payload > 4 GiB sur un seul tick — hors hypothèse de \
+             dimensionnement (DeltaEntry.offset est u32, local au buffer delta)"
+        );
+        entries.push(DeltaEntry {
+            entity_id: entry.id,
+            offset: entry.offset as u32,
+            length: entry.len,
+        });
+    }
+
+    // Suppressions : tout id demandé mais absent du résultat PostgreSQL.
+    let present: HashSet<i64> = payload_index.iter().map(|e| e.id).collect();
+    for &id in ids {
+        if !present.contains(&id) {
+            entries.push(DeltaEntry { entity_id: id, offset: 0, length: 0 });
+        }
+    }
+
+    // C1 (sweep.rs) : delta.entries strictement trié par entity_id croissant.
+    // Précondition reconstruite ici, pas reportée sur l'appelant — `ids` n'a
+    // aucune obligation d'ordre côté Collector::flush() (hors scope de cette
+    // session). Un doublon résiduel dans `ids` violerait C1 (tri strict, pas
+    // large) et serait détecté par le debug_assert de merge_sweep, pas
+    // silencieusement absorbé ici.
+    entries.sort_unstable_by_key(|e| e.entity_id);
+
+    Ok(DeltaBatch { entries, payload })
+}
+
+/// Noyau fusion + I/O physique — strictement synchrone et bloquant, zéro
+/// dépendance Tokio (résolution Blocage 1). Phase 4.3 encapsulera l'APPEL
+/// (pas la fonction) dans un `spawn_blocking` ; signature inchangée par cet
+/// encapsulage futur.
+///
+/// `old` : génération actuellement servie par le `LiveRegistry` pour cette
+/// clé. Jamais mutée ici — `memmap2::Mmap` (immuable) sur son fichier, pas
+/// `MmapMut` : la garantie "l'ancien packfile n'est jamais altéré avant la
+/// finalisation" est portée par le système de types, pas par une discipline
+/// de code à auditer. `PackHtmlIndex` s'interdisant volontairement de
+/// mmaper le blob HTML (pack_html_index.rs — coût mémoire nul au cold path),
+/// le mapping complet du fichier est reconstruit ici, localement,
+/// uniquement pour la durée de cette fusion (résolution Blocage 3).
+///
+/// `delta` : produit de `fetch_delta_batch`, déjà trié (C1 satisfait).
+///
+/// Robustesse à l'interruption : propriété structurelle, pas procédurale.
+/// Toute écriture a lieu sur `tmp_path` ; `final_path` n'est jamais ouvert
+/// en écriture par cette fonction — seulement réouvert en lecture, après le
+/// `rename`, pour construire l'index retourné. Un crash ou un retour
+/// anticipé (`?`) à n'importe quel point avant le `rename` laisse l'ancien
+/// packfile bit-à-bit intact ; un `.tmp` orphelin d'une exécution
+/// interrompue est sans conséquence, `OpenOptions::truncate(true)` l'écrase
+/// à la tentative suivante.
+fn apply_merge_io_sync(
+    old: &PackHtmlIndex,
+    delta: &DeltaBatch,
+    tmp_path: &Path,
+    final_path: &Path,
+) -> io::Result<PackHtmlIndex> {
+    const ENTRY_SIZE: u64 = std::mem::size_of::<PackfileEntry>() as u64; // 24
+    const FOOTER_SIZE: u64 = std::mem::size_of::<PackfileFooter>() as u64; // 32
+
+    // ---- Ancien packfile : mmap lecture-seule temporaire --------------------
+    let old_file = old.file();
+    let old_file_len = old_file.metadata()?.len();
+    let old_mmap = unsafe { memmap2::Mmap::map(old_file)? };
+
+    let old_footer_start = old_file_len
+        .checked_sub(FOOTER_SIZE)
+        .ok_or_else(|| io::Error::other("ancien packfile trop court pour contenir un footer"))?;
+    // entry_count() déjà validé par PackHtmlIndex::open (magic/version/
+    // cohérence index_len) — pas reparsé ici, seulement réutilisé pour
+    // localiser la région d'index dans CE mmap-ci (pack_html_index.rs ne
+    // mmape jamais le blob, donc ne peut pas nous fournir la slice).
+    let old_index_len = old.entry_count() as u64 * ENTRY_SIZE;
+    let old_index_start = old_footer_start.checked_sub(old_index_len).ok_or_else(|| {
+        io::Error::other("ancien packfile : index_len incohérent avec entry_count")
+    })?;
+
+    let old_blob: &[u8] = &old_mmap[0..old_index_start as usize];
+    let old_index: &[PackfileEntry] =
+        bytemuck::cast_slice(&old_mmap[old_index_start as usize..old_footer_start as usize]);
+
+    // ---- Dimensionnement haut du .tmp : borne supérieure --------------------
+    let cap = old_blob.len() as u64
+        + delta.payload.len() as u64
+        + 7
+        + (old_index.len() + delta.entries.len()) as u64 * ENTRY_SIZE
+        + FOOTER_SIZE;
+
+    let tmp_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(tmp_path)?;
+    tmp_file.set_len(cap)?; // ftruncate haut, avant tout mmap
+
+    let mut tmp_mmap = unsafe { memmap2::MmapMut::map_mut(&tmp_file)? };
+
+    // ---- merge_sweep : boîte noire pure (Phase 4.1), zéro-alloc interne ----
+    let mut out_index: Vec<PackfileEntry> =
+        Vec::with_capacity(old_index.len() + delta.entries.len());
+    let report = merge_sweep(old_blob, old_index, delta, &mut tmp_mmap[..], &mut out_index);
+
+    // ---- align8 : padding explicite avant l'index ---------------------------
+    let bytes_written = report.bytes_written;
+    let aligned_len = (bytes_written + 7) & !7;
+    tmp_mmap[bytes_written as usize..aligned_len as usize].fill(0);
+
+    // ---- Sérialisation de l'index (24o/entrée), contiguë au padding --------
+    let index_bytes: &[u8] = bytemuck::cast_slice(out_index.as_slice());
+    let index_start = aligned_len as usize;
+    let index_end = index_start + index_bytes.len();
+    tmp_mmap[index_start..index_end].copy_from_slice(index_bytes);
+
+    // ---- Footer canonique (32o), immédiatement après l'index ---------------
+    let footer = PackfileFooter {
+        magic: *b"MARIUSPK",
+        version: 1,
+        _pad: [0u8; 4],
+        entry_count: out_index.len() as u64,
+        index_len: index_bytes.len() as u64,
+    };
+    let footer_bytes = bytemuck::bytes_of(&footer);
+    let footer_start = index_end;
+    let footer_end = footer_start + footer_bytes.len();
+    tmp_mmap[footer_start..footer_end].copy_from_slice(footer_bytes);
+
+    let real_len = footer_end as u64; // == aligned_len + index_len + 32
+
+    // ---- Durabilité, puis ftruncate bas, puis fsync ------------------------
+    //
+    // Ordre délibérément différent de la formulation littérale du handoff
+    // ("ftruncate bas, PUIS fsync/msync") : msync ici précède le ftruncate
+    // bas, pas l'inverse. Raison structurelle, pas une négligence —
+    // `msync` après un `ftruncate` qui rétrécit le fichier porterait sur des
+    // pages dont une partie du mapping (entre `real_len` et `cap`) n'est
+    // plus garantie valide (sémantique POSIX dépendante du filesystem en
+    // cas d'accès au-delà de la nouvelle EOF). `flush_range(0, real_len)`
+    // élimine le problème : il ne synchronise QUE la région utile, identique
+    // avant et après troncature — aucune page incertaine touchée. Le
+    // `fsync(fd)` final, lui, a lieu APRÈS le ftruncate : c'est lui qui
+    // couvre la durabilité du changement de taille (métadonnée), pas le
+    // msync. Les deux propriétés exigées par la spec (données + métadonnée
+    // durables avant tout retour de succès) sont garanties ; seul l'ordre
+    // interne entre les deux mécanismes diffère du pseudocode.
+    tmp_mmap.flush_range(0, real_len as usize)?;
+    drop(tmp_mmap); // libère le mapping avant troncature/rename — hygiène
+
+    tmp_file.set_len(real_len)?; // ftruncate bas, taille exacte réelle
+    tmp_file.sync_all()?; // fsync(fd) — couvre la métadonnée de taille
+    drop(tmp_file);
+
+    fs::rename(tmp_path, final_path)?; // atomique (même filesystem, POSIX)
+
+    // Réouverture : seul point où final_path est lu après le swap. Aucune
+    // mutation du registre depuis cette fonction — voir regenerate_and_swap.
+    PackHtmlIndex::open(final_path)
+}
+
 // =============================================================================
-// Tests — Jalon 4a
-//
-// Sans PostgreSQL, sans serveur réel — StubProjection (même pattern que
-// batch_renderer.rs), appelée deux fois de suite avec des données
-// différentes sur un LiveRegistry de test.
+// Tests — Phase 4.2
 // =============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pack_html_format::PackfileEntry;
+    use crate::pack_html_format::write_packfile_footer;
     use arc_swap::ArcSwap;
     use std::collections::HashMap;
+    use std::io::Write;
     use std::os::unix::fs::FileExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
 
-    // ── Projection stub ──────────────────────────────────────────────────────
-    //
-    // Même structure que batch_renderer.rs::StubProjection, étendue pour
-    // produire un contenu observable et distinct par génération : le stub de
-    // batch_renderer.rs ignore pool/ids et renvoie toujours vec![], ce qui ne
-    // permettrait pas de distinguer deux régénérations successives ici.
-    //
-    // CURRENT_GENERATION est le seul canal disponible pour faire varier le
-    // contenu retourné par fetch_batch entre deux appels de
-    // regenerate_and_swap dans ce test : le pool est un stub jamais
-    // réellement interrogé (Jalon 4a : "sans PostgreSQL").
+    // ---------------------------------------------------------------------
+    // Pas de harnais block_on artisanal ici : `sqlx::PgPool::connect_lazy`
+    // exige un contexte Tokio réellement entré (tâche de fond du pool,
+    // `Handle::current()` côté sqlx-core), pas seulement que la future
+    // finisse par être pollée jusqu'au bout. Les deux tests qui appellent
+    // `stub_pool()` sont donc `#[tokio::test]` (current_thread suffit —
+    // aucune vraie E/S réseau n'a lieu, Stub/FailingProjection ignorent
+    // `_pool`) ; les autres tests de ce module n'en ont pas besoin et
+    // restent `#[test]`.
+    // ---------------------------------------------------------------------
 
-    static CURRENT_GENERATION: AtomicU64 = AtomicU64::new(0);
+    // ── Helpers bas niveau — bytes bruts, sans Projection ────────────────────
+
+    fn pe(id: i64, offset: u64, len: u32) -> PackfileEntry {
+        PackfileEntry { id, offset, len, _pad: [0u8; 4] }
+    }
+
+    fn write_raw_packfile(path: &Path, blob: &[u8], entries: &[PackfileEntry]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("création répertoire de test");
+        }
+        let file = std::fs::File::create(path).expect("création packfile de test");
+        let mut writer = BufWriter::new(file);
+        writer.write_all(blob).expect("écriture blob");
+        write_packfile_footer(&mut writer, blob.len() as u64, entries).expect("écriture footer");
+        writer.flush().expect("flush");
+    }
+
+    fn unique_path(label: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "marius_regenerate_test_{label}_{}_{n}.bin",
+            std::process::id()
+        ))
+    }
+
+    fn unique_test_key(label: &str) -> &'static str {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        Box::leak(format!("phase4_2_{label}_{}_{n}", std::process::id()).into_boxed_str())
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(path.with_extension("tmp"));
+    }
+
+    // ── Test 1 : sortie bit-identique à une référence pur Vec<u8> ────────────
+    //
+    // Référence calculée INDÉPENDAMMENT de apply_merge_io_sync (même
+    // merge_sweep, mais sérialisation footer/align8 réimplémentée sur un
+    // Vec<u8> simple, pas réutilisée) — détecte une erreur de transcription
+    // dans l'arithmétique mmap (bornes de slice, placement index/footer),
+    // pas une tautologie qui réexécuterait le code testé.
+
+    fn compute_reference(old_blob: &[u8], old_index: &[PackfileEntry], delta: &DeltaBatch) -> Vec<u8> {
+        const ENTRY_SIZE: usize = std::mem::size_of::<PackfileEntry>();
+        const FOOTER_SIZE: usize = std::mem::size_of::<PackfileFooter>();
+
+        let cap = old_blob.len()
+            + delta.payload.len()
+            + 7
+            + (old_index.len() + delta.entries.len()) * ENTRY_SIZE
+            + FOOTER_SIZE;
+        let mut buf = vec![0u8; cap];
+
+        let mut out_index = Vec::with_capacity(old_index.len() + delta.entries.len());
+        let report = merge_sweep(old_blob, old_index, delta, &mut buf[..], &mut out_index);
+
+        let aligned = ((report.bytes_written + 7) & !7) as usize;
+        // buf[bytes_written..aligned] déjà à zéro (vec![0u8; cap]).
+
+        let index_bytes: &[u8] = bytemuck::cast_slice(out_index.as_slice());
+        buf[aligned..aligned + index_bytes.len()].copy_from_slice(index_bytes);
+
+        let footer = PackfileFooter {
+            magic: *b"MARIUSPK",
+            version: 1,
+            _pad: [0u8; 4],
+            entry_count: out_index.len() as u64,
+            index_len: index_bytes.len() as u64,
+        };
+        let footer_bytes = bytemuck::bytes_of(&footer);
+        let footer_start = aligned + index_bytes.len();
+        buf[footer_start..footer_start + footer_bytes.len()].copy_from_slice(footer_bytes);
+
+        buf.truncate(footer_start + footer_bytes.len());
+        buf
+    }
+
+    #[test]
+    fn apply_merge_io_sync_matches_pure_vec_reference_bit_for_bit() {
+        // old : id=1 "A", id=2 "BB", id=3 "CCC".
+        let old_blob = b"ABBCCC".to_vec();
+        let old_index = vec![pe(1, 0, 1), pe(2, 1, 2), pe(3, 3, 3)];
+
+        // delta : id=1 DELETE, id=2 UPDATE -> "BBBB", id=4 INSERT -> "DDDDD".
+        // id=3 reste hors delta — copié depuis l'ancien, exercé par le même
+        // test (pas seulement par le test de non-régression dédié).
+        let delta = DeltaBatch {
+            entries: vec![
+                DeltaEntry { entity_id: 1, offset: 0, length: 0 },
+                DeltaEntry { entity_id: 2, offset: 0, length: 4 },
+                DeltaEntry { entity_id: 4, offset: 4, length: 5 },
+            ],
+            payload: b"BBBBDDDDD".to_vec(),
+        };
+
+        let real_path = unique_path("bitexact");
+        write_raw_packfile(&real_path, &old_blob, &old_index);
+        let old = PackHtmlIndex::open(&real_path).expect("ouverture ancien packfile");
+        let tmp_path = real_path.with_extension("tmp");
+
+        let reference = compute_reference(&old_blob, &old_index, &delta);
+
+        let _new_index = apply_merge_io_sync(&old, &delta, &tmp_path, &real_path)
+            .expect("apply_merge_io_sync doit réussir");
+
+        let on_disk = fs::read(&real_path).expect("lecture du packfile final");
+        assert_eq!(
+            on_disk, reference,
+            "sortie de apply_merge_io_sync non bit-identique à la référence Vec<u8> \
+             (payload + padding align8 + index + footer)"
+        );
+
+        cleanup(&real_path);
+    }
+
+    // ── Test 2 : alignement réel — cast_slice, pas une comparaison d'octets ──
+
+    #[test]
+    fn final_index_region_is_8byte_aligned_and_castable() {
+        let old_blob = b"X".to_vec();
+        let old_index = vec![pe(1, 0, 1)];
+        let delta = DeltaBatch {
+            entries: vec![DeltaEntry { entity_id: 2, offset: 0, length: 3 }],
+            payload: b"YYY".to_vec(),
+        };
+
+        let real_path = unique_path("alignment");
+        write_raw_packfile(&real_path, &old_blob, &old_index);
+        let old = PackHtmlIndex::open(&real_path).expect("ouverture ancien packfile");
+        let tmp_path = real_path.with_extension("tmp");
+
+        apply_merge_io_sync(&old, &delta, &tmp_path, &real_path)
+            .expect("apply_merge_io_sync doit réussir");
+
+        let on_disk = fs::read(&real_path).expect("lecture packfile final");
+        const FOOTER_SIZE: usize = std::mem::size_of::<PackfileFooter>();
+        let footer_start = on_disk.len() - FOOTER_SIZE;
+        let footer: PackfileFooter = bytemuck::pod_read_unaligned(&on_disk[footer_start..]);
+        let index_start = footer_start - footer.index_len as usize;
+
+        // L'assertion qui compte : cast_slice panique si l'alignement 8B
+        // n'est pas respecté — pas une simple comparaison d'octets bruts.
+        let entries: &[PackfileEntry] = bytemuck::cast_slice(&on_disk[index_start..footer_start]);
+        assert_eq!(entries.len(), footer.entry_count as usize);
+        assert_eq!(entries.len(), 2, "id=1 (copié) + id=2 (inséré)");
+
+        cleanup(&real_path);
+    }
+
+    // ── Fixtures Projection pour les tests bout-en-bout (async) ─────────────
+    //
+    // DB simulée par un Mutex<Vec<(id, génération)>> statique — partagé par
+    // tout le binaire de test de ce module, même contrainte opérationnelle
+    // que ALIVE_INSTANCES (pack_html_index.rs) : exécuter isolément ou avec
+    // --test-threads=1 pour des assertions fiables sur les tests qui suivent.
+
+    static DB: Mutex<Vec<(i64, i64)>> = Mutex::new(Vec::new());
+
+    fn db_set(rows: &[(i64, i64)]) {
+        *DB.lock().unwrap() = rows.to_vec();
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -179,9 +521,18 @@ mod tests {
         generation: i64,
     }
 
-    struct StubProjection;
-
     const STUB_TOTAL_CAP: usize = 32;
+
+    fn stub_pool() -> sqlx::PgPool {
+        sqlx::PgPool::connect_lazy("postgres://stub-unused-phase4_2/db")
+            .expect("connect_lazy ne touche jamais le réseau")
+    }
+
+    /// Simule `SELECT ... WHERE id = ANY($1)` : un id absent de `DB` est
+    /// silencieusement omis du résultat — c'est CE comportement qui fonde
+    /// le contrat de détection des suppressions de `fetch_delta_batch`
+    /// (résolution Blocage 2).
+    struct StubProjection;
 
     impl Projection for StubProjection {
         type Record = StubRecord;
@@ -192,11 +543,15 @@ mod tests {
             ids: &[i64],
         ) -> impl std::future::Future<Output = marius_projection::BatchResult<Self>> + Send
         {
-            let generation = CURRENT_GENERATION.load(Ordering::Relaxed) as i64;
-            let batch = ids
+            let db = DB.lock().unwrap();
+            let batch: Vec<(StubRecord, ())> = ids
                 .iter()
-                .map(|&id| (StubRecord { id: id as i32, generation }, ()))
-                .collect::<Vec<_>>();
+                .filter_map(|&id| {
+                    db.iter()
+                        .find(|&&(rid, _)| rid == id)
+                        .map(|&(rid, generation)| (StubRecord { id: rid as i32, generation }, ()))
+                })
+                .collect();
             async move { Ok(batch) }
         }
 
@@ -211,12 +566,6 @@ mod tests {
         }
 
         fn packfile_path() -> PathBuf {
-            // Non utilisé par regenerate_and_swap, qui passe par
-            // packfile_path_for(packfile_key) — jamais P::packfile_path()
-            // (voir note de module ci-dessus, point de fidélité à la spec
-            // §7, pas une divergence). Présent uniquement parce que le
-            // trait Projection l'exige, même obligation que dans
-            // batch_renderer.rs::StubProjection.
             PathBuf::from("artifacts/unused_stub_pack.bin")
         }
 
@@ -225,174 +574,161 @@ mod tests {
         }
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    /// Simule un échec de connexion/requête PostgreSQL — pour le test de
+    /// robustesse à l'interruption (échoue avant toute écriture I/O).
+    struct FailingProjection;
 
-    fn unique_test_key(label: &str) -> &'static str {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        Box::leak(format!("jalon4a_{label}_{}_{n}", std::process::id()).into_boxed_str())
-    }
+    impl Projection for FailingProjection {
+        type Record = StubRecord;
+        type VarlenOwned = ();
 
-    /// PgPool jamais réellement connecté ni interrogé — StubProjection::
-    /// fetch_batch ignore ce paramètre. connect_lazy ne touche jamais le
-    /// réseau tant qu'aucune requête n'est exécutée à travers lui, ce qui
-    /// n'arrive jamais dans ce test (Jalon 4a : "sans PostgreSQL").
-    fn stub_pool() -> sqlx::PgPool {
-        sqlx::PgPool::connect_lazy("postgres://stub-unused-in-jalon-4a/db")
-            .expect("connect_lazy ne touche jamais le réseau")
-    }
-
-    /// Construit un PackHtmlIndex hors de regenerate_and_swap, pour amorcer
-    /// le LiveRegistry de test avant le premier appel réel — n'utilise pas
-    /// regenerate_and_swap lui-même (éviterait de tester autre chose que ce
-    /// qu'on amorce).
-    fn bootstrap_packfile(key: &'static str, ids: &[i64], generation: u64) -> PackHtmlIndex {
-        let frag = format!("<g{generation}>");
-        let path = packfile_path_for(key);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("création artifacts/ de test");
+        fn fetch_batch(
+            _pool: &sqlx::PgPool,
+            _ids: &[i64],
+        ) -> impl std::future::Future<Output = marius_projection::BatchResult<Self>> + Send
+        {
+            async { Err(sqlx::Error::Io(std::io::Error::other("échec PostgreSQL simulé"))) }
         }
 
+        fn render(record: &StubRecord, _varlena: &(), buf: &mut String) {
+            use std::fmt::Write as _;
+            write!(buf, "<g{}>", record.generation).unwrap();
+        }
+
+        #[inline(always)]
+        fn record_id(record: &StubRecord) -> i64 {
+            record.id as i64
+        }
+
+        fn packfile_path() -> PathBuf {
+            PathBuf::from("artifacts/unused_failing_pack.bin")
+        }
+
+        fn store_path() -> PathBuf {
+            PathBuf::from("unused_failing_store.bin")
+        }
+    }
+
+    fn write_initial_packfile(key: &'static str, rows: &[(i64, &str)]) {
+        let path = packfile_path_for(key);
         let mut blob = Vec::new();
-        let mut entries = Vec::with_capacity(ids.len());
+        let mut entries = Vec::with_capacity(rows.len());
         let mut offset = 0u64;
-        for &id in ids {
+        for &(id, frag) in rows {
             blob.extend_from_slice(frag.as_bytes());
-            entries.push(PackfileEntry {
-                id,
-                offset,
-                len: frag.len() as u32,
-                _pad: [0u8; 4],
-            });
+            entries.push(pe(id, offset, frag.len() as u32));
             offset += frag.len() as u64;
         }
-
-        let file = File::create(&path).expect("création packfile bootstrap");
-        let mut writer = BufWriter::new(file);
-        writer.write_all(&blob).expect("écriture blob bootstrap");
-        write_packfile_footer(&mut writer, offset, &entries).expect("écriture footer bootstrap");
-        writer.flush().expect("flush bootstrap");
-
-        PackHtmlIndex::open(&path).expect("réouverture bootstrap")
+        write_raw_packfile(&path, &blob, &entries);
     }
 
-    fn read_fragment(file: &File, offset: u64, len: u32) -> String {
+    fn read_fragment(idx: &PackHtmlIndex, id: i64) -> Option<String> {
+        let (offset, len) = idx.lookup(id)?;
         let mut buf = vec![0u8; len as usize];
-        file.read_at(&mut buf, offset).expect("read_at fragment");
-        String::from_utf8(buf).expect("fragment UTF-8 valide")
+        idx.file().read_at(&mut buf, offset).expect("read_at fragment");
+        Some(String::from_utf8(buf).expect("fragment UTF-8 valide"))
     }
 
-    // ── Test principal — Jalon 4a ─────────────────────────────────────────────
+    // ── Test 3 : non-régression — entités non touchées + suppression ────────
 
     #[tokio::test]
-    async fn regenerate_and_swap_twice_swaps_atomically_and_preserves_in_flight_reader() {
-        let key = unique_test_key("twice");
+    async fn untouched_entities_survive_successive_incremental_merges_then_delete() {
+        let key = unique_test_key("nonreg");
         let pool = stub_pool();
 
-        // LiveRegistry de test : la clé doit être provisionnée à l'avance
-        // (with_indices) — store() panique sinon (invariant AOT,
-        // registry.rs). Amorce : génération 0, id unique.
-        let bootstrap = bootstrap_packfile(key, &[1], 0);
+        db_set(&[(1, 0), (2, 0), (3, 0)]);
+        write_initial_packfile(key, &[(1, "<g0>"), (2, "<g0>"), (3, "<g0>")]);
+
+        let bootstrap = PackHtmlIndex::open(&packfile_path_for(key)).expect("ouverture amorce");
         let mut indices = HashMap::new();
         indices.insert(key, ArcSwap::from_pointee(bootstrap));
         let registry = LiveRegistry::with_indices(indices);
 
-        let tmp_path = packfile_path_for(key).with_extension("tmp");
-
-        // ── Première régénération réelle via regenerate_and_swap ──────────
-        CURRENT_GENERATION.store(1, Ordering::Relaxed);
-        regenerate_and_swap::<StubProjection>(&pool, &[1, 2, 3], STUB_TOTAL_CAP, key, &registry)
+        // Tick 1 : seul id=2 touché.
+        db_set(&[(1, 0), (2, 1), (3, 0)]);
+        regenerate_and_swap::<StubProjection>(&pool, &[2], STUB_TOTAL_CAP, key, &registry)
             .await
-            .expect("première régénération doit réussir");
+            .expect("tick 1 doit réussir");
 
-        assert!(
-            !tmp_path.exists(),
-            ".tmp ne doit jamais survivre à un rename() réussi (génération 1)"
-        );
+        let gen1 = registry.load(key).unwrap();
+        assert_eq!(read_fragment(&gen1, 1), Some("<g0>".to_string()), "id=1 doit survivre, absent du delta du tick 1");
+        assert_eq!(read_fragment(&gen1, 2), Some("<g1>".to_string()), "id=2 doit refléter le tick 1");
+        assert_eq!(read_fragment(&gen1, 3), Some("<g0>".to_string()), "id=3 doit survivre, absent du delta du tick 1");
 
-        let gen1_arc = registry.load(key).expect("clé provisionnée");
-        assert_eq!(gen1_arc.entry_count(), 3, "génération 1 doit contenir 3 entrées");
-        let (offset, len) = gen1_arc.lookup(2).expect("id=2 présent en génération 1");
-        assert_eq!(
-            read_fragment(gen1_arc.file(), offset, len),
-            "<g1>",
-            "fragment id=2 doit refléter la génération 1"
-        );
+        // Tick 2 : seul id=3 touché.
+        db_set(&[(1, 0), (2, 1), (3, 2)]);
+        regenerate_and_swap::<StubProjection>(&pool, &[3], STUB_TOTAL_CAP, key, &registry)
+            .await
+            .expect("tick 2 doit réussir");
 
-        // Lecteur "en vol" : Arc cloné AVANT la seconde régénération — doit
-        // continuer à fonctionner après le swap (3ᵉ point de vigilance,
-        // fd/inode, repris du Jalon 2).
-        let in_flight_reader = gen1_arc.clone();
+        let gen2 = registry.load(key).unwrap();
+        assert_eq!(read_fragment(&gen2, 1), Some("<g0>".to_string()), "id=1 doit survivre deux cycles sans jamais figurer dans un delta — c'est précisément le bug que merge_sweep corrige");
+        assert_eq!(read_fragment(&gen2, 2), Some("<g1>".to_string()), "id=2 doit survivre, absent du delta du tick 2");
+        assert_eq!(read_fragment(&gen2, 3), Some("<g2>".to_string()), "id=3 doit refléter le tick 2");
 
-        // ── Seconde régénération, données différentes ──────────────────────
-        CURRENT_GENERATION.store(2, Ordering::Relaxed);
-        regenerate_and_swap::<StubProjection>(
+        // Tick 3 : suppression de id=1 (disparaît de la base).
+        db_set(&[(2, 1), (3, 2)]);
+        regenerate_and_swap::<StubProjection>(&pool, &[1], STUB_TOTAL_CAP, key, &registry)
+            .await
+            .expect("tick 3 (suppression) doit réussir");
+
+        let gen3 = registry.load(key).unwrap();
+        assert_eq!(read_fragment(&gen3, 1), None, "id=1 doit avoir disparu après suppression");
+        assert_eq!(read_fragment(&gen3, 2), Some("<g1>".to_string()), "id=2 doit survivre au tick de suppression");
+        assert_eq!(read_fragment(&gen3, 3), Some("<g2>".to_string()), "id=3 doit survivre au tick de suppression");
+
+        cleanup(&packfile_path_for(key));
+    }
+
+    // ── Test 4 : robustesse — échec fetch_batch avant toute écriture ────────
+    //
+    // Interruption réaliste et atteignable par l'API publique (perte de
+    // connexion PostgreSQL en cours de tick), pas une panne injectée dans
+    // le noyau synchrone : ce dernier n'écrit jamais `final_path` avant son
+    // unique `rename` final (propriété structurelle — type Mmap immuable
+    // sur `old`, séparation tmp/final — documentée dans apply_merge_io_sync,
+    // pas vérifiable autrement qu'en lecture de code sans instrumentation
+    // interne dédiée).
+
+    #[tokio::test]
+    async fn fetch_failure_leaves_old_packfile_and_registry_untouched() {
+        let key = unique_test_key("fetchfail");
+        let pool = stub_pool();
+
+        write_initial_packfile(key, &[(1, "<g0>")]);
+        let bootstrap = PackHtmlIndex::open(&packfile_path_for(key)).expect("ouverture amorce");
+        let mut indices = HashMap::new();
+        indices.insert(key, ArcSwap::from_pointee(bootstrap));
+        let registry = LiveRegistry::with_indices(indices);
+
+        let before = registry.load(key).unwrap();
+        let before_fragment = read_fragment(&before, 1);
+
+        let result = regenerate_and_swap::<FailingProjection>(
             &pool,
-            &[1, 2, 3, 4],
+            &[1],
             STUB_TOTAL_CAP,
             key,
             &registry,
         )
-        .await
-        .expect("seconde régénération doit réussir");
-
-        assert!(
-            !tmp_path.exists(),
-            ".tmp ne doit jamais survivre à un rename() réussi (génération 2)"
-        );
-
-        // Assertion 1 : le nouvel index lu après le swap reflète les
-        // nouvelles données (4 entrées, contenu de génération 2).
-        let gen2_arc = registry.load(key).expect("clé toujours provisionnée");
-        assert_eq!(gen2_arc.entry_count(), 4, "génération 2 doit contenir 4 entrées");
-        let (offset, len) = gen2_arc
-            .lookup(4)
-            .expect("id=4 présent en génération 2 seulement");
-        assert_eq!(
-            read_fragment(gen2_arc.file(), offset, len),
-            "<g2>",
-            "fragment id=4 doit refléter la génération 2"
-        );
-
-        // Assertion 2 : le lecteur ayant chargé l'Arc avant le swap continue
-        // de fonctionner sans coupure — toujours 3 entrées, toujours <g1>,
-        // jamais de fd invalidé par le rename de la génération 2 (le fd
-        // ouvert par in_flight_reader pointe sur l'inode renommé en .tmp
-        // au moment de son ouverture, jamais sur le fichier final actuel).
-        assert_eq!(
-            in_flight_reader.entry_count(),
-            3,
-            "le lecteur en vol ne doit pas voir la nouvelle génération"
-        );
-        let (offset, len) = in_flight_reader
-            .lookup(2)
-            .expect("id=2 toujours résolu côté ancien Arc");
-        assert_eq!(
-            read_fragment(in_flight_reader.file(), offset, len),
-            "<g1>",
-            "le lecteur en vol doit continuer à lire la génération 1, pas la 2"
-        );
-    }
-
-    // ── Conformité à l'invariant AOT de LiveRegistry::store() ────────────────
-
-    #[tokio::test]
-    #[should_panic(expected = "violation de l'invariant AOT")]
-    async fn regenerate_and_swap_panics_on_unprovisioned_key() {
-        // regenerate_and_swap ne doit pas contourner par un Err silencieux
-        // l'invariant déjà posé par registry.rs : une clé jamais
-        // provisionnée à la construction du LiveRegistry est un bug
-        // interne, pas une erreur de requête — panic, pas Result.
-        let pool = stub_pool();
-        let registry = LiveRegistry::with_indices(HashMap::new());
-        CURRENT_GENERATION.store(0, Ordering::Relaxed);
-        let _ = regenerate_and_swap::<StubProjection>(
-            &pool,
-            &[1],
-            STUB_TOTAL_CAP,
-            "jamais_provisionnee_jalon4a",
-            &registry,
-        )
         .await;
+        assert!(result.is_err(), "un échec fetch_batch doit remonter en Err, jamais être absorbé");
+
+        let after = registry.load(key).unwrap();
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "le registre ne doit jamais avoir été swappé : même Arc avant/après l'échec"
+        );
+        assert_eq!(
+            read_fragment(&after, 1),
+            before_fragment,
+            "le packfile servi par le registre ne doit pas changer après un échec de fetch_batch"
+        );
+        assert!(
+            !packfile_path_for(key).with_extension("tmp").exists(),
+            ".tmp ne doit jamais être créé si fetch_batch échoue avant toute écriture physique"
+        );
+
+        cleanup(&packfile_path_for(key));
     }
 }

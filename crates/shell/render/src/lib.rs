@@ -4,6 +4,8 @@
 // Façade du crate marius-render.
 // =============================================================================
 
+mod sweep;
+
 pub mod dispatcher;
 pub mod batch_renderer;
 pub mod packfile_builder;

@@ -4,14 +4,11 @@
 //! slices et `Vec` fournis par l'appelant. Les phases 4.2/4.3 consomment
 //! `merge_sweep` comme boîte noire pure.
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-#[cfg_attr(test, derive(Debug, PartialEq))]
-pub struct PackfileEntry {
-    pub entity_id: i64,
-    pub offset: u32,
-    pub length: u32,
-}
+// Type physique importé depuis la source de vérité du format disque —
+// 24 octets (id: i64, offset: u64, len: u32, _pad: [u8;4]), Pod/Zeroable.
+// Plus de définition locale : une seule forme physique, pas deux structures
+// à synchroniser manuellement (cf. handoff Phase 4.2, point 4).
+use crate::pack_html_format::PackfileEntry;
 
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct DeltaEntry {
@@ -61,8 +58,8 @@ pub fn merge_sweep(
     // debug_assertions), vital en débogage pour quiconque branche un
     // producteur de old_index/delta non conforme.
     debug_assert!(
-        old_index.windows(2).all(|w| w[0].entity_id < w[1].entity_id),
-        "C2 violé : old_index n'est pas strictement trié par entity_id"
+        old_index.windows(2).all(|w| w[0].id < w[1].id),
+        "C2 violé : old_index n'est pas strictement trié par id"
     );
     debug_assert!(
         delta.entries.windows(2).all(|w| w[0].entity_id < w[1].entity_id),
@@ -90,7 +87,7 @@ pub fn merge_sweep(
 
         // Flux épuisé == traité comme infini (ligne "Drainage" de la table).
         let old_lt_delta = match (old_avail, delta_avail) {
-            (true, true) => old_index[i].entity_id < delta.entries[j].entity_id,
+            (true, true) => old_index[i].id < delta.entries[j].entity_id,
             (true, false) => true,  // delta infini -> old reste toujours "plus petit" -> extension de run
             (false, _) => false,    // old infini -> jamais "plus petit"
         };
@@ -111,7 +108,7 @@ pub fn merge_sweep(
         // serait vrai (sinon double-épuisement déjà intercepté plus haut),
         // et (true, false) => true aurait pris la branche old_lt_delta.
         let d = &delta.entries[j];
-        let old_gt_delta = !old_avail || old_index[i].entity_id > d.entity_id;
+        let old_gt_delta = !old_avail || old_index[i].id > d.entity_id;
 
         if old_gt_delta {
             if d.length == 0 {
@@ -123,7 +120,7 @@ pub fn merge_sweep(
             }
             j += 1;
         } else {
-            // old_index[i].entity_id == d.entity_id
+            // old_index[i].id == d.entity_id
             if d.length == 0 {
                 report.deletes_applied += 1; // DELETE effectif (entité vivante supprimée)
             } else {
@@ -146,6 +143,7 @@ pub fn merge_sweep(
 /// Flush d'une run `[run_start, run_end)` de `old_index` : un seul memcpy
 /// sur le payload, un seul `extend_from_slice` sur l'index. Renvoie le
 /// nouveau `out_pos` (pas de `&mut out_pos` — transitions d'état explicites).
+#[allow(clippy::too_many_arguments)]
 fn flush_run(
     old_blob: &[u8],
     old_index: &[PackfileEntry],
@@ -169,7 +167,7 @@ fn flush_run(
     // dernier, sans trou avec les entrées intermédiaires. D'où le memcpy
     // unique, sans boucle entrée par entrée sur le payload.
     let byte_start = first.offset as usize;
-    let byte_end = last.offset as usize + last.length as usize;
+    let byte_end = last.offset as usize + last.len as usize;
     let run_len = byte_end - byte_start;
 
     out_blob[out_pos..out_pos + run_len].copy_from_slice(&old_blob[byte_start..byte_end]);
@@ -191,7 +189,7 @@ fn flush_run(
         for entry in &mut out_index[out_idx_start..] {
             let new_offset = entry.offset as i64 + shift;
             debug_assert!(new_offset >= 0, "Violation d'invariant : offset négatif calculé");
-            entry.offset = new_offset as u32;
+            entry.offset = new_offset as u64;
         }
     }
 
@@ -218,9 +216,10 @@ fn emit_fragment(
     out_blob[out_pos..out_pos + d.length as usize].copy_from_slice(&delta.payload[src_start..src_end]);
 
     out_index.push(PackfileEntry {
-        entity_id: d.entity_id,
-        offset: out_pos as u32,
-        length: d.length,
+        id: d.entity_id,
+        offset: out_pos as u64,
+        len: d.length,
+        _pad: [0u8; 4],
     });
 
     out_pos + d.length as usize
@@ -247,10 +246,10 @@ mod tests {
     unsafe impl GlobalAlloc for CountingAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             ALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
-            System.alloc(layout)
+            unsafe { System.alloc(layout) }
         }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            System.dealloc(ptr, layout)
+            unsafe { System.dealloc(ptr, layout) }
         }
     }
 
@@ -262,8 +261,8 @@ mod tests {
     }
 
     // --- Helpers de construction ---------------------------------------------
-    fn pe(id: i64, offset: u32, length: u32) -> PackfileEntry {
-        PackfileEntry { entity_id: id, offset, length }
+    fn pe(id: i64, offset: u64, length: u32) -> PackfileEntry {
+        PackfileEntry { id, offset, len: length, _pad: [0u8; 4] }
     }
     fn de(id: i64, offset: u32, length: u32) -> DeltaEntry {
         DeltaEntry { entity_id: id, offset, length }
