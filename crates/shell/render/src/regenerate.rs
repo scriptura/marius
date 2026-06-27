@@ -51,6 +51,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use marius_projection::Projection;
 
@@ -80,12 +81,20 @@ const CHUNK_SIZE: usize = 1024;
 /// du `LiveRegistry` — invariant AOT existant (`LiveRegistry::store`), pas
 /// contourné ici par un `Result` silencieux : une clé absente est un bug
 /// d'intégration, pas une erreur de requête.
+///
+/// `io_semaphore` : régule l'I/O disque (risque de dirty-page storm),
+/// partagé entre tous les `Dispatcher` — singleton créé une fois en amont
+/// (main.rs), jamais reconstruit ici. Portée du permis : juste avant
+/// `spawn_blocking`, jamais avant le fetch Postgres (décision Phase 4.3,
+/// point 1 — le fetch réseau n'a aucun rapport avec la pression disque que
+/// ce sémaphore régule).
 pub async fn regenerate_and_swap<P: Projection>(
     pool: &sqlx::PgPool,
     ids: &[i64],
     total_cap: usize,
     packfile_key: &'static str,
     registry: &LiveRegistry,
+    io_semaphore: &tokio::sync::Semaphore,
 ) -> io::Result<()> {
     let final_path = packfile_path_for(packfile_key);
     let tmp_path = final_path.with_extension("tmp");
@@ -106,16 +115,56 @@ pub async fn regenerate_and_swap<P: Projection>(
         )
     });
 
-    // ---- Partie async : seule section de cette fonction qui .await-e -------
+    // ---- Segment 1 — fetch réseau Postgres. Hors périmètre du sémaphore. ---
+    let t_fetch = Instant::now();
     let delta = fetch_delta_batch::<P>(pool, ids, total_cap).await?;
+    let fetch_elapsed = t_fetch.elapsed();
 
-    // ---- Noyau synchrone : voir doc de apply_merge_io_sync ------------------
-    let new_index = apply_merge_io_sync(old.as_ref(), &delta, &tmp_path, &final_path)?;
+    // ---- Segment 2 — attente du permis : signal de backpressure (ADR-002).
+    // t0 côté Dispatcher::run() englobe cette attente par conception (le
+    // Dispatcher est un filtre passe-bas sur l'amplification d'écriture
+    // globale, pas une mesure du coût CPU propre du shard) ; décomposée ici
+    // séparément pour le diagnostic uniquement.
+    let t_wait = Instant::now();
+    let _permit = io_semaphore
+        .acquire()
+        .await
+        .map_err(|_| io::Error::other("io_semaphore fermé de manière inattendue"))?;
+    let wait_io_elapsed = t_wait.elapsed();
 
-    // Dernière étape, sans exception : tout Err ci-dessus (fetch, I/O,
-    // fsync, rename, réouverture) retourne avant cette ligne — l'ancien Arc
-    // reste servi, aucune requête en vol n'est interrompue.
+    // ---- Segment 3 — noyau synchrone (Phase 4.2, boîte noire, inchangé)
+    // déporté sur le pool de threads bloquants. `_permit` est tenu jusqu'à
+    // la sortie de portée naturelle de ce bloc — après le `.await`, succès
+    // ou erreur — pas de libération manuelle.
+    let t_merge = Instant::now();
+    let new_index = tokio::task::spawn_blocking(move || {
+        apply_merge_io_sync(old.as_ref(), &delta, &tmp_path, &final_path)
+    })
+    .await
+    .map_err(io::Error::other)??;
+    let merge_io_elapsed = t_merge.elapsed();
+
+    // Dernière étape, sans exception : tout Err ci-dessus (fetch, permis,
+    // JoinError, I/O, fsync, rename, réouverture) retourne avant cette
+    // ligne — l'ancien Arc reste servi, aucune requête en vol n'est
+    // interrompue.
     registry.store(packfile_key, Arc::new(new_index));
+
+    // Instrumentation diagnostic. Aucun import `tracing` ni appel
+    // `tracing_subscriber::...::init()` détecté dans les deux fichiers
+    // fournis à cette session (dispatcher.rs, regenerate.rs) — eprintln!
+    // provisoire en conséquence. Si `tracing` est câblé ailleurs dans le
+    // crate (main.rs ou un autre module non fourni), remplacer par
+    // `tracing::debug!` à champs structurés.
+    // TODO: migrer vers tracing une fois confirmé câblé dans le crate.
+    let total = fetch_elapsed + wait_io_elapsed + merge_io_elapsed;
+    eprintln!(
+        "[{packfile_key}] total: {}ms (fetch: {}ms, wait_io: {}ms, merge_io: {}ms)",
+        total.as_millis(),
+        fetch_elapsed.as_millis(),
+        wait_io_elapsed.as_millis(),
+        merge_io_elapsed.as_millis(),
+    );
 
     Ok(())
 }
@@ -644,9 +693,14 @@ mod tests {
         indices.insert(key, ArcSwap::from_pointee(bootstrap));
         let registry = LiveRegistry::with_indices(indices);
 
+        // io_semaphore : 1 permis, aucune contention attendue dans ce test
+        // mono-tâche — vérifie seulement le câblage, pas le comportement
+        // sous charge (cf. test dédié "borne de concurrence").
+        let io_sem = tokio::sync::Semaphore::new(1);
+
         // Tick 1 : seul id=2 touché.
         db_set(&[(1, 0), (2, 1), (3, 0)]);
-        regenerate_and_swap::<StubProjection>(&pool, &[2], STUB_TOTAL_CAP, key, &registry)
+        regenerate_and_swap::<StubProjection>(&pool, &[2], STUB_TOTAL_CAP, key, &registry, &io_sem)
             .await
             .expect("tick 1 doit réussir");
 
@@ -657,7 +711,7 @@ mod tests {
 
         // Tick 2 : seul id=3 touché.
         db_set(&[(1, 0), (2, 1), (3, 2)]);
-        regenerate_and_swap::<StubProjection>(&pool, &[3], STUB_TOTAL_CAP, key, &registry)
+        regenerate_and_swap::<StubProjection>(&pool, &[3], STUB_TOTAL_CAP, key, &registry, &io_sem)
             .await
             .expect("tick 2 doit réussir");
 
@@ -668,7 +722,7 @@ mod tests {
 
         // Tick 3 : suppression de id=1 (disparaît de la base).
         db_set(&[(2, 1), (3, 2)]);
-        regenerate_and_swap::<StubProjection>(&pool, &[1], STUB_TOTAL_CAP, key, &registry)
+        regenerate_and_swap::<StubProjection>(&pool, &[1], STUB_TOTAL_CAP, key, &registry, &io_sem)
             .await
             .expect("tick 3 (suppression) doit réussir");
 
@@ -704,12 +758,14 @@ mod tests {
         let before = registry.load(key).unwrap();
         let before_fragment = read_fragment(&before, 1);
 
+        let io_sem = tokio::sync::Semaphore::new(1);
         let result = regenerate_and_swap::<FailingProjection>(
             &pool,
             &[1],
             STUB_TOTAL_CAP,
             key,
             &registry,
+            &io_sem,
         )
         .await;
         assert!(result.is_err(), "un échec fetch_batch doit remonter en Err, jamais être absorbé");

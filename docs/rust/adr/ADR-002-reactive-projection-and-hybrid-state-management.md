@@ -42,6 +42,8 @@ L'interface utilisateur est traitée comme un tampon de mémoire vive (Draft) di
 
 Le Dispatcher agit comme un **Filtre Passe-Bas** pour la charge système. Son rôle est de lisser l'amplification d'écriture en regroupant les mutations au sein d'une fenêtre temporelle (le `tick`).
 
+> Le Dispatcher adapte sa cadence en fonction de la pression effective exercée sur l'ensemble de la chaîne de projection. Cette pression inclut aussi bien le temps de calcul que les mécanismes de backpressure (contention sur les ressources d'E/S, limitations de concurrence, etc.), car ils traduisent tous une même réalité : la capacité instantanée du système à absorber de nouvelles mutations.
+
 ### Logique d'Asservissement
 
 Le délai de vidage du Collector (_table de présence_) n'est plus une constante, mais une variable ajustée en temps réel selon la télémétrie du système.
@@ -74,3 +76,5 @@ Le délai de vidage du Collector (_table de présence_) n'est plus une constante
 | **Rendu**       | AOT (`.marius`)         | CPU libéré pour la gestion des flux réseaux.        |
 
 **Conclusion :** Ce design transforme le serveur en un moteur de flux asynchrone où la latence est un paramètre géré, et non une contrainte subie. L'utilisateur bénéficie d'une interface instantanée (via le mode Draft) tandis que l'infrastructure reste stable et froide (via le Dispatcher adaptatif).
+
+_Modifié le 27 juin 2026_

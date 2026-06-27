@@ -125,9 +125,17 @@ pub struct Dispatcher<P: Projection, const MAX: usize, const WORDS: usize> {
     /// dérivée de P::packfile_path() — voir note de module.
     packfile_key: &'static str,
     _phantom:     std::marker::PhantomData<P>,
+    /// Singleton partagé entre TOUTES les instances de Dispatcher (tous
+    /// packfile_key confondus) — créé une seule fois en amont (main.rs),
+    /// cloné (jamais reconstruit) à chaque `Dispatcher::new()`. Régule le
+    /// risque de dirty-page storm, qui est inter-shard : un seul Dispatcher
+    /// n'a aucun parallélisme interne, mais N shards en tick simultané
+    /// saturent le même disque. Phase 4.3.
+    io_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WORDS> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         collector:    &'static Collector<MAX, WORDS>,
         notify:       Arc<Notify>,
@@ -136,6 +144,7 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
         total_cap:    usize,
         registry:     Arc<LiveRegistry>,
         packfile_key: &'static str,
+        io_semaphore: Arc<tokio::sync::Semaphore>,
     ) -> Self {
         Self {
             collector,
@@ -146,6 +155,7 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
             registry,
             packfile_key,
             _phantom: std::marker::PhantomData,
+            io_semaphore,
         }
     }
 
@@ -175,6 +185,7 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
                 self.total_cap,
                 self.packfile_key,
                 &self.registry,
+                &self.io_semaphore,
             )
             .await
             {
