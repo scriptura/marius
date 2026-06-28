@@ -41,9 +41,9 @@ Le manifeste (`manifest-reactive-projection.md`, révisé 22 juin 2026) pose le 
 | 7. Persistance (remplacement atomique) | `apply_merge_io_sync` : `merge_sweep` + `align8` + footer + `rename` (Phase 4) |
 | *(absente du manifeste)* | Servir : serveur Axum, Read Path (§7) |
 
-**Deux divergences entre le manifeste et le système réellement implémenté, à corriger dans le manifeste plutôt qu'à reproduire ici :**
-- Étape 5 : le manifeste décrit une extraction par `SELECT` Postgres. Le chemin réactif réel lit `store.bin` via `mmap` (`fetch_batch`, zéro-allocation) — `fetch_from_pg` (le vrai accès SQL) n'est utilisé que par `marius-dump`, hors cycle réactif.
-- Étape 6 : le manifeste décrit un rendu distribué sur tous les cœurs via Rayon. `BatchRenderer::render_batch` est strictement séquentiel (buffer unique réutilisé, par construction anti-allocation) — pas de parallélisme intra-batch dans le chemin réel actuel.
+**Deux divergences entre le manifeste et le système réellement implémenté, désormais corrigées dans le manifeste (révision du 28 juin 2026) :**
+- Étape 5 : le manifeste décrivait une extraction par `SELECT` Postgres. Le chemin réactif réel lit `store.bin` via `mmap` (`fetch_batch`, zéro-allocation) — `fetch_from_pg` (le vrai accès SQL) n'est utilisé que par `marius-dump`, hors cycle réactif.
+- Étape 6 : le manifeste décrivait un rendu distribué sur tous les cœurs via Rayon. `BatchRenderer::render_batch` est strictement séquentiel (buffer unique réutilisé, par construction anti-allocation) — la concurrence réelle est inter-shard (tâches Tokio), pas intra-lot.
 
 ---
 
