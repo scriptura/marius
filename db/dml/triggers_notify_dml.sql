@@ -37,7 +37,7 @@ AFTER INSERT OR UPDATE OR DELETE ON content.core
 FOR EACH ROW EXECUTE FUNCTION content.notify_core_change();
 
 -- ==============================================================================
--- commerce.product_core → canal 'product_core_updates'
+-- commerce.product_core → canal 'commerce_product_core_updates'
 -- PK : id
 -- ==============================================================================
 CREATE OR REPLACE FUNCTION commerce.notify_product_change()
@@ -48,7 +48,7 @@ SET search_path = commerce, pg_temp
 AS $$
 BEGIN
     PERFORM pg_notify(
-        'product_core_updates',
+        'commerce_product_core_updates',
         COALESCE(NEW.id, OLD.id)::text
     );
     RETURN COALESCE(NEW, OLD);
