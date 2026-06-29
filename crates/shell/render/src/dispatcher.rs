@@ -6,59 +6,33 @@
 // Le Collector<MAX, WORDS> reste dans le Core (marius-collector, zéro dépendance).
 // Le Dispatcher vit ici, dans le Shell, car il orchestre les I/O.
 //
-// ─── Modification Phase 4 — destruction de l'Append, câblage regenerate_and_swap ──
+// ─── Écriture (Phase 4, état résolu) ──────────────────────────────────────────
 //
-//   Diagnostic confirmé par lecture (handoff-render-shell-phase4.md) :
-//   l'ancien render_batch() ci-dessous ouvrait le packfile cible en mode
-//   OpenOptions::append, écrivait des fragments à la suite des précédents,
-//   et n'écrivait JAMAIS de footer/index. Deux violations cumulées, pas une :
-//     1. Append est incompatible avec le modèle mmap/ArcSwap (registry.rs,
-//        Phase 2) — un lecteur ayant mmap'd l'ancien footer ne voit jamais
-//        les octets appendés, et aucun mécanisme ne le notifie.
-//     2. Aucun footer n'étant jamais écrit, PackHtmlIndex::open() sur le
-//        résultat de cette fonction échouait systématiquement (fichier
-//        "trop court pour contenir un footer" dès qu'on cherche le footer
-//        aux 32 derniers octets, ou pire : magic invalide si le fichier
-//        dépassait 32B par coïncidence).
-//   render_batch() et son ouverture Append sont donc supprimés ici, pas
-//   corrigés — remplacés par un appel à regenerate_and_swap (regenerate.rs,
-//   nouveau ce fichier-ci), qui réécrit le packfile en entier dans un .tmp,
-//   fsync, rename atomique, puis bascule le LiveRegistry. Deux champs
-//   ajoutés à Dispatcher pour le rendre possible : `registry` (l'Arc cloné
-//   avant le tokio::spawn de ce Dispatcher, partagé avec la frontière Axum
-//   de lecture — main.rs) et `packfile_key` (la clé LiveRegistry/
-//   packfile_path_for ciblée par CE Dispatcher ; absente de l'ancien code,
-//   qui dérivait son chemin de P::packfile_path() — un chemin fixe par type
-//   de Projection, jamais le contrat clé→chemin de packfile_path_for()
-//   qu'utilisent ROUTE_TABLE/LiveRegistry/cold_start. Les deux schémas
-//   d'adressage ne sont pas interchangeables silencieusement : un
-//   Dispatcher doit désormais cibler explicitement la même clé que la
-//   RouteEntry qui sert ses données en lecture).
+//   run() ne fait jamais d'écriture directe : chaque tick délègue à
+//   regenerate_and_swap (regenerate.rs), qui réalise fetch_batch par chunk,
+//   merge_sweep, écriture .tmp + fsync + rename atomique, puis
+//   LiveRegistry::store(). Compatible par construction avec le modèle
+//   mmap/ArcSwap de registry.rs (Phase 2) — aucune écriture en place,
+//   aucun footer manquant.
 //
-//   Second changement structurel, conséquence directe du premier : l'appel
-//   à P::fetch_batch() qui précédait render_batch() dans run() est
-//   supprimé — regenerate_and_swap effectue son propre fetch_batch, par
-//   chunk, en interne (regenerate.rs). Le conserver ici aurait dupliqué la
-//   requête SQL sans jamais consommer son résultat (`records` devenait mort
-//   après ce changement) — pas un oubli, une simplification nécessaire.
+//   Deux champs portent ce câblage : `registry` (Arc partagé avec la
+//   frontière Axum de lecture, main.rs — cloné avant le tokio::spawn de ce
+//   Dispatcher, jamais reconstruit) et `packfile_key` (clé
+//   LiveRegistry/packfile_path_for ciblée par CE Dispatcher — doit
+//   correspondre exactement à la RouteEntry qui sert ces mêmes données en
+//   lecture ; pas dérivée de P::packfile_path(), qui n'est pas ce contrat
+//   d'adressage).
 //
-//   ids.sort_unstable() ajouté avant l'appel : précondition du format
-//   on-disk (spec §3, "index trié par id ASC", non vérifiée par le format
-//   lui-même). Défense explicite plutôt que suppposée héritée de l'ordre
-//   d'itération interne de Collector::flush() — jamais lu (marius-collector
-//   non fourni à cette session, cf. handoff "Inconnue critique").
+//   Sémantique de Collector::flush() : résolue et testée depuis
+//   regenerate.rs (untouched_entities_survive_successive_incremental_merges_then_delete).
+//   flush() retourne l'ensemble complet des ids de la cible, pas un delta —
+//   regenerate_and_swap réécrit donc le packfile en entier à chaque appel,
+//   par construction, et non par fusion incrémentale.
 //
-//   Point signalé, non résolu ici (hors périmètre de cette roadmap,
-//   roadmap "Hors périmètre" — agnosticisme d'invalidation voulu) :
-//   regenerate_and_swap réécrit tout le packfile depuis `ids` à chaque
-//   appel, jamais une fusion incrémentale. Si Collector::flush() retourne
-//   un delta plutôt que l'ensemble complet des ids de cette cible, chaque
-//   régénération ferait disparaître du packfile les ids non touchés à ce
-//   tick. Ce fichier préserve la sémantique préexistante de flush() telle
-//   que l'ancien code l'utilisait (passage direct des ids retournés) —
-//   remplacement du mécanisme d'écriture, pas redéfinition de ce que le
-//   Collector accumule. À confirmer ou arbitrer une fois marius-collector
-//   lu.
+//   ids.sort_unstable() avant l'appel : précondition du format on-disk
+//   (spec §3, "index trié par id ASC", non vérifiée par le format
+//   lui-même) — défense explicite, pas une supposition héritée de l'ordre
+//   d'itération interne de Collector::flush().
 //
 // ─── Séparation async / sync (inchangée) ──────────────────────────────────────
 //
@@ -82,6 +56,15 @@ use tokio::time::interval;
 use marius_collector::Collector;
 use marius_projection::Projection;
 
+/// Correction Phase 5.1 (impasse mécanique signalée, pas une modification de
+/// contrat) : `Clone, Copy` ajoutés ici — absents jusqu'à présent. Sans cela,
+/// `SHARDS[i].config` (table de configuration unifiée, main.rs) ne peut pas
+/// être lu par valeur : un champ derrière une référence `'static` (`SHARDS:
+/// &'static [ShardMetadata]`) ne peut pas être déplacé hors de son
+/// emplacement sans `Copy`. Tous les champs sont déjà `Copy` (`Duration`,
+/// `usize`) — la dérivation est donc gratuite (aucune allocation, aucune
+/// indirection ajoutée) et n'altère aucune sémantique existante.
+#[derive(Clone, Copy)]
 pub struct DispatcherConfig {
     pub tick_default:    Duration,
     pub tick_min:        Duration,

@@ -1,30 +1,67 @@
 // =============================================================================
 // crates/shell/server/src/main.rs
 //
-// Bootstrap — frontière réseau Axum/Tokio. specification-marius-render-shell.md
-// §4/§5, roadmap-marius-render-shell.md Phase 3.
+// Bootstrap — frontière réseau Axum/Tokio + ressources/Dispatchers réactifs.
+// specification-phase5-orchestration-main.md, Phase 5.1.
 //
-// Remplacement complet du prototype naïf précédent (ServeDir + Dispatcher +
-// PgListener écrivant un fichier par entité) — structurellement obsolète vis-
-// à-vis d'ADR-008 et des invariants posés en Phase 1/2 (un packfile est un
-// blob unique, jamais un fichier par id). Arbitrage de session : la boucle
-// d'écriture réactive (PgListener/Dispatcher/regenerate_and_swap) repasse en
-// Phase 4 — hors périmètre ici. Ce fichier ne contient QUE la frontière de
-// lecture : ROUTE_TABLE, cold_start(), enregistrement des routes Axum.
+// Historique : Phase 3 a posé la frontière de lecture pure (ROUTE_TABLE,
+// cold_start, build_router/axum::serve) — composée ici à l'identique (spec
+// §7), aucune modification du Read Path.
 //
-// ROUTE_TABLE ci-dessous est un STUB écrit à la main pour cette session — le
-// compilateur de templates de pages (FragmentRef, ADR-008 §4.2-§4.5) qui la
-// générerait n'existe pas et n'est pas improvisé ici (hors périmètre).
+// Phase 5.1 (cette session) ajoute :
+//   - Ressources globales : PgPool, Arc<Semaphore> (I/O), Arc<LiveRegistry>
+//     partagé (spec §4).
+//   - Table de configuration unifiée par shard, non générique : SHARDS,
+//     ShardMetadata, DEFAULT_DISPATCHER_CONFIG (spec §3).
+//   - Construction explicite des deux Dispatcher (content_core,
+//     commerce_product_core — bloc par shard, pas de boucle générique :
+//     monomorphisation), lancés en tokio::spawn nu.
+//
+// Hors périmètre ici, explicitement (sessions séparées) :
+//   - PgListener / LISTEN-NOTIFY : Phase 5.2. Les deux Collector restent donc
+//     vides toute cette session, par construction — comportement attendu,
+//     pas une régression à chasser.
+//   - Supervision JoinSet / tokio::select! / process::exit fail-fast : Phase
+//     5.3. tokio::spawn ici est volontairement non supervisé.
+//
+// ROUTE_TABLE reste le STUB écrit à la main des phases précédentes (le
+// compilateur de templates FragmentRef n'existe pas encore, hors périmètre).
 // =============================================================================
 
 mod handlers;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::routing::get;
 use axum::{Extension, Router};
+use tokio::sync::{Notify, Semaphore};
 
-use marius_render::{IdSource, LiveRegistry, RouteEntry};
+// Point de vérification à la compilation (en plus du Vecteur C ci-dessous) :
+// Dispatcher/DispatcherConfig sont assumés réexportés à la racine de
+// marius_render, par analogie avec IdSource/LiveRegistry/RouteEntry (déjà
+// confirmés à cette racine par le main.rs Phase 3). Si marius_render les
+// expose plutôt via un sous-module (`marius_render::dispatcher::Dispatcher`),
+// cargo build échoue ici, explicitement, sur cet import — à corriger en
+// remplaçant ce chemin par le chemin réel, rien d'autre n'en dépend.
+use marius_render::{Dispatcher, DispatcherConfig, IdSource, LiveRegistry, RouteEntry};
+
+// Vecteur C (handoff) : noms du shard `commerce_product_core` assumés par
+// convention isomorphique stricte avec `content_core` (seule paire confirmée
+// littéralement, cf. spec §3) — jamais vus écrits dans marius_schema généré.
+// Si la forge a produit un nom différent, cargo build échoue explicitement
+// sur cet import, pas un bug silencieux à l'exécution.
+use marius_schema::{
+    CommerceProductCoreProjection, ContentCoreProjection, COMMERCE_PRODUCT_CORE_COLLECTOR,
+    COMMERCE_PRODUCT_CORE_TOTAL_CAP, CONTENT_CORE_COLLECTOR, CONTENT_CORE_TOTAL_CAP,
+};
+
+// Phase 5.2 : seul InsertResult est nommé ici. Collector<MAX, WORDS> reste
+// non importé — chaque branche de run_pg_listener référence directement
+// CONTENT_CORE_COLLECTOR / COMMERCE_PRODUCT_CORE_COLLECTOR (déjà statiques,
+// déjà importés ci-dessus), jamais le type générique lui-même : aucun site
+// n'a besoin de nommer Collector<_, _> pour appeler .insert().
+use marius_collector::InsertResult;
 
 /// Table de routage AOT — écrite à la main (cf. en-tête de fichier).
 /// 3 entrées : suffisant pour le Jalon 3 ("2-3 packfiles synthétiques"),
@@ -47,6 +84,53 @@ static ROUTE_TABLE: &[RouteEntry] = &[
     },
 ];
 
+/// Configuration par défaut des Dispatcher — littéral explicite, pas
+/// `DispatcherConfig::default()` : `Default::default()` n'est pas garanti
+/// const-évaluable, alors que `Duration::from_millis`/`from_secs` le sont
+/// (handoff Vecteur B, spec §3). `const`, pas `static` : un `const` est
+/// réinjecté par valeur à chaque site d'usage (`SHARDS` ci-dessous), aucune
+/// indirection, aucune allocation.
+const DEFAULT_DISPATCHER_CONFIG: DispatcherConfig = DispatcherConfig {
+    tick_default:    Duration::from_millis(500),
+    tick_min:        Duration::from_millis(100),
+    tick_max:        Duration::from_secs(2),
+    threshold_flush: 128,
+    threshold_low:   10,
+    threshold_high:  100,
+    render_budget:   Duration::from_millis(200),
+};
+
+/// Faits non génériques par shard, rassemblés en un seul endroit pour qu'ils
+/// ne dérivent jamais l'un de l'autre (spec §3). Le type concret
+/// (`Projection`, `Collector<MAX,WORDS>`) et `total_cap` restent référencés
+/// par leur nom généré à chaque site d'usage ci-dessous : ils ne sont pas des
+/// valeurs portables dans une structure non générique — `Dispatcher` est
+/// monomorphisé, pas itéré dynamiquement (spec §3, pas de boucle ici).
+struct ShardMetadata {
+    packfile_key: &'static str,
+    /// Nom de canal LISTEN réel. Lu par `run_pg_listener` (Phase 5.2,
+    /// cette session) : source unique pour `listen_all` et pour le
+    /// routage par canal dans la boucle de réception.
+    channel: &'static str,
+    config: DispatcherConfig,
+}
+
+static SHARDS: &[ShardMetadata] = &[
+    ShardMetadata {
+        packfile_key: "content_core",
+        channel:      "content_core_updates",
+        config:       DEFAULT_DISPATCHER_CONFIG,
+    },
+    ShardMetadata {
+        packfile_key: "commerce_product_core",
+        // Arbitrage architecte (cette session) : trigger DB déjà migré vers
+        // la convention symétrique {packfile_key}_updates (spec §10, acté).
+        // L'ancien nom "product_core_updates" (spec §2) n'est plus valide.
+        channel:      "commerce_product_core_updates",
+        config:       DEFAULT_DISPATCHER_CONFIG,
+    },
+];
+
 /// Construit le Router à partir d'une table de routage et d'un registre déjà
 /// initialisé — factorisé pour être réutilisé tel quel par les tests
 /// d'intégration ci-dessous (Jalon 3), sans dupliquer la logique de montage.
@@ -65,23 +149,193 @@ fn build_router(route_table: &'static [RouteEntry], registry: Arc<LiveRegistry>)
     router.with_state(registry)
 }
 
+/// PgListener réactif (Phase 5.2). Boucle de reconnexion externe (invariant
+/// de disponibilité, pas une optimisation) + boucle de réception interne.
+/// Hors périmètre cette session : supervision JoinSet/select!/process::exit
+/// (Phase 5.3) — tokio::spawn nu, comme les deux Dispatcher depuis 5.1.
+///
+/// Pas de match unifié sur les deux branches de canal (arbitrage acté) :
+/// CONTENT_CORE_COLLECTOR et COMMERCE_PRODUCT_CORE_COLLECTOR sont deux types
+/// Collector<MAX, WORDS> distincts (monomorphisation) — un retour de branche
+/// commun échouerait à la compilation (E0308) sans dyn, exclu explicitement.
+/// Chaque branche reste donc autonome : routage, insert(), notify_one()
+/// inline, parsing du payload dupliqué (4 lignes/branche, accepté — même
+/// discipline que la construction des Dispatcher en 5.1).
+async fn run_pg_listener(
+    database_url: String,
+    content_core_notify: Arc<Notify>,
+    commerce_product_core_notify: Arc<Notify>,
+) {
+    let mut backoff = Duration::from_millis(500);
+    const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+    loop {
+        let mut listener = match sqlx::postgres::PgListener::connect(&database_url).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[pg_listener] connexion échouée: {e} — retry dans {backoff:?}");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+        };
+
+        let channels: Vec<&str> = SHARDS.iter().map(|s| s.channel).collect();
+        if let Err(e) = listener.listen_all(channels).await {
+            eprintln!("[pg_listener] listen_all échoué: {e} — retry dans {backoff:?}");
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+            continue;
+        }
+        backoff = Duration::from_millis(500); // reset après succès
+        eprintln!("[pg_listener] abonné — {} canal(aux)", SHARDS.len());
+
+        loop {
+            match listener.recv().await {
+                Ok(notification) => match notification.channel() {
+                    c if c == SHARDS[0].channel => {
+                        let Ok(id) = notification.payload().parse::<i64>() else {
+                            eprintln!(
+                                "[pg_listener] payload non numérique sur {}: {:?}",
+                                notification.channel(),
+                                notification.payload()
+                            );
+                            continue;
+                        };
+                        if CONTENT_CORE_COLLECTOR.insert(id, SHARDS[0].config.threshold_flush)
+                            == InsertResult::ThresholdReached
+                        {
+                            content_core_notify.notify_one();
+                        }
+                    }
+                    c if c == SHARDS[1].channel => {
+                        let Ok(id) = notification.payload().parse::<i64>() else {
+                            eprintln!(
+                                "[pg_listener] payload non numérique sur {}: {:?}",
+                                notification.channel(),
+                                notification.payload()
+                            );
+                            continue;
+                        };
+                        if COMMERCE_PRODUCT_CORE_COLLECTOR
+                            .insert(id, SHARDS[1].config.threshold_flush)
+                            == InsertResult::ThresholdReached
+                        {
+                            commerce_product_core_notify.notify_one();
+                        }
+                    }
+                    other => {
+                        eprintln!("[pg_listener] canal inattendu: {other}");
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[pg_listener] connexion perdue: {e} — reconstruction");
+                    break; // ressort vers la boucle externe : reconnexion + ré-abonnement complets
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ── Ressources globales (spec §4) ───────────────────────────────────────
+    let database_url = std::env::var("DATABASE_URL")?;
+    let pool = sqlx::PgPool::connect(&database_url).await?;
+    eprintln!("[marius-server] PgPool connecté"); // jamais l'URL en clair (identifiants)
+
+    let io_permits: usize = std::env::var("MARIUS_IO_PERMITS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4);
+    let io_semaphore = Arc::new(Semaphore::new(io_permits));
+    eprintln!("[marius-server] Arc<Semaphore> initialisé — {io_permits} permis I/O");
+
     // Cold start : mmap eager de chaque index connu, fd ouverts — tout le
     // coût d'initialisation payé une fois, avant d'accepter la première
-    // connexion (spec §5). Échec fatal si un packfile référencé par
+    // connexion (spec §5/Phase 3). Échec fatal si un packfile référencé par
     // ROUTE_TABLE est introuvable — pas de dégradation silencieuse.
-    let registry = LiveRegistry::cold_start(ROUTE_TABLE)?;
-    println!(
+    // Arc construit une seule fois ici, jamais reconstruit au point d'appel
+    // (handoff : registre partagé entre build_router et les Dispatcher).
+    let registry = Arc::new(LiveRegistry::cold_start(ROUTE_TABLE)?);
+    eprintln!(
         "[marius-server] cold_start réussi — {} route(s) enregistrée(s)",
         ROUTE_TABLE.len()
     );
 
-    let app = build_router(ROUTE_TABLE, Arc::new(registry));
+    // ── Dispatcher — shard content_core ─────────────────────────────────────
+    // Un seul Arc<Notify> par shard, jamais reconstruit. Phase 5.2 lui donne
+    // un second consommateur (run_pg_listener, même Arc) : .clone() ici,
+    // binding d'origine déplacé plus bas dans le spawn du listener (dernier
+    // usage).
+    let content_core_notify: Arc<Notify> = Arc::new(Notify::new());
+
+    // Turbofish explicite sur P (`ContentCoreProjection`) : aucun paramètre
+    // de Dispatcher::new ne porte ce type (PhantomData<P> est interne, pas
+    // un argument), donc rien ne permet à l'inférence de le déduire sans
+    // annotation — sans ça, "type annotations needed" (E0282). MAX/WORDS
+    // restent en `_` : déduits sans ambiguïté depuis le type concret de
+    // `&CONTENT_CORE_COLLECTOR`.
+    let content_core_dispatcher = Dispatcher::<ContentCoreProjection, _, _>::new(
+        &CONTENT_CORE_COLLECTOR,
+        content_core_notify.clone(),
+        pool.clone(),
+        SHARDS[0].config,
+        CONTENT_CORE_TOTAL_CAP,
+        registry.clone(),
+        SHARDS[0].packfile_key,
+        io_semaphore.clone(),
+    );
+    tokio::spawn(content_core_dispatcher.run());
+    eprintln!(
+        "[marius-server] Dispatcher démarré — shard \"{}\"",
+        SHARDS[0].packfile_key
+    );
+
+    // ── Dispatcher — shard commerce_product_core ────────────────────────────
+    // Dernier usage de `pool` et de `io_semaphore` dans cette fonction :
+    // déplacés (pas de .clone()) — un seul clone de chaque ressource
+    // partagée suffit pour deux consommateurs (move sur le second).
+    // `commerce_product_core_notify` suit la même règle que content_core_notify
+    // ci-dessus : .clone() ici (second consommateur = run_pg_listener),
+    // binding d'origine déplacé plus bas.
+    let commerce_product_core_notify: Arc<Notify> = Arc::new(Notify::new());
+
+    let commerce_product_core_dispatcher = Dispatcher::<CommerceProductCoreProjection, _, _>::new(
+        &COMMERCE_PRODUCT_CORE_COLLECTOR,
+        commerce_product_core_notify.clone(),
+        pool,
+        SHARDS[1].config,
+        COMMERCE_PRODUCT_CORE_TOTAL_CAP,
+        registry.clone(),
+        SHARDS[1].packfile_key,
+        io_semaphore,
+    );
+    tokio::spawn(commerce_product_core_dispatcher.run());
+    eprintln!(
+        "[marius-server] Dispatcher démarré — shard \"{}\"",
+        SHARDS[1].packfile_key
+    );
+
+    // ── PgListener (spec §5, Phase 5.2) ─────────────────────────────────────
+    // database_url et les deux Arc<Notify> d'origine : derniers usages,
+    // déplacés ici sans .clone() (Correctif 1 ci-dessus a déjà couvert le
+    // second consommateur côté Dispatcher). tokio::spawn nu — supervision
+    // hors périmètre (Phase 5.3).
+    tokio::spawn(run_pg_listener(
+        database_url,
+        content_core_notify,
+        commerce_product_core_notify,
+    ));
+    eprintln!("[marius-server] PgListener démarré — backoff 500ms→30s");
+
+    // ── Read Path (spec §7, inchangé) ───────────────────────────────────────
+    // Dernier usage de `registry` : déplacé, pas cloné.
+    let app = build_router(ROUTE_TABLE, registry);
 
     let bind_addr = std::env::var("MARIUS_BIND").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    println!("[marius-server] HTTP sur http://{bind_addr}");
+    eprintln!("[marius-server] HTTP sur http://{bind_addr}");
 
     axum::serve(listener, app).await?;
     Ok(())
@@ -97,6 +351,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // uniquement) pour rester indépendant des autres tests de ce binaire et
 // d'éventuelles exécutions parallèles (comportement par défaut de
 // `cargo test`).
+//
+// Inchangés par Phase 5.1 — n'exercent que build_router/cold_start, jamais
+// les Dispatcher (aucune dépendance Postgres dans ce module de test).
 // =============================================================================
 
 #[cfg(test)]
