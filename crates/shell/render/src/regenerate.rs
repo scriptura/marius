@@ -48,7 +48,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufWriter};
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -56,7 +56,7 @@ use std::time::Instant;
 use marius_projection::Projection;
 
 use crate::batch_renderer::BatchRenderer;
-use crate::pack_html_format::{PackfileEntry, PackfileFooter};
+use crate::pack_html_format::{write_packfile_footer, PackfileEntry, PackfileFooter};
 use crate::pack_html_index::PackHtmlIndex;
 use crate::registry::{packfile_path_for, LiveRegistry};
 use crate::sweep::{merge_sweep, DeltaBatch, DeltaEntry};
@@ -372,16 +372,107 @@ fn apply_merge_io_sync(
 }
 
 // =============================================================================
+// Provisioning idempotent — specification-provisioning-projection.md,
+// handoff-provisioning-projection.md §2.
+//
+// Couvre la branche "absent" de la classification à trois (spec §1) : un
+// packfile jamais matérialisé n'est pas une incohérence, c'est l'état
+// initial légitime d'un espace de projection. Voisin direct d'
+// apply_merge_io_sync ci-dessus, même fichier responsable de la durabilité
+// disque (spec §2) — emplacement tranché ici, pas pack_html_format.rs : la
+// cohésion du module (chemin tmp/final, idiome fsync+rename, accès à
+// packfile_path_for déjà importé) ne justifiait aucun déplacement.
+//
+// Délègue entièrement la sérialisation à write_packfile_footer
+// (pack_html_format.rs, seule source de vérité du format on-disk) — aucun
+// second site n'écrit un footer. cold_start() reste strictement inchangé :
+// au moment où il s'exécute, ensure_provisioned garantit déjà que tout
+// packfile_key référencé existe sous une forme au moins valide-vide ; la
+// distinction absent/corrompu n'a donc plus besoin d'être faite dans
+// cold_start lui-même (spec §5).
+// =============================================================================
+
+/// Issue d'un appel à `ensure_provisioned` — distingue le no-op (cas
+/// dominant en régime établi, packfiles déjà présents) du provisioning
+/// effectif (premier démarrage, ou `artifacts/` purgé). Ne porte aucune
+/// autre information : la validité d'un fichier déjà présent n'est jamais
+/// qualifiée ici, c'est le rôle de `cold_start`/`PackHtmlIndex::open` en
+/// aval — pas celui de cette fonction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvisionOutcome {
+    /// Le packfile existait déjà — aucune écriture, quel que soit son
+    /// contenu (même invalide).
+    AlreadyPresent,
+    /// Le packfile était absent (`io::ErrorKind::NotFound`) : un packfile
+    /// vide mais valide (`entry_count: 0, index_len: 0`) a été écrit
+    /// atomiquement à sa place.
+    Provisioned,
+}
+
+/// Corps synchrone — ne connaît qu'un chemin, pas de `PgPool` ni de
+/// `LiveRegistry` (découplage requis par le séquencement au boot, spec §5 :
+/// le provisioning précède `cold_start`, qui seul produit le
+/// `LiveRegistry` — une dépendance dans l'autre sens serait circulaire).
+/// Même idiome d'écriture atomique que `apply_merge_io_sync` ci-dessus
+/// (tmp + fsync + rename), réduit au cas vierge : blob vide, index vide.
+/// `write_packfile_footer(writer, 0, &[])` est un cas générique de la
+/// primitive déjà existante, pas une branche ajoutée pour l'occasion (spec
+/// §4/§7 point 1).
+fn ensure_provisioned_sync(packfile_key: &'static str) -> io::Result<ProvisionOutcome> {
+    let final_path = packfile_path_for(packfile_key);
+    match fs::metadata(&final_path) {
+        Ok(_) => Ok(ProvisionOutcome::AlreadyPresent),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let tmp_path = final_path.with_extension("tmp");
+            if let Some(parent) = tmp_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+            let mut writer = BufWriter::new(file);
+            write_packfile_footer(&mut writer, 0, &[])?; // blob vide, index vide
+            writer.flush()?;
+            writer.into_inner().map_err(io::Error::other)?.sync_all()?;
+            fs::rename(tmp_path, final_path)?;
+            Ok(ProvisionOutcome::Provisioned)
+        }
+        Err(e) => Err(e), // tout le reste reste fatal — corruption, permission, etc.
+    }
+}
+
+/// Point d'appel async — seule fonction visible depuis `main.rs`. Idempotent :
+/// sans effet si le packfile existe déjà, quel que soit son contenu —
+/// `cold_start()` qualifiera sa validité ensuite, ce n'est pas le rôle de
+/// cette fonction. N'écrit jamais le format directement : délègue
+/// entièrement à `write_packfile_footer`, seule source de vérité du format
+/// on-disk.
+///
+/// `spawn_blocking` inconditionnel (spec §7 point 2, arbitrage handoff
+/// point 5) : même discipline que les deux autres sites du système qui
+/// touchent un appel système bloquant en contexte async (write path normal
+/// via `apply_merge_io_sync` ci-dessus ; read path via `deliver`,
+/// handlers.rs). La règle ne dépend pas du contexte de contention au moment
+/// de l'appel — elle est inconditionnelle dès qu'un appel système bloquant
+/// est en jeu, même si, comme ici, rien ne sert encore au moment de son
+/// exécution.
+pub async fn ensure_provisioned(packfile_key: &'static str) -> io::Result<ProvisionOutcome> {
+    tokio::task::spawn_blocking(move || ensure_provisioned_sync(packfile_key))
+        .await
+        .map_err(io::Error::other)?
+}
+
+// =============================================================================
 // Tests — Phase 4.2
 // =============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pack_html_format::write_packfile_footer;
     use arc_swap::ArcSwap;
     use std::collections::HashMap;
-    use std::io::Write;
     use std::os::unix::fs::FileExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -786,5 +877,104 @@ mod tests {
         );
 
         cleanup(&packfile_path_for(key));
+    }
+
+    // =========================================================================
+    // Tests — ensure_provisioned (provisioning idempotent)
+    //
+    // specification-provisioning-projection.md §8 / handoff-provisioning-
+    // projection.md, mission point 4, premier niveau ("tests unitaires de
+    // ensure_provisioned"). Le second niveau (test de bout en bout,
+    // sous-processus réel, environnement vierge complet) vit dans
+    // crates/shell/server/tests/phase5_3_supervision.rs, à la suite des
+    // tests de supervision Phase 5.3 — emplacement acté par le handoff
+    // (point 2), convention déjà établie de séparation sous-processus/
+    // in-process.
+    // =========================================================================
+
+    #[tokio::test]
+    async fn ensure_provisioned_on_missing_path_writes_valid_empty_packfile() {
+        let key = unique_test_key("provision_missing");
+        let path = packfile_path_for(key);
+        assert!(
+            !path.exists(),
+            "précondition : aucun fichier ne doit préexister à ce chemin"
+        );
+
+        let outcome = ensure_provisioned(key)
+            .await
+            .expect("ensure_provisioned doit réussir sur un chemin absent");
+        assert_eq!(outcome, ProvisionOutcome::Provisioned);
+
+        // Preuve par le lecteur réel, pas par l'intuition de l'écrivain
+        // (handoff mission point 4) : PackHtmlIndex::open() doit accepter
+        // le fichier produit, avec entry_count() == 0.
+        let index = PackHtmlIndex::open(&path)
+            .expect("le fichier provisionné doit être un packfile valide selon le lecteur réel");
+        assert_eq!(index.entry_count(), 0, "un packfile provisionné doit être vide");
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn ensure_provisioned_on_present_path_never_overwrites_even_if_invalid() {
+        let key = unique_test_key("provision_present");
+        let path = packfile_path_for(key);
+        fs::create_dir_all(
+            path.parent()
+                .expect("packfile_path_for retourne toujours un chemin avec parent"),
+        )
+        .expect("création du répertoire artifacts/ de test");
+
+        // Fixture délibérément invalide — ensure_provisioned ne doit jamais
+        // juger de la validité d'un fichier déjà présent, seulement de sa
+        // présence (spec §1, ligne "présent, invalide" : ce n'est pas son
+        // rôle, c'est celui de cold_start()/PackHtmlIndex::open en aval).
+        fs::write(&path, b"contenu arbitraire, pas un packfile bien forme")
+            .expect("écriture de la fixture invalide");
+        let content_before = fs::read(&path).expect("lecture de la fixture avant l'appel");
+
+        let outcome = ensure_provisioned(key)
+            .await
+            .expect("ensure_provisioned doit réussir (no-op) sur un chemin déjà présent");
+        assert_eq!(outcome, ProvisionOutcome::AlreadyPresent);
+
+        let content_after = fs::read(&path).expect("lecture de la fixture après l'appel");
+        assert_eq!(
+            content_before, content_after,
+            "un fichier déjà présent, même invalide, ne doit jamais être écrasé"
+        );
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn ensure_provisioned_is_idempotent_across_two_successive_calls() {
+        let key = unique_test_key("provision_idempotent");
+        let path = packfile_path_for(key);
+        assert!(!path.exists(), "précondition : chemin initialement absent");
+
+        let first = ensure_provisioned(key)
+            .await
+            .expect("le premier appel doit réussir");
+        assert_eq!(first, ProvisionOutcome::Provisioned);
+        let content_after_first = fs::read(&path).expect("lecture après le premier appel");
+
+        let second = ensure_provisioned(key)
+            .await
+            .expect("le second appel doit réussir");
+        assert_eq!(
+            second,
+            ProvisionOutcome::AlreadyPresent,
+            "le second appel doit constater la présence créée par le premier, pas réécrire"
+        );
+        let content_after_second = fs::read(&path).expect("lecture après le second appel");
+
+        assert_eq!(
+            content_after_first, content_after_second,
+            "le fichier ne doit pas changer entre les deux appels"
+        );
+
+        cleanup(&path);
     }
 }

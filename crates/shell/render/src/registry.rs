@@ -73,16 +73,36 @@ pub struct RouteEntry {
 
 /// Résout le chemin disque d'un packfile à partir de sa clé.
 ///
-/// Contrat fixé pour cette session — `specification-marius-render-shell.md`
-/// §5/§7 référence `packfile_path_for(...)` sans jamais la définir (vérifié
-/// par lecture, pas supposé absent). Convention simple et déterministe,
-/// relative au répertoire de travail du processus : `artifacts/{packfile_key}.bin`.
-/// Révisable en Phase 4 si `regenerate_and_swap` impose une contrainte
-/// différente (répertoire configurable, variable d'environnement) — ce
-/// n'est pas un point figé par cette session, seulement un contrat minimal
-/// immédiatement exploitable par `cold_start()` ci-dessous.
+/// Contrat de base inchangé depuis sa définition initiale
+/// (`specification-marius-render-shell.md` §5/§7) :
+/// `{base}/{packfile_key}.bin`, `base` valant `"artifacts"` par défaut,
+/// relatif au répertoire de travail du processus.
+///
+/// Indirection ajoutée (spec-provisioning-projection.md, handoff étape 1) :
+/// `base` est lu une seule fois depuis la variable d'environnement
+/// `MARIUS_ARTIFACTS_DIR` (`OnceLock`, même discipline DOD que
+/// `panic_on_first_tick`, Phase 5.3 — compute once, branche gratuite
+/// ensuite), suivant exactement le mécanisme déjà établi trois fois dans ce
+/// système (`MARIUS_DEBUG_PANIC_SHARD`, `MARIUS_BIND`, `MARIUS_IO_PERMITS`)
+/// — aucun second mécanisme de configuration introduit.
+///
+/// Comportement en production strictement inchangé : variable absente →
+/// `"artifacts"`, valeur de retour identique octet pour octet à
+/// l'implémentation d'origine, pour tout appelant existant (`cold_start`,
+/// voie d'écriture réactive, tests ci-dessous). Le `OnceLock` est sûr pour
+/// le test de bout en bout du provisioning (phase5_3_supervision.rs)
+/// précisément parce que celui-ci s'exécute en sous-processus — chaque
+/// sous-processus reçoit un `OnceLock` vierge, aucune contamination entre
+/// tests via une valeur mise en cache par un voisin du même binaire. Ne pas
+/// réutiliser ce mécanisme pour un test in-process qui ferait varier la
+/// variable plusieurs fois dans le même process : le cache piégerait un tel
+/// usage.
 pub fn packfile_path_for(packfile_key: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from("artifacts").join(format!("{packfile_key}.bin"))
+    static ARTIFACTS_DIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let base = ARTIFACTS_DIR.get_or_init(|| {
+        std::env::var("MARIUS_ARTIFACTS_DIR").unwrap_or_else(|_| "artifacts".to_string())
+    });
+    std::path::PathBuf::from(base).join(format!("{packfile_key}.bin"))
 }
 
 /// Registre vivant des index de packfiles HTML — un `ArcSwap<PackHtmlIndex>`

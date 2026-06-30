@@ -3,5 +3,6 @@
   <h2>{{ record.alternative_headline }}</h2>
   {% if record.is_readable %}
   <p class="body">{{ record.description }}</p>
+  {{ record.description }}
   {% endif %}
 </article>

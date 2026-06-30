@@ -169,3 +169,200 @@ async fn startup_order_does_not_lose_pending_signal() {
             .expect("la tâche en attente a paniqué");
     }
 }
+
+// -----------------------------------------------------------------------------
+// Test 3 — provisioning idempotent : démarrage de bout en bout sur un
+// environnement vierge (specification-provisioning-projection.md §8,
+// handoff-provisioning-projection.md, mission point 4, second niveau).
+// -----------------------------------------------------------------------------
+
+/// Envoie une requête HTTP/1.1 minimale sur `addr` et retourne le code de
+/// statut numérique de la ligne de réponse. Implémentation volontairement
+/// nue (`std::net::TcpStream`, pas `reqwest`) : ce test tourne en
+/// sous-processus synchrone (`#[test]`, pas de runtime Tokio dans le
+/// harnais), et la disponibilité de la feature `blocking` de `reqwest` dans
+/// les dev-dependencies du crate n'est pas confirmée — aucune raison
+/// d'introduire une dépendance incertaine pour trois octets de ligne de
+/// statut.
+fn http_get_status_code(addr: &str, path: &str) -> std::io::Result<u16> {
+    use std::io::{Read, Write};
+
+    let mut stream = std::net::TcpStream::connect(addr)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    )?;
+
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+    let text = String::from_utf8_lossy(&raw);
+
+    let status_line = text
+        .lines()
+        .next()
+        .ok_or_else(|| std::io::Error::other("réponse HTTP vide — aucune ligne de statut"))?;
+
+    // "HTTP/1.1 404 Not Found" → second champ, séparé par des espaces.
+    status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| {
+            std::io::Error::other(format!("ligne de statut HTTP non parseable: {status_line:?}"))
+        })
+}
+
+/// Démarre le binaire `marius` réel avec `MARIUS_ARTIFACTS_DIR` pointant
+/// vers un répertoire temporaire vide — aucun packfile ne préexiste pour
+/// aucune des trois entrées de ROUTE_TABLE. Preuve de bout en bout que :
+///
+///   1. le processus démarre jusqu'au bout sans l'erreur fatale
+///      `cold_start: échec ouverture packfile ... No such file or
+///      directory` qui motive cette spécification — observé par sondage
+///      HTTP actif, pas par lecture de code (même discipline que le test 1
+///      : observation externe du processus enfant) ;
+///   2. les trois entrées de ROUTE_TABLE ont été provisionnées sur disque ;
+///   3. une requête sur une route provisionnée mais vide ("/",
+///      pages_homepage, entry_count == 0) répond 404 — pas 500 — cf.
+///      spec-provisioning §8 : conséquence directe du format valide produit
+///      par ensure_provisioned, branche NOT_FOUND déjà existante de
+///      serve_route, zéro modification de handlers.rs.
+///
+/// Répertoire temporaire construit à la main (`std::env::temp_dir()` +
+/// suffixe pid/horloge), pas via `tempfile::tempdir()` : disponibilité de
+/// `tempfile` dans les dev-dependencies du crate non confirmée par lecture
+/// directe d'un `Cargo.toml` non fourni à cette session — même réserve que
+/// pour `reqwest::blocking` ci-dessus, résolue par une primitive standard
+/// déjà utilisée ailleurs dans ce système pour le même besoin
+/// (`unique_path`, regenerate.rs).
+///
+/// Port choisi par le harnais (bind-puis-drop d'un `TcpListener` éphémère),
+/// pas par le sous-processus : `MARIUS_BIND` impose un port exact connu
+/// d'avance, ce qui évite d'avoir à parser le port réel depuis la sortie
+/// standard du binaire enfant — `eprintln!("[marius-server] HTTP sur
+/// http://{bind_addr}")` n'imprime que la valeur fournie à `MARIUS_BIND`,
+/// jamais un port résolu dynamiquement si on lui passait ":0". Fenêtre de
+/// réutilisation de port théoriquement non nulle entre le drop de la sonde
+/// et le bind du sous-processus — acceptable en environnement de test
+/// isolé, compromis déjà accepté ailleurs dans ce système (`main.rs`,
+/// `spawn_test_server`, qui contourne le problème autrement en restant
+/// in-process).
+#[test]
+fn provisioning_on_empty_environment_starts_cleanly_and_serves_404() {
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        panic!(
+            "DATABASE_URL absent de l'environnement de test — prérequis bloquant \
+             (identique aux deux tests précédents) : instance Postgres accessible, \
+             migrations appliquées. Ce test n'exige en revanche AUCUN packfile \
+             préexistant sous artifacts/ — c'est précisément ce qu'il vérifie."
+        )
+    });
+
+    // Répertoire temporaire vide, dédié à ce test — isolation totale
+    // vis-à-vis des fixtures réelles sous artifacts/, garantie par
+    // construction via MARIUS_ARTIFACTS_DIR (handoff étape 1), sans
+    // déplacement ni sauvegarde de fichiers existants.
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("horloge système valide")
+        .as_nanos();
+    let artifacts_dir = std::env::temp_dir().join(format!(
+        "marius_provisioning_e2e_{}_{unique_suffix}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&artifacts_dir)
+        .expect("création du répertoire artifacts/ temporaire pour le test");
+    assert_eq!(
+        std::fs::read_dir(&artifacts_dir)
+            .expect("lecture du répertoire temporaire fraîchement créé")
+            .count(),
+        0,
+        "précondition : le répertoire temporaire doit être vide avant le démarrage du processus"
+    );
+
+    // Port choisi par le harnais — voir doc ci-dessus.
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind d'un port éphémère pour sonder un port libre");
+        probe.local_addr().expect("local_addr du port sondé").port()
+    };
+    let bind_addr = format!("127.0.0.1:{port}");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_marius"))
+        .env("DATABASE_URL", &database_url)
+        .env("MARIUS_BIND", &bind_addr)
+        .env("MARIUS_ARTIFACTS_DIR", &artifacts_dir)
+        .spawn()
+        .expect("échec du spawn du binaire marius (CARGO_BIN_EXE_marius)");
+
+    // Polling sur la disponibilité HTTP : le serveur n'émet aucun signal de
+    // readiness consommable autrement que par sondage actif — même
+    // discipline que le polling try_wait() du test 1, transposé à un socket
+    // plutôt qu'à un code de sortie. À chaque itération, vérifie aussi que
+    // le processus n'a pas terminé prématurément : un try_wait() positif
+    // avant la première réponse HTTP est un échec du provisioning à
+    // diagnostiquer immédiatement, pas un cas à confondre avec "pas encore
+    // prêt".
+    const POLL_INTERVAL: Duration = Duration::from_millis(50);
+    const POLL_TIMEOUT: Duration = Duration::from_secs(10);
+    let url_path = "/";
+
+    let start = Instant::now();
+    let status_code = loop {
+        if let Some(exit_status) = child.try_wait().expect("try_wait() a échoué") {
+            panic!(
+                "le processus marius s'est terminé prématurément ({exit_status:?}) avant \
+                 de répondre sur {bind_addr}{url_path} — provisioning probablement en \
+                 échec : vérifier que MARIUS_ARTIFACTS_DIR est bien lu par \
+                 packfile_path_for() et que ensure_provisioned() est bien câblé avant \
+                 cold_start() dans main.rs"
+            );
+        }
+
+        match http_get_status_code(&bind_addr, url_path) {
+            Ok(code) => break code,
+            // Connexion refusée : le serveur n'écoute pas encore — normal au
+            // tout début de la fenêtre de polling, pas une erreur en soi.
+            Err(_) => {}
+        }
+
+        if start.elapsed() >= POLL_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "aucune réponse HTTP sur {bind_addr}{url_path} dans la fenêtre de \
+                 {POLL_TIMEOUT:?} — le serveur n'a pas démarré jusqu'au bout \
+                 (provisioning bloqué, ou cold_start toujours fatal sur environnement \
+                 vierge)"
+            );
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    };
+
+    assert_eq!(
+        status_code, 404,
+        "GET / sur un packfile provisionné vide (pages_homepage, entry_count == 0) \
+         doit répondre 404 — pas 500, pas 200 : conséquence directe du format valide \
+         produit par ensure_provisioned, branche NOT_FOUND déjà existante de \
+         serve_route (spec-provisioning-projection.md §8)"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Les trois entrées de ROUTE_TABLE doivent avoir été provisionnées —
+    // preuve directe sur le système de fichiers, pas seulement déduite du
+    // succès du démarrage.
+    for key in ["commerce_product_core", "content_core", "pages_homepage"] {
+        let provisioned_path = artifacts_dir.join(format!("{key}.bin"));
+        assert!(
+            provisioned_path.exists(),
+            "le packfile \"{key}\" doit avoir été provisionné sous {} — absent \
+             après un démarrage réussi sur environnement vierge",
+            artifacts_dir.display()
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&artifacts_dir);
+}

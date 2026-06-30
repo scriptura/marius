@@ -28,6 +28,12 @@ pub use packfile_builder::PackfileBuilder;
 // `crate::BatchRenderer` déjà en place pour batch_renderer.
 pub use regenerate::regenerate_and_swap;
 
+// ensure_provisioned, ProvisionOutcome — même convention que
+// regenerate_and_swap ci-dessus (fonction/type principal d'un module,
+// ré-exporté à plat). main.rs l'appelle via marius_render::ensure_provisioned,
+// pas marius_render::regenerate::ensure_provisioned.
+pub use regenerate::{ensure_provisioned, ProvisionOutcome};
+
 // LiveRegistry, RouteEntry, IdSource, packfile_path_for : même convention que
 // BatchRenderer ci-dessus (type principal d'un module, ré-exporté à plat).
 // RouteEntry/IdSource/packfile_path_for ajoutés en Phase 3 — nécessaires dès

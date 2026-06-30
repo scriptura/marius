@@ -253,6 +253,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let io_semaphore = Arc::new(Semaphore::new(io_permits));
     eprintln!("[marius-server] Arc<Semaphore> initialisé — {io_permits} permis I/O");
 
+    // ── Provisioning de l'espace de projection (spec-provisioning-projection)
+    // Un environnement vierge (aucun fichier sous artifacts/) n'est pas une
+    // erreur : c'est l'état initial légitime d'un espace de projection pas
+    // encore matérialisé (spec-provisioning §1). Tout le reste — packfile
+    // présent mais corrompu — reste fatal via cold_start ci-dessous,
+    // inchangé : ensure_provisioned() ne fait que garantir qu'un fichier
+    // existe sous une forme au moins valide-vide, jamais qu'il est correct.
+    for route in ROUTE_TABLE {
+        match marius_render::ensure_provisioned(route.packfile_key).await? {
+            marius_render::ProvisionOutcome::Provisioned => eprintln!(
+                "[marius-server] espace de projection provisionné (vierge) — shard \"{}\"",
+                route.packfile_key
+            ),
+            marius_render::ProvisionOutcome::AlreadyPresent => {}
+        }
+    }
+
     // Cold start : mmap eager de chaque index connu, fd ouverts — tout le
     // coût d'initialisation payé une fois, avant d'accepter la première
     // connexion (spec §5/Phase 3). Échec fatal si un packfile référencé par
