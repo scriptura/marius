@@ -17,12 +17,14 @@
 //     commerce_product_core — bloc par shard, pas de boucle générique :
 //     monomorphisation), lancés en tokio::spawn nu.
 //
-// Hors périmètre ici, explicitement (sessions séparées) :
-//   - PgListener / LISTEN-NOTIFY : Phase 5.2. Les deux Collector restent donc
-//     vides toute cette session, par construction — comportement attendu,
-//     pas une régression à chasser.
-//   - Supervision JoinSet / tokio::select! / process::exit fail-fast : Phase
-//     5.3. tokio::spawn ici est volontairement non supervisé.
+// Phase 5.2 a ajouté le PgListener réactif (LISTEN/NOTIFY → Collector →
+// Notify), toujours en tokio::spawn nu à ce stade.
+//
+// Phase 5.3 (cette session) remplace les trois tokio::spawn nus (deux
+// Dispatcher + PgListener) par un JoinSet supervisé : tokio::select! entre
+// axum::serve et tasks.join_next(), fail-fast (process::exit(1)) sur toute
+// terminaison anormale d'une tâche supervisée — cf. fin de main().
+
 //
 // ROUTE_TABLE reste le STUB écrit à la main des phases précédentes (le
 // compilateur de templates FragmentRef n'existe pas encore, hors périmètre).
@@ -286,7 +288,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SHARDS[0].packfile_key,
         io_semaphore.clone(),
     );
-    tokio::spawn(content_core_dispatcher.run());
+    // ── Supervision fail-fast (spec §6, Phase 5.3) ──────────────────────────
+    // Les trois tâches ci-dessous (deux Dispatcher + PgListener) ne sont
+    // jamais censées se terminer normalement — cf. tokio::select! en fin de
+    // main() pour le traitement de toute terminaison comme un bug.
+    let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
+    tasks.spawn(content_core_dispatcher.run());
     eprintln!(
         "[marius-server] Dispatcher démarré — shard \"{}\"",
         SHARDS[0].packfile_key
@@ -311,7 +319,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SHARDS[1].packfile_key,
         io_semaphore,
     );
-    tokio::spawn(commerce_product_core_dispatcher.run());
+    tasks.spawn(commerce_product_core_dispatcher.run());
     eprintln!(
         "[marius-server] Dispatcher démarré — shard \"{}\"",
         SHARDS[1].packfile_key
@@ -320,9 +328,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── PgListener (spec §5, Phase 5.2) ─────────────────────────────────────
     // database_url et les deux Arc<Notify> d'origine : derniers usages,
     // déplacés ici sans .clone() (Correctif 1 ci-dessus a déjà couvert le
-    // second consommateur côté Dispatcher). tokio::spawn nu — supervision
-    // hors périmètre (Phase 5.3).
-    tokio::spawn(run_pg_listener(
+    // second consommateur côté Dispatcher). tasks.spawn (Phase 5.3) au lieu
+    // d'un tokio::spawn nu — même supervision fail-fast que les deux
+    // Dispatcher ci-dessus.
+    tasks.spawn(run_pg_listener(
         database_url,
         content_core_notify,
         commerce_product_core_notify,
@@ -337,7 +346,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     eprintln!("[marius-server] HTTP sur http://{bind_addr}");
 
-    axum::serve(listener, app).await?;
+    // ── Supervision fail-fast (spec §6, actée) ───────────────────────────────
+    // Aucune des trois tâches n'est censée se terminer normalement : run()
+    // boucle indéfiniment, run_pg_listener aussi (sa boucle de reconnexion
+    // est interne). Une terminaison, quelle qu'elle soit, est un bug — le
+    // processus entier s'arrête bruyamment plutôt que de continuer à servir
+    // des lectures avec un shard figé sans signal. Pas de redémarrage
+    // silencieux (cf. Arbitrage / Hors scope, handoff Phase 5.3).
+    tokio::select! {
+        result = axum::serve(listener, app) => {
+            result?;
+        }
+        Some(finished) = tasks.join_next() => {
+            match finished {
+                Ok(()) => eprintln!(
+                    "[supervisor] une tâche supervisée s'est arrêtée normalement \
+                     — ne devrait jamais arriver"
+                ),
+                Err(join_err) => eprintln!(
+                    "[supervisor] une tâche supervisée a paniqué: {join_err}"
+                ),
+            }
+            std::process::exit(1);
+        }
+    }
     Ok(())
 }
 

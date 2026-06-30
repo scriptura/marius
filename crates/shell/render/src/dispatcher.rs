@@ -143,6 +143,14 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
     }
 
     pub async fn run(self) {
+        // Phase 5.3 — point d'injection de test, lu une seule fois avant la
+        // boucle (zéro coût par tick). Absent en exploitation réelle (variable
+        // jamais positionnée) → comparaison toujours fausse, aucun overhead,
+        // aucun changement de comportement hors test.
+        let panic_on_first_tick = std::env::var("MARIUS_DEBUG_PANIC_SHARD")
+            .map(|target| target == self.packfile_key)
+            .unwrap_or(false);
+
         let mut current_tick = self.config.tick_default;
         let mut ticker       = interval(current_tick);
 
@@ -150,6 +158,13 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
             tokio::select! {
                 _ = ticker.tick()          => {}
                 _ = self.notify.notified() => {}
+            }
+
+            if panic_on_first_tick {
+                panic!(
+                    "[dispatcher] panic injecté par test (MARIUS_DEBUG_PANIC_SHARD=\"{}\")",
+                    self.packfile_key
+                );
             }
 
             let mut ids = self.collector.flush();
