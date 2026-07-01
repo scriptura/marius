@@ -22,3 +22,8 @@ sudo -u postgres psql -p 5433 -d marius -c "ANALYZE;"
 # Lecture de l'état de santé DOD/ECS
 sudo -u postgres psql -p 5433 -d marius -c "SELECT * FROM meta.v_master_health_audit;"
 ```
+
+```sql
+# Lancer le serveur
+cargo run --bin marius
+```
