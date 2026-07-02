@@ -89,3 +89,7 @@ Ce que Marius démontre, c'est qu'une autre voie existe. Pas pour tous les proje
 Cet espace n'est pas confortable. Il n'offre ni salaire, ni stabilité, ni reconnaissance immédiate. Mais il offre ce que le monde professionnel ne peut pas offrir : la possibilité de repenser entièrement un problème, et de poursuivre cette pensée jusqu'à ses conséquences ultimes, sans jamais avoir à la compromettre.
 
 Marius n'est pas un CMS. C'est une preuve. La preuve qu'il est encore possible, en 2026, de tout reprendre à zéro. À condition d'être libre. À condition d'oser ne pas savoir que c'est impossible.
+
+---
+
+_le 2 juillet 2026_
