@@ -70,12 +70,12 @@ use marius_collector::InsertResult;
 /// couvre les deux IdSource (PathParam, Fixed).
 static ROUTE_TABLE: &[RouteEntry] = &[
     RouteEntry {
-        pattern: "/produit/:id",
+        pattern: "/product/:id",
         packfile_key: "commerce_product_core",
         id_source: IdSource::PathParam("id"),
     },
     RouteEntry {
-        pattern: "/contenu/:id",
+        pattern: "/content/:id",
         packfile_key: "content_core",
         id_source: IdSource::PathParam("id"),
     },
