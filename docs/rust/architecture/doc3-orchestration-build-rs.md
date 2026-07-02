@@ -39,19 +39,19 @@ main()
          │
          ├─ [false] chemin Mode Fragment (INCHANGÉ)
          │     scan(&src)
-         │       → parse_tokens(spans) ──────────────┐
-         │                                            │
-         └─ [true]  chemin Mode Page (NOUVEAU)        │
-               read_template_file(parent_path)  (I/O) │
-               scan(&child_src) → parse_page_tokens ──┤ (Document 1)
-               scan(&parent_src) → parse_page_tokens ─┤ (Document 1)
-               vérifier parent.extends == None        │ (garde v1, §5)
-               arena.admit(child) → child_id           │
-               arena.admit(parent) → parent_id          │ (Document 2 §2)
+         │       → parse_tokens(spans) ──────────────────┐
+         │                                               │
+         └─ [true]  chemin Mode Page (NOUVEAU)           │
+               read_template_file(parent_path)  (I/O)    │
+               scan(&child_src) → parse_page_tokens ─────┤ (Document 1)
+               scan(&parent_src) → parse_page_tokens ────┤ (Document 1)
+               vérifier parent.extends == None           │ (garde v1, §5)
+               arena.admit(child) → child_id             │
+               arena.admit(parent) → parent_id           │ (Document 2 §2)
                collect_blocks(child_id, …)  ────┐        │
                collect_blocks(parent_id, …) ────┤        │ (Document 2 §3)
                collect_static_refs(…)          ─┤        │
-               link(parent_blocks, child_blocks,│         │
+               link(parent_blocks, child_blocks,│        │
                     static_refs, file_exists) ──┤        │ (Document 2 §4)
                lower(parent.tokens, plan, arena)┘        │
                      → Vec<FlatPageToken<'src>> ─────────┘
@@ -74,20 +74,20 @@ main()
 
 ## 3. Responsabilités par étape
 
-| Étape | Responsabilité | I/O | Nouveau ? |
-|---|---|---|---|
-| `detect_extends` | Discriminant de mode | Non | Oui (Document 1) |
-| Lecture parent | Suivre `extends`, charger le fichier référencé | Oui | Oui — **seule E/S nouvelle du build** |
-| `parse_page_tokens` ×2 | AST mono-fichier (enfant, parent) | Non | Oui (Document 1) |
-| Garde single-level | Rejeter un parent qui déclare lui-même `extends` | Non | Oui — décision de portée, voir §5 |
-| `PageArena::admit` ×2 | Identité stable (`TemplateId`) | Non | Oui (Document 2 §2) |
-| `collect_blocks` ×2 | Plages de blocs + validation de forme schéma-libre | Non | Oui (Document 2 §3) |
-| `collect_static_refs` | Extraire les `StaticPartialRef` des deux fichiers | Non | Oui — utilitaire, signature ci-dessous |
-| `link` | Correspondance blocs, existence des `static` | Oui (`file_exists`) | Oui (Document 2 §4) |
-| `lower` | Fusion → `Vec<FlatPageToken>` | Non | Oui (Document 2 §5) |
-| `validate_ast` | Gate sémantique (bornes if, champs) | Non | **Non — gelé** |
-| `resolve_and_measure` | Résolution taille + capacité | Oui (`get_file_size`) | **Non — gelé** |
-| `generate_aot_snippet` | Émission Rust | Non | **Non — gelé** |
+| Étape                  | Responsabilité                                     | I/O                   | Nouveau ?                              |
+| ---------------------- | -------------------------------------------------- | --------------------- | -------------------------------------- |
+| `detect_extends`       | Discriminant de mode                               | Non                   | Oui (Document 1)                       |
+| Lecture parent         | Suivre `extends`, charger le fichier référencé     | Oui                   | Oui — **seule E/S nouvelle du build**  |
+| `parse_page_tokens` ×2 | AST mono-fichier (enfant, parent)                  | Non                   | Oui (Document 1)                       |
+| Garde single-level     | Rejeter un parent qui déclare lui-même `extends`   | Non                   | Oui — décision de portée, voir §5      |
+| `PageArena::admit` ×2  | Identité stable (`TemplateId`)                     | Non                   | Oui (Document 2 §2)                    |
+| `collect_blocks` ×2    | Plages de blocs + validation de forme schéma-libre | Non                   | Oui (Document 2 §3)                    |
+| `collect_static_refs`  | Extraire les `StaticPartialRef` des deux fichiers  | Non                   | Oui — utilitaire, signature ci-dessous |
+| `link`                 | Correspondance blocs, existence des `static`       | Oui (`file_exists`)   | Oui (Document 2 §4)                    |
+| `lower`                | Fusion → `Vec<FlatPageToken>`                      | Non                   | Oui (Document 2 §5)                    |
+| `validate_ast`         | Gate sémantique (bornes if, champs)                | Non                   | **Non — gelé**                         |
+| `resolve_and_measure`  | Résolution taille + capacité                       | Oui (`get_file_size`) | **Non — gelé**                         |
+| `generate_aot_snippet` | Émission Rust                                      | Non                   | **Non — gelé**                         |
 
 Seules trois familles d'E/S existent dans tout le graphe : lecture des fichiers `.marius` (enfant + parent), vérification d'existence des fichiers `static` (Linker), lecture de taille des fichiers `include`/`static` (Resolver, gelé). Aucune autre fonction du graphe ne touche le disque — cohérent avec le principe déjà acté : `build.rs` concentre l'intégralité de l'E/S, la Forge reste pure partout ailleurs.
 
@@ -158,3 +158,7 @@ Chaque table qui `extends` un même `base.marius` déclenche sa propre lecture, 
 - Boucle `main()` sur les composants : inchangée, aucune connaissance du mode.
 
 Le Mode Page est, du point de vue de tout le reste du système, un chemin de production alternatif d'une seule valeur : `Vec<FlatPageToken<'src>>`. Rien en aval de cette valeur ne sait qu'elle a pu naître d'une fusion parent/enfant plutôt que d'un fichier unique.
+
+---
+
+_2 juillet 2026_

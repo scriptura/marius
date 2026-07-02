@@ -1,0 +1,203 @@
+--- /mnt/user-data/uploads/lib.rs	2026-07-02 13:25:00.808508000 +0000
++++ src/lib.rs	2026-07-02 13:29:33.000919168 +0000
+@@ -2301,3 +2301,200 @@
+             PageValidationError::ForLoopDetected;
+     }
+ }
++
++// =============================================================================
++// Phase 4.1 — Parser Mode Page : type `PageSourceToken<'src>`
++// =============================================================================
++//
++// Portée de cette phase (roadmap §4.1) : définition de type seule, aucune
++// fonction. `PageSourceToken` est l'alphabet englobant du Parser Mode Page
++// (Document 1 §2.1) — l'unique nouveau type introduit ici.
++//
++// Diff nul garanti sur `FlatPageToken` (Phase 1.1, gelé) : cette section
++// n'ajoute, ne modifie et ne supprime aucune variante de cet enum. Vérifiable
++// par revue de la section Phase 1.1 ci-dessus, non retouchée.
++
++/// Alphabet unique du Parser Mode Page — un fichier `.marius` composé se
++/// représente entièrement comme `Vec<PageSourceToken<'src>>`.
++///
++/// ─── Pourquoi un enum englobant, pas une variante ajoutée à `FlatPageToken`,
++///     pas une union de deux `Vec` séparés (Document 1 §2.1) ────────────────
++///
++///   Option écartée 1 — variante additionnelle sur `FlatPageToken` : cet enum
++///   est matché de façon exhaustive, sans arm `_`, dans `validate_ast`,
++///   `resolve_and_measure` et `generate_aot_snippet` (trois fonctions gelées
++///   depuis Phase 1–2). Y ajouter une variante casserait leur exhaustivité et
++///   forcerait leur édition pour recompiler — violation directe de la
++///   contrainte de méthode de cette session (« ne modifier aucune fonction
++///   existante »).
++///
++///   Option écartée 2 — deux `Vec` séparés (un `Vec<FlatPageToken>`, un
++///   `Vec<PageBlockToken>` tenus en parallèle) : romprait le modèle « un
++///   fichier source = un flux plat unique », commun à tout le pipeline depuis
++///   le Scanner (`scan` produit un seul `impl Iterator<Item = RawSpan>`,
++///   `parse_tokens` un seul `Vec<FlatPageToken>`). Deux flux séparés
++///   réintroduiraient un problème de synchronisation d'ordre que le modèle à
++///   flux unique élimine par construction.
++///
++///   Retenu — enum englobant paramétré sur les deux enums existants
++///   (`FlatPageToken`, `PageBlockToken`) plus deux variantes propres au
++///   Parser Mode Page (`Static`, `Unsupported`). Un seul `Vec`, un seul ordre
++///   d'apparition, cohérent avec le reste du pipeline.
++///
++/// ─── Invariant de platitude ───────────────────────────────────────────────
++///
++///   Aucune variante ne porte de `Vec<Self>` ni de `Vec<FlatPageToken>`
++///   imbriqué — cohérent avec `PageBlockToken` (Phase 3.0) et avec
++///   `NamedBlockRange`, qui représentent déjà le contenu d'un bloc comme une
++///   plage d'indices dans un `Vec` plat plutôt que comme une sous-structure
++///   récursive. Ce type suit le même principe : aucun nouvel arbre.
++///
++/// ─── `Copy`, zéro indirection supplémentaire ──────────────────────────────
++///
++///   Agrégat de types déjà `Copy` (`FlatPageToken<'src>`, `PageBlockToken<'src>`,
++///   `StaticPartialRef<'src>`, `&'src str`) : `PageSourceToken` est `Copy` par
++///   construction, sans `Box`, `Rc` ni indirection ajoutée par l'enum
++///   englobant lui-même. Coût mémoire par token : celui de la plus grande
++///   variante — voir `page_source_token_layout_is_frozen` ci-dessous pour la
++///   valeur figée et sa justification.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum PageSourceToken<'src> {
++    /// Opérateur de projection, identique au Mode Fragment : `{{ }}`,
++    /// `{% if %}` / `{% endif %}`, segment HTML verbatim.
++    ///
++    /// N'émet jamais `FlatPageToken::StaticInclude` — cette variante de
++    /// `FlatPageToken` reste strictement liée à `{% include %}`, absent de
++    /// la grammaire Mode Page (Document 1 §2.1). Cette contrainte n'est pas
++    /// vérifiable par le système de types à ce stade (elle porte sur la
++    /// *construction* du token, réservée au classifieur — Phase 4.3+, hors
++    /// périmètre de cette phase) ; elle est documentée ici comme contrat
++    /// d'usage du champ.
++    Runtime(FlatPageToken<'src>),
++
++    /// Opérateur de composition : `{% block %}` / `{% endblock %}`.
++    Block(PageBlockToken<'src>),
++
++    /// Opérateur de composition : `{% static "path" %}`.
++    Static(StaticPartialRef<'src>),
++
++    /// Mot-clé de bloc reconnu syntaxiquement mais non supporté par la
++    /// grammaire runtime (`for`, `join`, `where`, `filter`, `group`, ou tout
++    /// mot-clé inconnu). Capturé plutôt que rejeté à ce stade : le Parser ne
++    /// décide pas *pourquoi* c'est interdit — le fait brut est transmis à la
++    /// Validation (Document 2), qui produira le message d'erreur nommé et
++    /// précis (`PageValidationError::ForLoopDetected`,
++    /// `RelationalKeyword`) plutôt qu'un rejet générique.
++    Unsupported { keyword: &'src str, tail: &'src str },
++}
++
++#[cfg(test)]
++mod tests_phase_4_1_page_source_token {
++    use super::{FlatPageToken, PageBlockToken, PageSourceToken, StaticPartialRef};
++
++    /// Jalon Vert — construction des 4 variantes.
++    #[test]
++    fn constructs_all_four_variants() {
++        let runtime = PageSourceToken::Runtime(FlatPageToken::Static("hello"));
++        let block = PageSourceToken::Block(PageBlockToken::BlockOpen { name: "header" });
++        let static_ref = PageSourceToken::Static(StaticPartialRef {
++            original_path: "partials/nav.html",
++        });
++        let unsupported = PageSourceToken::Unsupported {
++            keyword: "for",
++            tail: " item in items",
++        };
++
++        match runtime {
++            PageSourceToken::Runtime(FlatPageToken::Static(s)) => assert_eq!(s, "hello"),
++            _ => unreachable!(),
++        }
++        match block {
++            PageSourceToken::Block(PageBlockToken::BlockOpen { name }) => {
++                assert_eq!(name, "header")
++            }
++            _ => unreachable!(),
++        }
++        match static_ref {
++            PageSourceToken::Static(StaticPartialRef { original_path }) => {
++                assert_eq!(original_path, "partials/nav.html")
++            }
++            _ => unreachable!(),
++        }
++        match unsupported {
++            PageSourceToken::Unsupported { keyword, tail } => {
++                assert_eq!(keyword, "for");
++                assert_eq!(tail, " item in items");
++            }
++            _ => unreachable!(),
++        }
++    }
++
++    /// Jalon Vert — `match` exhaustif sans arm `_` compile : preuve que
++    /// l'enum est fermé sur exactement 4 variantes, aucune de plus, aucune
++    /// de moins. Si une variante est ajoutée ou retirée sans mise à jour de
++    /// ce `match`, ce test ne compile plus (erreur `non-exhaustive
++    /// patterns`) — la garantie est portée par le compilateur, pas par une
++    /// assertion runtime.
++    #[test]
++    fn match_is_exhaustive_without_wildcard() {
++        fn classify(t: PageSourceToken<'_>) -> &'static str {
++            match t {
++                PageSourceToken::Runtime(_) => "runtime",
++                PageSourceToken::Block(_) => "block",
++                PageSourceToken::Static(_) => "static",
++                PageSourceToken::Unsupported { .. } => "unsupported",
++            }
++        }
++        assert_eq!(
++            classify(PageSourceToken::Runtime(FlatPageToken::EndIf)),
++            "runtime"
++        );
++        assert_eq!(
++            classify(PageSourceToken::Block(PageBlockToken::BlockEnd)),
++            "block"
++        );
++    }
++
++    /// Jalon Vert — `Copy` disponible sur toutes les variantes (agrégat de
++    /// types `Copy`). Preuve par réaffectation sans move, même style que
++    /// `all_variants_are_copy` (Phase 1.1) et `page_block_token_is_copy`
++    /// (Phase 3.0) — cohérence de méthode entre phases.
++    #[test]
++    fn all_variants_are_copy() {
++        let tokens: [PageSourceToken<'_>; 4] = [
++            PageSourceToken::Runtime(FlatPageToken::Static("content")),
++            PageSourceToken::Block(PageBlockToken::BlockOpen { name: "body" }),
++            PageSourceToken::Static(StaticPartialRef {
++                original_path: "partials/foot.html",
++            }),
++            PageSourceToken::Unsupported {
++                keyword: "where",
++                tail: " x > 1",
++            },
++        ];
++
++        let _a = tokens[0]; // premier move apparent
++        let _b = tokens[0]; // second : compile ssi Copy est implémenté
++    }
++
++    /// Jalon Vert — layout figé. `size_of::<PageSourceToken>()` est verrouillé
++    /// à sa valeur actuelle : toute variation future (ajout de champ, nouvelle
++    /// variante plus large) doit être une décision explicite qui fait échouer
++    /// ce test, jamais un effet de bord silencieux d'un changement ailleurs
++    /// dans le fichier (ex. un champ ajouté à `FlatPageToken::StaticInclude`).
++    ///
++    /// Valeur observée sur cible 64 bits : la plus grande variante est
++    /// `FlatPageToken::StaticInclude { original_path: &str, rel_from_manifest:
++    /// &str, len: usize }`, portée via `Runtime`. Trois mots de 8 octets
++    /// (2 fat pointers `&str` = 16 octets chacun, `usize` = 8 octets) plus le
++    /// tag de discriminant de l'enum englobant, aligné sur 8 octets.
++    #[test]
++    fn page_source_token_layout_is_frozen() {
++        assert_eq!(
++            std::mem::size_of::<PageSourceToken<'_>>(),
++            48,
++            "layout de PageSourceToken modifié — variation à documenter explicitement, \
++             pas à laisser passer silencieusement"
++        );
++    }
++}

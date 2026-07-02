@@ -85,11 +85,11 @@ Point ouvert, à ne pas trancher ici : `PageComposeParseError` ne porte aujourd'
 
 ## 4. Domaines d'erreur
 
-| Domaine | Portée | Statut |
-|---|---|---|
-| `PageComposeParseError` | Grammaire mono-fichier (position d'`extends`, forme des tokens) | `ExtendsNotFirst` acté ; reste à étendre (§3) |
-| `PageParseError` | Mode Fragment, disjoint, jamais retourné ici | Gelé, hors périmètre |
-| `PageValidationError` | Sémantique de forme (nesting, for, mots relationnels, if non-bool) | **Non produit par ce Parser** — le Parser reste permissif sur ces points (voir §6) ; c'est la Validation (Document 2) qui juge |
+| Domaine                 | Portée                                                             | Statut                                                                                                                         |
+| ----------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `PageComposeParseError` | Grammaire mono-fichier (position d'`extends`, forme des tokens)    | `ExtendsNotFirst` acté ; reste à étendre (§3)                                                                                  |
+| `PageParseError`        | Mode Fragment, disjoint, jamais retourné ici                       | Gelé, hors périmètre                                                                                                           |
+| `PageValidationError`   | Sémantique de forme (nesting, for, mots relationnels, if non-bool) | **Non produit par ce Parser** — le Parser reste permissif sur ces points (voir §6) ; c'est la Validation (Document 2) qui juge |
 
 Décision de méthode, symétrique à `IfBool`/`EndIf` en Mode Fragment : le Parser ne rejette pas l'imbrication de blocs, ni `{% for %}`, ni les mots-clés relationnels. Il les représente fidèlement (`Block`, `Unsupported`) et laisse la phase de validation — qui a besoin d'un état de pile pour juger l'imbrication — trancher. Un Parser qui validerait la sémantique en plus de la syntaxe recréerait la fusion que le §0 du document précédent proscrit explicitement.
 
@@ -115,12 +115,19 @@ Décision de méthode, symétrique à `IfBool`/`EndIf` en Mode Fragment : le Par
 ## 7. Préconditions / Postconditions
 
 **Préconditions**
+
 - `spans` provient de `scan()` appliqué à la source complète d'un fichier `.marius`.
 - Le fichier a été positivement identifié comme Mode Page par `detect_extends` (ou il s'agit d'un parent, admis sans cette précondition — voir Document 2 pour la distinction d'usage).
 
 **Postconditions (succès)**
+
 - `ParsedPageTemplate` contient une représentation complète et fidèle du fichier — aucun span n'est perdu, aucune information de composition n'est résolue.
 - Le fichier peut être admis en arène (Document 2) sans reparcours de `spans`.
 
 **Postconditions (échec)**
+
 - Aucune mutation partielle observable en dehors du `Result` — pas de sortie utilisable en cas d'`Err` (fail-fast sur la grammaire de tête ; pas de contrat d'accumulation fail-slow au niveau du Parser, contrairement au Linker et à la Validation qui, eux, accumulent — cette différence de politique reflète l'existant : `PageParseError` de `parse_tokens` Mode Fragment est déjà fail-fast, pas fail-slow).
+
+---
+
+_2 juillet 2026_
