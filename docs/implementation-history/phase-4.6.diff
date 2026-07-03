@@ -1,0 +1,549 @@
+diff --git a/mnt/user-data/uploads/lib.rs b/home/claude/forge/fragment-forge/src/lib.rs
+index 942aca5..68f8590 100644
+--- a/mnt/user-data/uploads/lib.rs
++++ b/home/claude/forge/fragment-forge/src/lib.rs
+@@ -2105,6 +2105,39 @@ pub struct ChildTemplateSpec<'src> {
+ // ce choix de nommage ne convient pas, il se renomme en un remplacement pur
+ // (aucune des variantes ni leur regroupement par phase n'en dépend).
+ 
++/// Sortie complète du Parser Mode Page pour **un** fichier (Document 1 §2.2,
++/// scaffoldée en Phase 4.6 quand `extends` devient calculable — cf. doc de
++/// `parse_page_tokens`).
++///
++/// ─── Pourquoi `extends` n'est pas une variante de `PageSourceToken` ────────
++///
++/// Une déclaration `{% extends "path" %}` est une propriété du *fichier*
++/// (une seule par fichier, position figée en tête), pas un élément d'un flux
++/// homogène de tokens de contenu — la porter comme variante de
++/// `PageSourceToken` obligerait tout consommateur de `tokens` (Document 2 :
++/// `collect_blocks`, la Validation) à re-vérifier au runtime qu'elle
++/// n'apparaît qu'en position 0, alors que ce champ séparé le rend
++/// impossible par construction : `tokens` ne contient jamais de déclaration
++/// `extends`, point final.
++///
++/// ─── Pas de `TemplateId` ni de `NamedBlockRange` résolus ───────────────────
++///
++/// L'assignation d'identité d'arène est une responsabilité de l'admission
++/// en arène (Document 2, Phase 5.1) : un fichier parsé isolément n'a pas
++/// encore d'arène à laquelle appartenir.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ParsedPageTemplate<'src> {
++    /// Chemin déclaré par `{% extends %}`, si présent en tête de fichier.
++    /// `None` : ce fichier est un parent (aucun `extends` rencontré) — un
++    /// fichier hors mode page n'atteint jamais cette structure, ce cas est
++    /// écarté en amont par `detect_extends` (précondition d'appel, cf. doc
++    /// de `parse_page_tokens`).
++    pub extends: Option<&'src str>,
++    /// Flux de tokens de contenu, dans l'ordre du fichier source. Ne
++    /// contient jamais de déclaration `extends` (voir note ci-dessus).
++    pub tokens: Vec<PageSourceToken<'src>>,
++}
++
+ /// Erreur du Parser Front-end mode page : construction de `PageBlockToken`
+ /// et `ChildTemplateSpec` à partir du flux de tokens source. Distincte de
+ /// `PageParseError` (Parser mode fragment, gelé, ne connaît ni `extends` ni
+@@ -2139,17 +2172,19 @@ pub enum PageComposeParseError {
+     ///
+     /// Portée Phase 4.5 : cette variante couvre aussi, temporairement, tout
+     /// mot-clé de bloc encore non représentable par `PageSourceToken` à ce
+-    /// stade du classifieur (`extends`, et tout mot-clé hors grammaire
+-    /// runtime) — Document 1 §3 autorise explicitement l'échec de ces
+-    /// fichiers avant la clôture du classifieur (Phase 4.7). `block` et
+-    /// `endblock` en sont sortis en Phase 4.4 (branche `Block` dédiée) ;
+-    /// `static` en est sorti en Phase 4.5 (branche `Static` dédiée) ;
+-    /// `extends` migrera à son tour (4.6), puis le catch-all `Unsupported`
+-    /// clôturera la grammaire (4.7) — sans que cette variante d'erreur ne
+-    /// soit retirée : elle reste le domaine des erreurs de grammaire
+-    /// structurelle des mots-clés déjà reconnus (`if`/`endif`/`block`/
+-    /// `endblock`/`static`) — par exemple un `{% if %}` sans point dans
+-    /// l'identifiant, cf. `split_dotted_page`.
++    /// stade du classifieur (tout mot-clé hors grammaire runtime) —
++    /// Document 1 §3 autorise explicitement l'échec de ces fichiers avant
++    /// la clôture du classifieur (Phase 4.7). `block` et `endblock` en sont
++    /// sortis en Phase 4.4 (branche `Block` dédiée) ; `static` en est sorti
++    /// en Phase 4.5 (branche `Static` dédiée) ; `extends` en est sorti à
++    /// son tour en Phase 4.6 — sa forme structurelle (`Ident(path)
++    /// BlockClose`) reste jugée ici, seule sa *position* est jugée par
++    /// `ExtendsNotFirst`, domaine disjoint (cf. doc de `parse_page_tokens`).
++    /// Le catch-all `Unsupported` clôturera la grammaire (4.7) — sans que
++    /// cette variante d'erreur ne soit retirée : elle reste le domaine des
++    /// erreurs de grammaire structurelle des mots-clés déjà reconnus
++    /// (`if`/`endif`/`block`/`endblock`/`static`/`extends`) — par exemple
++    /// un `{% if %}` sans point dans l'identifiant, cf. `split_dotted_page`.
+     InvalidBlockSequence,
+ }
+ 
+@@ -2681,17 +2716,42 @@ mod tests_phase_4_2_detect_extends {
+ //     que `if`/`endif` — y compris `include` (absent de la grammaire Mode
+ //     Page par construction du type `PageSourceToken::Runtime`, cf. Phase
+ //     4.1) — échouait avec `PageComposeParseError::InvalidBlockSequence`.
+-//     Depuis, `block`/`endblock` (Phase 4.4) et `static` (Phase 4.5) sont
+-//     sortis de ce catch-all — voir sections dédiées ci-dessous. `extends`
+-//     (4.6) et le reste (4.7) migreront à leur tour, mot-clé par mot-clé,
+-//     sans anticipation.
+-//   - `{% block %}` / `{% endblock %}` (Phase 4.4) et `{% static %}` (Phase
+-//     4.5) : voir sections dédiées ci-dessous, qui étendent
+-//     `parse_page_block` (seule fonction modifiée à chaque fois) sans
+-//     toucher à ce dispatch de tête.
+-
+-/// Construit l'AST `Vec<PageSourceToken<'src>>` d'un unique fichier, limité
+-/// au sous-ensemble `Runtime` de la grammaire Mode Page (Phase 4.3).
++//     Depuis, `block`/`endblock` (Phase 4.4), `static` (Phase 4.5) et
++//     `extends` (Phase 4.6) sont sortis de ce catch-all — voir sections
++//     dédiées ci-dessous. Seul le catch-all `Unsupported` (4.7) reste à
++//     migrer, sans anticipation.
++//   - `{% block %}` / `{% endblock %}` (Phase 4.4), `{% static %}` (Phase
++//     4.5) et `{% extends %}` (Phase 4.6) : voir sections dédiées
++//     ci-dessous, qui étendent `parse_page_block` (seule fonction modifiée
++//     à chaque fois) sans toucher à ce dispatch de tête.
++
++// =============================================================================
++// Phase 4.6 — Position d'`extends` + `ExtendsNotFirst`
++// =============================================================================
++// Invariant introduit (roadmap §4.6) : `extends`, s'il existe, occupe
++// nécessairement la première position non-whitespace du fichier — jamais
++// ailleurs, jamais en double.
++//
++// Périmètre :
++//   - `ParsedPageTemplate<'src>` (Document 1 §2.2) devient le type de sortie
++//     de `parse_page_tokens` — `extends: Option<&'src str>` et
++//     `tokens: Vec<PageSourceToken<'src>>`, ce dernier ne portant jamais de
++//     déclaration `extends` (cf. doc du type).
++//   - `parse_page_block` reconnaît désormais `extends` (branche dédiée,
++//     forme jugée localement) et retourne un `PageBlockOutcome` pour laisser
++//     `parse_page_tokens`, seule à connaître la position d'un span dans le
++//     flux, juger la légalité de cette position.
++//   - Logique de position uniquement : aucune résolution du chemin déclaré
++//     (résolution d'existence : Linker, Document 2, `PageLinkError::
++//     ExtendsNotFound`, hors périmètre ici).
++//   - Ce diff modifie la signature publique de `parse_page_tokens`
++//     (`Vec<PageSourceToken>` → `ParsedPageTemplate`) : les tests des
++//     Phases 4.3/4.4/4.5 sont ajustés en conséquence (accès via `.tokens`),
++//     sans changement de leurs assertions de fond — pure adaptation de
++//     signature, pas une extension de portée de ce diff.
++
++/// Construit l'AST complet (`ParsedPageTemplate<'src>`) d'un unique fichier
++/// — grammaire Mode Page hors catch-all `Unsupported` (Phase 4.7).
+ ///
+ /// ─── Automate ──────────────────────────────────────────────────────────────
+ ///
+@@ -2701,47 +2761,79 @@ mod tests_phase_4_2_detect_extends {
+ /// de consommation (`expect_ident`/`expect_kind`, réimplémentées ici sous
+ /// domaine d'erreur `PageComposeParseError` pour ne pas coupler ce
+ /// classifieur au type d'erreur gelé `PageParseError` — Document 1 §0).
+-/// Chaque token produit est enveloppé sous `PageSourceToken::Runtime` avant
+-/// d'être poussé dans l'AST — c'est la seule différence structurelle avec
+-/// `parse_tokens`.
++/// Chaque token de contenu est enveloppé sous `PageSourceToken::Runtime`
++/// avant d'être poussé dans l'AST — c'est la seule différence structurelle
++/// avec `parse_tokens`.
++///
++/// ─── Position d'`extends` (Phase 4.6) ──────────────────────────────────────
++///
++/// `extends` n'est jamais poussé dans `tokens` : c'est une propriété du
++/// fichier, portée par le champ séparé `ParsedPageTemplate::extends`
++/// (Document 1 §2.2, cf. doc du type). La position de tête est vérifiée ici,
++/// et seulement ici — `parse_page_block` reconnaît la forme syntaxique
++/// d'`extends` mais ne sait pas, et ne doit pas savoir, à quelle position du
++/// flux il a été rencontré (cf. doc de `PageBlockOutcome`). Concrètement :
++/// `is_head` est vrai uniquement à la toute première itération de la boucle,
++/// quel que soit le type de span rencontré ensuite ; toute déclaration
++/// `extends` obtenue alors que `is_head` est faux — qu'elle apparaisse après
++/// un autre token ou qu'elle soit une seconde occurrence — échoue avec
++/// `PageComposeParseError::ExtendsNotFirst` (Document 1 §6, §7 : fail-fast,
++/// pas d'accumulation). Un fichier sans aucun `extends` (parent) laisse ce
++/// champ à `None` sans qu'aucune erreur ne soit levée — Document 1 §3.
+ ///
+ /// ─── Ce que cette fonction ne fait pas encore ──────────────────────────────
+ ///
+-/// Ne calcule pas `ParsedPageTemplate::extends` (Phase 4.6) : le type de
+-/// sortie de cette phase est `Vec<PageSourceToken<'src>>` nu, pas encore
+-/// `ParsedPageTemplate` (Document 1 §2.2) — la signature finale, avec
+-/// extraction de la position d'`extends`, est posée en Phase 4.6 quand cette
+-/// information devient calculable. Ne reconnaît `extends`, `static`, ni le
+-/// catch-all `Unsupported` (voir note de portée ci-dessus) — seuls
+-/// `if`/`endif` (Phase 4.3) et `block`/`endblock` (Phase 4.4) le sont.
++/// Ne reconnaît pas le catch-all `Unsupported` (Phase 4.7) : tout mot-clé de
++/// bloc hors `if`/`endif`/`block`/`endblock`/`static`/`extends` échoue
++/// encore avec `PageComposeParseError::InvalidBlockSequence` (voir note de
++/// portée en tête de section).
+ ///
+ /// ─── Invariants mémoire ─────────────────────────────────────────────────────
+ ///
+ /// Zéro allocation de texte : chaque `&'src str` porté par un
+-/// `PageSourceToken` est un emprunt direct sur `spans`, jamais une copie —
+-/// identique au contrat de `parse_tokens`. Le seul `Vec` alloué est celui de
+-/// sortie, build-time, conditionnel au premier `push` (cf. Document 1 §5).
++/// `PageSourceToken` (ou par `ParsedPageTemplate::extends`) est un emprunt
++/// direct sur `spans`, jamais une copie — identique au contrat de
++/// `parse_tokens`. Le seul `Vec` alloué est celui de `tokens`, build-time,
++/// conditionnel au premier `push` (cf. Document 1 §5) — une déclaration
++/// `extends` n'y contribue jamais.
+ pub fn parse_page_tokens<'src>(
+     spans: impl Iterator<Item = RawSpan<'src>>,
+-) -> Result<Vec<PageSourceToken<'src>>, PageComposeParseError> {
++) -> Result<ParsedPageTemplate<'src>, PageComposeParseError> {
+     let mut iter = spans.peekable();
+-    let mut ast = Vec::new();
++    let mut tokens = Vec::new();
++    let mut extends: Option<&'src str> = None;
++    let mut is_head = true;
+ 
+     while let Some(span) = iter.next() {
+-        let token = match span.kind {
++        let head = is_head;
++        is_head = false;
++
++        match span.kind {
+             // Texte HTML verbatim → Static directement, enveloppé Runtime.
+-            SpanKind::Literal => PageSourceToken::Runtime(FlatPageToken::Static(span.slice)),
++            SpanKind::Literal => {
++                tokens.push(PageSourceToken::Runtime(FlatPageToken::Static(span.slice)));
++            }
+ 
+             // `{{ entity.field }}` → Field, enveloppé Runtime.
+-            SpanKind::ExprOpen => PageSourceToken::Runtime(parse_page_expr(&mut iter)?),
++            SpanKind::ExprOpen => {
++                tokens.push(PageSourceToken::Runtime(parse_page_expr(&mut iter)?));
++            }
+ 
+-            // `{% keyword … %}` → IfBool | EndIf | BlockOpen | BlockEnd
+-            // (seuls mots-clés reconnus à ce stade). `parse_page_block`
+-            // retourne désormais directement le `PageSourceToken` englobant
+-            // — `if`/`endif` sous `Runtime`, `block`/`endblock` sous
+-            // `Block` — donc aucune enveloppe supplémentaire n'est apposée
+-            // ici (Phase 4.4 : voir doc de `parse_page_block`).
+-            SpanKind::BlockOpen => parse_page_block(&mut iter)?,
++            // `{% keyword … %}` → IfBool | EndIf | BlockOpen | BlockEnd |
++            // Static(..) | Extends(path). `parse_page_block` décide de la
++            // forme (`PageBlockOutcome`) ; seule cette fonction sait si le
++            // span de tête `{%` consommé était le tout premier du fichier,
++            // donc seule elle peut juger la position d'un `Extends` (Phase
++            // 4.6 : voir doc ci-dessus).
++            SpanKind::BlockOpen => match parse_page_block(&mut iter)? {
++                PageBlockOutcome::Extends(path) => {
++                    if !head {
++                        return Err(PageComposeParseError::ExtendsNotFirst);
++                    }
++                    extends = Some(path);
++                }
++                PageBlockOutcome::Token(token) => tokens.push(token),
++            },
+ 
+             // Tout autre span en position initiale est une erreur
+             // structurelle : ExprClose, BlockClose, Ident, Punct ne peuvent
+@@ -2752,11 +2844,10 @@ pub fn parse_page_tokens<'src>(
+                     got,
+                 })
+             }
+-        };
+-        ast.push(token);
++        }
+     }
+ 
+-    Ok(ast)
++    Ok(ParsedPageTemplate { extends, tokens })
+ }
+ 
+ // =============================================================================
+@@ -2811,33 +2902,63 @@ where
+     Ok(FlatPageToken::Field { entity, field })
+ }
+ 
+-/// Consomme `Ident(keyword) … BlockClose` et produit le `PageSourceToken`
++/// Résultat de `parse_page_block` (Phase 4.6). Distingue un token de contenu
++/// ordinaire, prêt à être poussé dans `ParsedPageTemplate::tokens`, d'une
++/// déclaration `{% extends "path" %}`, qui n'est **jamais** poussée dans
++/// `tokens` (cf. doc de `ParsedPageTemplate`).
++///
++/// Cette distinction est nécessaire parce que la position d'`extends`
++/// (tête de fichier ou non) ne peut être jugée que par `parse_page_tokens`
++/// — seule fonction qui observe l'ordre des spans de tête au fil de son
++/// itération. `parse_page_block` reconnaît la forme syntaxique d'`extends`
++/// (grammaire), mais ne connaît pas, et ne doit pas se voir déléguer, sa
++/// position (une question de grammaire mono-fichier distincte, cf. doc de
++/// `PageComposeParseError::ExtendsNotFirst`) : lui faire porter ce jugement
++/// dupliquerait, à l'échelle d'une seule fonction, l'état que
++/// `parse_page_tokens` maintient déjà (`is_head`) — deux sources de vérité
++/// pour une même position, un candidat naturel à la divergence.
++enum PageBlockOutcome<'src> {
++    /// Token de contenu ordinaire — `if`/`endif`/`block`/`endblock`/`static`.
++    Token(PageSourceToken<'src>),
++    /// Chemin brut d'une déclaration `{% extends path %}`, syntaxiquement
++    /// bien formée. La légalité de sa position est jugée par l'appelant.
++    Extends(&'src str),
++}
++
++/// Consomme `Ident(keyword) … BlockClose` et produit le `PageBlockOutcome`
+ /// correspondant. Précondition : `BlockOpen` vient d'être consommé par
+ /// `parse_page_tokens`.
+ ///
+-/// Portée Phase 4.5 : reconnaît `if`/`endif` (Phase 4.3, logique inchangée),
+-/// `block`/`endblock` (Phase 4.4, logique inchangée) et `static` (introduit
+-/// ici). Tout autre mot-clé (`extends`, `include`, ou inconnu) retourne
+-/// toujours `InvalidBlockSequence` — comportement temporaire, qui migrera
+-/// mot-clé par mot-clé dans les phases suivantes (4.6 `extends`, 4.7
+-/// catch-all `Unsupported`).
+-///
+-/// ─── Pourquoi le type de retour change : `PageSourceToken`, plus
+-///     `FlatPageToken` ──────────────────────────────────────────────────────
+-///
+-/// `block`/`endblock` n'ont pas d'équivalent dans `FlatPageToken` (grammaire
+-/// runtime, Document 1 §2.1) : ils s'enveloppent directement sous
+-/// `PageSourceToken::Block`, jamais sous `Runtime`. `static` non plus : il
+-/// s'enveloppe sous `PageSourceToken::Static(StaticPartialRef)` (Phase 4.5),
+-/// par le même raisonnement — aucune variante `FlatPageToken` équivalente,
+-/// cf. doc `StaticPartialRef` (distincte de `StaticInclude` par construction
+-/// de type). `if`/`endif`, eux, restent enveloppés sous `Runtime`,
+-/// exactement comme en Phase 4.3. Cette fonction devient donc le site
+-/// d'enveloppe unique pour tout mot-clé de bloc reconnu : `parse_page_tokens`
+-/// (dispatch de tête) n'a plus à choisir l'enveloppe lui-même, il propage
+-/// tel quel ce qui est retourné ici — un seul endroit décide de la variante
+-/// `PageSourceToken`, cohérent avec la règle « le Parser ne décide qu'une
+-/// fois de la forme d'un token ».
++/// Portée Phase 4.6 : reconnaît `if`/`endif` (Phase 4.3, logique inchangée),
++/// `block`/`endblock` (Phase 4.4, logique inchangée), `static` (Phase 4.5,
++/// logique inchangée) et `extends` (introduit ici). Tout autre mot-clé
++/// (`include`, ou inconnu) retourne toujours `InvalidBlockSequence` —
++/// comportement temporaire, qui sera remplacé par le catch-all `Unsupported`
++/// en Phase 4.7.
++///
++/// ─── Pourquoi le type de retour change : `PageBlockOutcome`, plus
++///     `PageSourceToken` directement ─────────────────────────────────────────
++///
++/// `if`/`endif`/`block`/`endblock`/`static` restent enveloppés exactement
++/// comme en Phase 4.5 (`PageSourceToken`, lui-même sous `Runtime` ou
++/// `Block`/`Static` selon le cas). `extends` seul n'a pas d'enveloppe
++/// `PageSourceToken` : ce n'est pas un token de contenu, c'est un champ de
++/// `ParsedPageTemplate` (cf. doc du type) — `PageBlockOutcome::Extends` le
++/// fait remonter à l'appelant sans le faire transiter par `PageSourceToken`,
++/// ce qui rendrait par construction impossible de le pousser par erreur
++/// dans `tokens`.
++///
++/// ─── Invariant introduit en Phase 4.6 : zéro E/S sur `extends`,
++///     forme jugée ici, position jugée par l'appelant ─────────────────────────
++///
++/// Comme `static` (Phase 4.5), la branche `extends` capture `path` tel quel
++/// — aucun appel `std::fs`, aucune vérification d'existence. Elle vérifie en
++/// revanche la forme (`Ident(path) BlockClose`, sinon `UnexpectedToken`/
++/// `UnexpectedEof`) : c'est un jugement de grammaire mono-fichier, dans le
++/// domaine de cette fonction. Ce que cette fonction ne vérifie jamais, y
++/// compris pour `extends` : la position dans le fichier — jugée exclusivement
++/// par `parse_page_tokens` via `PageComposeParseError::ExtendsNotFirst`
++/// (cf. doc de `PageBlockOutcome`).
+ ///
+ /// ─── Invariant introduit en Phase 4.5 : zéro E/S sur `static` ────────────
+ ///
+@@ -2858,34 +2979,42 @@ where
+ /// `PageValidationError::NestedBlock`) construit ; le dupliquer ici
+ /// recréerait la fusion syntaxe/sémantique que le Parser doit éviter par
+ /// construction.
+-fn parse_page_block<'src, I>(iter: &mut I) -> Result<PageSourceToken<'src>, PageComposeParseError>
++fn parse_page_block<'src, I>(iter: &mut I) -> Result<PageBlockOutcome<'src>, PageComposeParseError>
+ where
+     I: Iterator<Item = RawSpan<'src>>,
+ {
+-    let keyword = expect_ident_page(iter, "keyword (if | endif | block | endblock | static)")?;
++    let keyword = expect_ident_page(
++        iter,
++        "keyword (if | endif | block | endblock | static | extends)",
++    )?;
+ 
+     match keyword {
+         "if" => {
+             let raw = expect_ident_page(iter, "Ident(entity.field)")?;
+             let (entity, field) = split_dotted_page(raw)?;
+             expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+-            Ok(PageSourceToken::Runtime(FlatPageToken::IfBool {
+-                entity,
+-                field,
+-            }))
++            Ok(PageBlockOutcome::Token(PageSourceToken::Runtime(
++                FlatPageToken::IfBool { entity, field },
++            )))
+         }
+         "endif" => {
+             expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+-            Ok(PageSourceToken::Runtime(FlatPageToken::EndIf))
++            Ok(PageBlockOutcome::Token(PageSourceToken::Runtime(
++                FlatPageToken::EndIf,
++            )))
+         }
+         "block" => {
+             let name = expect_ident_page(iter, "Ident(name)")?;
+             expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+-            Ok(PageSourceToken::Block(PageBlockToken::BlockOpen { name }))
++            Ok(PageBlockOutcome::Token(PageSourceToken::Block(
++                PageBlockToken::BlockOpen { name },
++            )))
+         }
+         "endblock" => {
+             expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+-            Ok(PageSourceToken::Block(PageBlockToken::BlockEnd))
++            Ok(PageBlockOutcome::Token(PageSourceToken::Block(
++                PageBlockToken::BlockEnd,
++            )))
+         }
+         // `{% static path %}` (Phase 4.5) : capture brute, zéro E/S. `path`
+         // est l'`Ident` de bloc nu retourné par le scanner — pas de
+@@ -2896,7 +3025,18 @@ where
+         "static" => {
+             let original_path = expect_ident_page(iter, "Ident(path)")?;
+             expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+-            Ok(PageSourceToken::Static(StaticPartialRef { original_path }))
++            Ok(PageBlockOutcome::Token(PageSourceToken::Static(
++                StaticPartialRef { original_path },
++            )))
++        }
++        // `{% extends path %}` (Phase 4.6) : capture brute, zéro E/S, même
++        // convention non-quotée que `static` (symétrie délibérée — cf. doc
++        // `StaticPartialRef::original_path`). Forme jugée ici ; position
++        // jugée par `parse_page_tokens` (cf. doc de `PageBlockOutcome`).
++        "extends" => {
++            let path = expect_ident_page(iter, "Ident(path)")?;
++            expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
++            Ok(PageBlockOutcome::Extends(path))
+         }
+         _ => Err(PageComposeParseError::InvalidBlockSequence),
+     }
+@@ -2991,7 +3131,7 @@ mod tests_phase_4_3_parse_page_tokens_runtime_subset {
+         let actual =
+             parse_page_tokens(scan(src)).expect("parse_page_tokens (classifieur) doit réussir");
+ 
+-        assert_eq!(strip_runtime_envelope(actual), expected);
++        assert_eq!(strip_runtime_envelope(actual.tokens), expected);
+     }
+ 
+     /// Jalon Vert — fixture `Field` seul : `{{ entity.field }}` produit la
+@@ -3004,7 +3144,7 @@ mod tests_phase_4_3_parse_page_tokens_runtime_subset {
+         let actual =
+             parse_page_tokens(scan(src)).expect("parse_page_tokens (classifieur) doit réussir");
+ 
+-        assert_eq!(strip_runtime_envelope(actual), expected);
++        assert_eq!(strip_runtime_envelope(actual.tokens), expected);
+     }
+ 
+     /// Jalon Vert — fixture `IfBool`/`EndIf` : un bloc conditionnel complet
+@@ -3017,15 +3157,19 @@ mod tests_phase_4_3_parse_page_tokens_runtime_subset {
+         let actual =
+             parse_page_tokens(scan(src)).expect("parse_page_tokens (classifieur) doit réussir");
+ 
+-        assert_eq!(strip_runtime_envelope(actual), expected);
++        assert_eq!(strip_runtime_envelope(actual.tokens), expected);
+     }
+ 
+-    /// Jalon Vert — un mot-clé de composition (`extends`), hors scope de
+-    /// cette phase, échoue explicitement plutôt que d'être silencieusement
+-    /// accepté ou ignoré — comportement documenté, pas un effet de bord.
++    /// Jalon Vert — un mot-clé hors grammaire runtime et non encore reconnu
++    /// par le classifieur à ce stade (`for`, catch-all `Unsupported` non
++    /// implémenté avant la Phase 4.7) échoue explicitement plutôt que
++    /// d'être silencieusement accepté ou ignoré — comportement documenté,
++    /// pas un effet de bord. `extends` n'illustre plus cet invariant depuis
++    /// la Phase 4.6, qui l'a fait sortir de ce catch-all (position jugée par
++    /// `ExtendsNotFirst` — voir `tests_phase_4_6_extends_position`).
+     #[test]
+     fn composition_keyword_out_of_scope_fails_explicitly() {
+-        let src = r#"{% extends "base.marius" %}"#;
++        let src = r#"{% for item %}"#;
+         let result = parse_page_tokens(scan(src));
+         assert_eq!(result, Err(PageComposeParseError::InvalidBlockSequence));
+     }
+@@ -3050,7 +3194,7 @@ mod tests_phase_4_4_block_endblock {
+             .expect("parse_page_tokens doit réussir sur un bloc bien formé");
+ 
+         assert_eq!(
+-            actual,
++            actual.tokens,
+             vec![
+                 PageSourceToken::Block(PageBlockToken::BlockOpen { name: "header" }),
+                 PageSourceToken::Runtime(FlatPageToken::Static("content")),
+@@ -3069,17 +3213,18 @@ mod tests_phase_4_4_block_endblock {
+     fn nested_blocks_parse_succeeds() {
+         let src = "{% block outer %}{% block inner %}x{% endblock %}{% endblock %}";
+ 
+-        let actual = parse_page_tokens(scan(src));
++        let actual = parse_page_tokens(scan(src))
++            .expect("parse_page_tokens doit réussir sur des blocs imbriqués");
+ 
+         assert_eq!(
+-            actual,
+-            Ok(vec![
++            actual.tokens,
++            vec![
+                 PageSourceToken::Block(PageBlockToken::BlockOpen { name: "outer" }),
+                 PageSourceToken::Block(PageBlockToken::BlockOpen { name: "inner" }),
+                 PageSourceToken::Runtime(FlatPageToken::Static("x")),
+                 PageSourceToken::Block(PageBlockToken::BlockEnd),
+                 PageSourceToken::Block(PageBlockToken::BlockEnd),
+-            ])
++            ]
+         );
+     }
+ }
+@@ -3107,7 +3252,7 @@ mod tests_phase_4_5_static {
+             .expect("parse_page_tokens doit réussir sans vérifier l'existence du fichier");
+ 
+         assert_eq!(
+-            actual,
++            actual.tokens,
+             vec![
+                 PageSourceToken::Runtime(FlatPageToken::Static("before")),
+                 PageSourceToken::Static(StaticPartialRef {
+@@ -3118,3 +3263,56 @@ mod tests_phase_4_5_static {
+         );
+     }
+ }
++
++// =============================================================================
++// Tests — Phase 4.6
++// =============================================================================
++
++#[cfg(test)]
++mod tests_phase_4_6_extends_position {
++    use super::{parse_page_tokens, scan, FlatPageToken, PageComposeParseError, PageSourceToken};
++
++    /// Jalon Vert (roadmap §4.6) — `extends` en tête de fichier est capturé
++    /// dans `ParsedPageTemplate::extends`, et n'apparaît jamais dans
++    /// `tokens` (cf. doc du type : `extends` est un champ séparé, pas une
++    /// variante de `PageSourceToken`).
++    #[test]
++    fn extends_at_head_is_captured_and_absent_from_tokens() {
++        let src = "{% extends base.marius %}content";
++
++        let actual = parse_page_tokens(scan(src))
++            .expect("parse_page_tokens doit réussir avec extends en tête");
++
++        assert_eq!(actual.extends, Some("base.marius"));
++        assert_eq!(
++            actual.tokens,
++            vec![PageSourceToken::Runtime(FlatPageToken::Static("content"))]
++        );
++    }
++
++    /// Jalon Vert (roadmap §4.6) — `extends` rencontré après un autre token
++    /// (ici un `Static` de type HTML verbatim) échoue avec
++    /// `ExtendsNotFirst` : la position de tête est une propriété du fichier
++    /// entier, pas seulement du premier bloc `{% %}` rencontré.
++    #[test]
++    fn extends_after_a_static_token_fails_with_extends_not_first() {
++        let src = "leading text{% extends base.marius %}";
++
++        let result = parse_page_tokens(scan(src));
++
++        assert_eq!(result, Err(PageComposeParseError::ExtendsNotFirst));
++    }
++
++    /// Jalon Vert (roadmap §4.6) — un fichier parent, sans aucun `extends`,
++    /// réussit avec `extends == None` : l'absence de la déclaration n'est
++    /// pas une erreur, Document 1 §3 l'admet explicitement comme cas normal.
++    #[test]
++    fn absent_extends_on_parent_file_succeeds_with_none() {
++        let src = "{% block header %}content{% endblock %}";
++
++        let actual =
++            parse_page_tokens(scan(src)).expect("parse_page_tokens doit réussir sans extends");
++
++        assert_eq!(actual.extends, None);
++    }
++}
