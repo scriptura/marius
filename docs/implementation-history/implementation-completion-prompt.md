@@ -2,9 +2,7 @@ En te basant exclusivement sur l'implémentation réalisée aujourd'hui, réalis
 
 **1. Livrables**
 
-- fournir le diff Git complet de cette session ;
 - lister les tests ajoutés ;
-- confirmer les résultats de `cargo fmt`, `cargo test` et `cargo clippy`.
 
 **2. Analyse architecturale de la phase**
 

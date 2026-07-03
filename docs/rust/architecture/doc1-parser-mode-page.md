@@ -64,10 +64,18 @@ Ne porte ni `TemplateId`, ni `NamedBlockRange` résolus : l'assignation d'identi
 ## 3. Signatures publiques
 
 ```rust
-/// Discriminant de mode (§3.1 spécification). Pur, O(1) amorti : s'arrête
-/// dès que le premier `{%` est vu et compare son premier Ident à "extends".
-/// Ne valide pas la forme complète de la déclaration extends — un extends
-/// malformé est détecté par parse_page_tokens, pas ici.
+/// Discriminant de mode (§3.1 spécification). Pur, O(1) amorti : n'examine
+/// que les deux premiers `RawSpan` émis par `scan()`, jamais le fichier
+/// entier. Vrai ssi le premier span est `BlockOpen` (`{%`) ET le second est
+/// un `Ident` de contenu exact "extends". Tout span de tête différent —
+/// `Literal` (texte HTML, y compris un simple espace ou saut de ligne
+/// précédant `{%`), `ExprOpen` (`{{`), ou flux vide — invalide
+/// immédiatement, sans rechercher un `{%` plus loin dans le fichier.
+/// Conséquence verrouillée : aucune tolérance à un caractère de tête avant
+/// `{% extends`, y compris whitespace — un fichier commençant par une ligne
+/// vide n'est pas Mode Page pour cette fonction. Ne valide pas la forme
+/// complète de la déclaration extends — un extends malformé est détecté
+/// par parse_page_tokens, pas ici.
 pub fn detect_extends(source: &str) -> bool;
 
 /// Construit l'AST d'un unique fichier. Précondition : appelé uniquement

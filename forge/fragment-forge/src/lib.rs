@@ -2498,3 +2498,118 @@ mod tests_phase_4_1_page_source_token {
         );
     }
 }
+
+// =============================================================================
+// Phase 4.2 — `detect_extends`
+// =============================================================================
+// Responsabilité unique (Document 1 §3) : décider si un fichier source est en
+// Mode Page, sans parsing complet et sans dépendance à `PageSourceToken`.
+//
+// Invariant introduit : le mode est décidable sans parsing complet — un
+// fichier est en Mode Page ssi sa toute première unité syntaxique, avant
+// tout texte HTML verbatim et avant tout autre délimiteur, est un `{%`
+// dont le premier `Ident` vaut `"extends"`.
+
+/// Détermine si `source` relève du Mode Page (présence d'un `{% extends %}`
+/// en tête de fichier), sans effectuer le parsing complet de la grammaire.
+///
+/// ─── Algorithme ────────────────────────────────────────────────────────────
+///
+/// Réutilise `scan` (Phase 1.2, gelé) et consomme au plus deux `RawSpan` :
+/// le premier span de l'itérateur, puis, seulement s'il s'agit d'un
+/// `BlockOpen` (`{%`), le second. Aucun troisième appel à `next()` n'est
+/// effectué : la fonction s'arrête dès que le verdict est connu — c'est le
+/// sens de « O(1) amorti » (Document 1 §3) : le coût est borné par la
+/// position du premier délimiteur, jamais par la longueur totale du fichier
+/// au-delà de ce point.
+///
+/// - Si le premier span n'est pas `BlockOpen` (fichier sans délimiteur →
+///   `None` ; premier délimiteur `{{` → `ExprOpen` ; texte HTML précédant
+///   `{%` → `Literal`), le fichier n'est pas en Mode Page : `false`.
+/// - Si le premier span est `BlockOpen`, le second span est examiné : `true`
+///   ssi c'est un `Ident` de contenu exactement `"extends"`.
+///
+/// ─── Ce que cette fonction NE valide PAS ───────────────────────────────────
+///
+/// Ne valide pas la forme complète de la déclaration `extends` (présence
+/// d'un chemin, guillemets bien formés, `%}` de fermeture) : un `extends`
+/// syntaxiquement malformé en tête de fichier est tout de même détecté ici
+/// (`true`) et échoue plus tard dans `parse_page_tokens` (§3), pas dans
+/// cette fonction.
+///
+/// Un fichier où du texte précède `{% extends %}` retourne `false` : la
+/// première unité syntaxique n'est alors pas `BlockOpen` mais `Literal`.
+/// Ce même fichier, s'il atteint `parse_page_tokens` par un autre chemin
+/// d'appel, échoue avec `PageComposeParseError::ExtendsNotFirst` (Phase 4.6)
+/// — produire cette erreur nommée n'est pas la responsabilité de cette
+/// fonction, qui ne retourne qu'un `bool` (contrat d'appel, cf. Document 1
+/// §3 : `parse_page_tokens` n'est appelée qu'après `detect_extends ==
+/// true`, sauf cas du parent, admis sans cette précondition).
+///
+/// ─── Invariants mémoire ─────────────────────────────────────────────────────
+///
+/// Aucune allocation heap : `scan` n'alloue rien (Phase 1.2), et cette
+/// fonction ne construit aucune structure intermédiaire. Aucune E/S : pas
+/// d'appel à `std::fs`, la fonction opère exclusivement sur `source: &str`
+/// déjà en mémoire.
+pub fn detect_extends(source: &str) -> bool {
+    let mut spans = scan(source);
+    match spans.next() {
+        Some(RawSpan {
+            kind: SpanKind::BlockOpen,
+            ..
+        }) => matches!(
+            spans.next(),
+            Some(RawSpan {
+                kind: SpanKind::Ident,
+                slice: "extends"
+            })
+        ),
+        _ => false,
+    }
+}
+
+// =============================================================================
+// Tests — Phase 4.2
+// =============================================================================
+
+#[cfg(test)]
+mod tests_phase_4_2_detect_extends {
+    use super::detect_extends;
+
+    /// Jalon Vert — fichier sans `{%` (aucun délimiteur de bloc) → `false`.
+    #[test]
+    fn no_block_delimiter_returns_false() {
+        assert!(!detect_extends("<div>hello {{ entity.field }}</div>"));
+    }
+
+    /// Jalon Vert — `{% extends %}` en toute première position → `true`.
+    #[test]
+    fn extends_at_head_returns_true() {
+        assert!(detect_extends(r#"{% extends "base.marius" %}"#));
+    }
+
+    /// Jalon Vert — un autre mot-clé de bloc en tête (`{% if %}`) → `false`.
+    #[test]
+    fn if_at_head_returns_false() {
+        assert!(!detect_extends("{% if entity.active %}yes{% endif %}"));
+    }
+
+    /// Jalon Vert — `extends` précédé de texte HTML → `false` : la première
+    /// unité syntaxique est alors `Literal`, pas `BlockOpen`. Preuve directe
+    /// que la fonction juge la *position*, pas la simple *présence* du
+    /// mot-clé dans le fichier.
+    #[test]
+    fn extends_after_leading_text_returns_false() {
+        assert!(!detect_extends(
+            r#"<p>intro</p>{% extends "base.marius" %}"#
+        ));
+    }
+
+    /// Fichier vide → `false` (premier `next()` retourne `None`, aucune E/S,
+    /// aucun panic).
+    #[test]
+    fn empty_source_returns_false() {
+        assert!(!detect_extends(""));
+    }
+}
