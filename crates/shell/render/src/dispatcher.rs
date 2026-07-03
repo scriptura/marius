@@ -47,7 +47,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::{regenerate_and_swap, LiveRegistry};
+use crate::{LiveRegistry, regenerate_and_swap};
 
 use rayon::prelude::*;
 use tokio::sync::Notify;
@@ -66,48 +66,48 @@ use marius_projection::Projection;
 /// indirection ajoutée) et n'altère aucune sémantique existante.
 #[derive(Clone, Copy)]
 pub struct DispatcherConfig {
-    pub tick_default:    Duration,
-    pub tick_min:        Duration,
-    pub tick_max:        Duration,
+    pub tick_default: Duration,
+    pub tick_min: Duration,
+    pub tick_max: Duration,
     /// Seuil volumétrique — main.rs appelle notify si insert() retourne ThresholdReached.
     pub threshold_flush: usize,
-    pub threshold_low:   usize,
-    pub threshold_high:  usize,
+    pub threshold_low: usize,
+    pub threshold_high: usize,
     /// Budget de rendu au-delà duquel on passe en tick_max.
-    pub render_budget:   Duration,
+    pub render_budget: Duration,
 }
 
 impl Default for DispatcherConfig {
     fn default() -> Self {
         Self {
-            tick_default:    Duration::from_millis(500),
-            tick_min:        Duration::from_millis(100),
-            tick_max:        Duration::from_millis(2_000),
+            tick_default: Duration::from_millis(500),
+            tick_min: Duration::from_millis(100),
+            tick_max: Duration::from_millis(2_000),
             threshold_flush: 128,
-            threshold_low:   10,
-            threshold_high:  100,
-            render_budget:   Duration::from_millis(200),
+            threshold_low: 10,
+            threshold_high: 100,
+            render_budget: Duration::from_millis(200),
         }
     }
 }
 
 pub struct Dispatcher<P: Projection, const MAX: usize, const WORDS: usize> {
-    collector:    &'static Collector<MAX, WORDS>,
-    notify:       Arc<Notify>,
-    pool:         sqlx::PgPool,
-    config:       DispatcherConfig,
-    total_cap:    usize, // Contrat de capacité pour le BatchRenderer interne à regenerate_and_swap.
+    collector: &'static Collector<MAX, WORDS>,
+    notify: Arc<Notify>,
+    pool: sqlx::PgPool,
+    config: DispatcherConfig,
+    total_cap: usize, // Contrat de capacité pour le BatchRenderer interne à regenerate_and_swap.
     /// Arc partagé avec la frontière Axum de lecture (main.rs) — cloné une
     /// fois avant le tokio::spawn de ce Dispatcher, jamais reconstruit ici.
     /// Phase 4 : seul moyen pour ce Dispatcher d'atteindre
     /// LiveRegistry::store() sans dépendance inverse vers marius-server.
-    registry:     Arc<LiveRegistry>,
+    registry: Arc<LiveRegistry>,
     /// Clé LiveRegistry/packfile_path_for ciblée par ce Dispatcher — doit
     /// correspondre exactement au packfile_key de la/des RouteEntry qui
     /// servent ces mêmes données en lecture (ROUTE_TABLE, main.rs). Pas
     /// dérivée de P::packfile_path() — voir note de module.
     packfile_key: &'static str,
-    _phantom:     std::marker::PhantomData<P>,
+    _phantom: std::marker::PhantomData<P>,
     /// Singleton partagé entre TOUTES les instances de Dispatcher (tous
     /// packfile_key confondus) — créé une seule fois en amont (main.rs),
     /// cloné (jamais reconstruit) à chaque `Dispatcher::new()`. Régule le
@@ -120,12 +120,12 @@ pub struct Dispatcher<P: Projection, const MAX: usize, const WORDS: usize> {
 impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WORDS> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        collector:    &'static Collector<MAX, WORDS>,
-        notify:       Arc<Notify>,
-        pool:         sqlx::PgPool,
-        config:       DispatcherConfig,
-        total_cap:    usize,
-        registry:     Arc<LiveRegistry>,
+        collector: &'static Collector<MAX, WORDS>,
+        notify: Arc<Notify>,
+        pool: sqlx::PgPool,
+        config: DispatcherConfig,
+        total_cap: usize,
+        registry: Arc<LiveRegistry>,
         packfile_key: &'static str,
         io_semaphore: Arc<tokio::sync::Semaphore>,
     ) -> Self {
@@ -152,7 +152,7 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
             .unwrap_or(false);
 
         let mut current_tick = self.config.tick_default;
-        let mut ticker       = interval(current_tick);
+        let mut ticker = interval(current_tick);
 
         loop {
             tokio::select! {
@@ -168,7 +168,9 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
             }
 
             let mut ids = self.collector.flush();
-            if ids.is_empty() { continue; }
+            if ids.is_empty() {
+                continue;
+            }
 
             // Précondition du format on-disk (spec §3) — voir note de
             // module : défense explicite, pas une supposition sur l'ordre
@@ -187,7 +189,10 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
             )
             .await
             {
-                eprintln!("[dispatcher] regenerate_and_swap (\"{}\"): {e}", self.packfile_key);
+                eprintln!(
+                    "[dispatcher] regenerate_and_swap (\"{}\"): {e}",
+                    self.packfile_key
+                );
                 continue;
             }
 
@@ -200,13 +205,13 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
     }
 
     fn adapt_tick(&self, batch_size: usize, elapsed: Duration) -> Duration {
-        let pressure = elapsed    > self.config.render_budget
-                    || batch_size > self.config.threshold_high;
-        let quiet    = batch_size < self.config.threshold_low;
+        let pressure =
+            elapsed > self.config.render_budget || batch_size > self.config.threshold_high;
+        let quiet = batch_size < self.config.threshold_low;
         match (pressure, quiet) {
             (true, _) => self.config.tick_max,
             (_, true) => self.config.tick_min,
-            _         => self.config.tick_default,
+            _ => self.config.tick_default,
         }
     }
 }
@@ -253,13 +258,11 @@ pub fn render_batch_pure<P: Projection>(batch: Vec<(P::Record, P::VarlenOwned)>)
 
 #[cfg(test)]
 mod tests {
-    use rayon::prelude::*;
     use marius_schema::{
-        ContentCoreStorageRow,
+        CONTENT_CORE_TOTAL_CAP, ContentCoreProjection, ContentCoreStorageRow,
         ContentCoreVarlenOwned,
-        ContentCoreProjection,
-        CONTENT_CORE_TOTAL_CAP,
     };
+    use rayon::prelude::*;
     // Trait requis en scope pour résoudre ContentCoreProjection::render()
     // et ContentCoreProjection::packfile_path() sous forme qualifiée.
     // use as _ ne suffit pas pour les appels Type::method() — seul
@@ -292,16 +295,16 @@ mod tests {
     /// pré-alloué à sa borne supérieure exacte avant le premier render().
     fn worst_case_storage() -> ContentCoreStorageRow {
         ContentCoreStorageRow {
-            published_at:        i64::MIN,  // 20 chars — max I64
-            created_at:          i64::MIN,
-            modified_at:         i64::MIN,
-            document_id:         i32::MIN,  // 11 chars — max I32
-            author_entity_id:    i32::MIN,
-            status:              i16::MIN,  // 6 chars  — max I16
-            is_readable:         0,
-            is_commentable:      0,
+            published_at: i64::MIN, // 20 chars — max I64
+            created_at: i64::MIN,
+            modified_at: i64::MIN,
+            document_id: i32::MIN, // 11 chars — max I32
+            author_entity_id: i32::MIN,
+            status: i16::MIN, // 6 chars  — max I16
+            is_readable: 0,
+            is_commentable: 0,
             is_visible_comments: 0,
-            _pad:                [0; 3],     // padding pour alignement 8B
+            _pad: [0; 3], // padding pour alignement 8B
         }
     }
 
@@ -313,8 +316,8 @@ mod tests {
     /// les plus fréquentes ('&', '<', '"') dans un seul appel render().
     fn aggressive_varlena() -> ContentCoreVarlenOwned {
         ContentCoreVarlenOwned {
-            headline:             Some(AGGRESSIVE_VARLENA.to_string()),
-            description:          Some(AGGRESSIVE_VARLENA.repeat(3)),
+            headline: Some(AGGRESSIVE_VARLENA.to_string()),
+            description: Some(AGGRESSIVE_VARLENA.repeat(3)),
             alternative_headline: Some(AGGRESSIVE_VARLENA.repeat(2)),
             ..Default::default()
         }
@@ -434,7 +437,6 @@ mod tests {
                         // Structure HTML minimale.
                         assert!(buf.starts_with("<article"), "tag ouvrant absent");
                         assert!(buf.trim_end().ends_with("</article>"), "tag fermant absent");
-
                     } else {
                         // ── Rendus suivants : invariant no-realloc inter-itération ─
                         // buf.clear() remet len=0, capacity inchangée.
@@ -449,11 +451,14 @@ mod tests {
                         // L'allocateur ne réduit jamais la capacité spontanément,
                         // donc cap_before == *ref_cap est garanti si aucun realloc.
                         assert_eq!(
-                            buf.capacity(), cap_before,
+                            buf.capacity(),
+                            cap_before,
                             "REALLOC inter-itération détecté sur thread Rayon : \
                              capacité {} → {} après render(). \
                              DYNAMIC_CAP ({}) sous-estime le pire cas varlena.",
-                            cap_before, buf.capacity(), CONTENT_CORE_TOTAL_CAP
+                            cap_before,
+                            buf.capacity(),
+                            CONTENT_CORE_TOTAL_CAP
                         );
                     }
 

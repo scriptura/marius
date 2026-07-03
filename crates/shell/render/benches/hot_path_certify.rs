@@ -22,17 +22,14 @@ use counting_alloc::CountingAlloc;
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc::new();
 
-use divan::{black_box, Bencher};
 use divan::counter::{BytesCount, ItemsCount};
+use divan::{Bencher, black_box};
 
-use marius_schema::{
-    ContentCoreStorageRow,
-    ContentCoreVarlenOwned,
-    ContentCoreProjection,
-    CONTENT_CORE_TOTAL_CAP,
-};
 use marius_projection::Projection;
 use marius_render::render_batch_pure;
+use marius_schema::{
+    CONTENT_CORE_TOTAL_CAP, ContentCoreProjection, ContentCoreStorageRow, ContentCoreVarlenOwned,
+};
 
 fn main() {
     divan::main();
@@ -49,19 +46,19 @@ fn main() {
 /// Ratio de remplissage attendu : ~5-15% de TOTAL_CAP (conforme ADR-003).
 fn record_nominal() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
     let storage = ContentCoreStorageRow {
-        published_at:        1_700_000_000_000_000i64,
-        created_at:          1_700_000_000_000_000i64,
-        modified_at:         1_700_000_000_000_000i64,
-        document_id:         42i32,
-        author_entity_id:    7i32,
-        status:              1i16,
-        is_readable:         0,
-        is_commentable:      0,
+        published_at: 1_700_000_000_000_000i64,
+        created_at: 1_700_000_000_000_000i64,
+        modified_at: 1_700_000_000_000_000i64,
+        document_id: 42i32,
+        author_entity_id: 7i32,
+        status: 1i16,
+        is_readable: 0,
+        is_commentable: 0,
         is_visible_comments: 0,
     };
     let varlena = ContentCoreVarlenOwned {
-        headline:             Some("Introduction à l'architecture DOD".to_string()),
-        description:          Some("Système de projection réactif AOT.".to_string()),
+        headline: Some("Introduction à l'architecture DOD".to_string()),
+        description: Some("Système de projection réactif AOT.".to_string()),
         alternative_headline: Some("Marius Engine".to_string()),
         ..Default::default()
     };
@@ -84,19 +81,19 @@ fn record_worst_case() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
     let aggressive = r#"<html> & "Marius" & 'Engine'</html>"#.repeat(6);
 
     let storage = ContentCoreStorageRow {
-        published_at:        i64::MIN,
-        created_at:          i64::MIN,
-        modified_at:         i64::MIN,
-        document_id:         i32::MIN,
-        author_entity_id:    i32::MIN,
-        status:              i16::MIN,
-        is_readable:         0,
-        is_commentable:      0,
+        published_at: i64::MIN,
+        created_at: i64::MIN,
+        modified_at: i64::MIN,
+        document_id: i32::MIN,
+        author_entity_id: i32::MIN,
+        status: i16::MIN,
+        is_readable: 0,
+        is_commentable: 0,
         is_visible_comments: 0,
     };
     let varlena = ContentCoreVarlenOwned {
-        headline:             Some(aggressive.clone()),
-        description:          Some(aggressive.clone()),
+        headline: Some(aggressive.clone()),
+        description: Some(aggressive.clone()),
         alternative_headline: Some(aggressive),
         ..Default::default()
     };
@@ -105,9 +102,10 @@ fn record_worst_case() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
 
 /// Lot de N enregistrements pour les benchmarks Rayon.
 /// `f` sélectionne le constructeur : record_nominal ou record_worst_case.
-fn batch(size: usize, f: fn() -> (ContentCoreStorageRow, ContentCoreVarlenOwned))
-    -> Vec<(ContentCoreStorageRow, ContentCoreVarlenOwned)>
-{
+fn batch(
+    size: usize,
+    f: fn() -> (ContentCoreStorageRow, ContentCoreVarlenOwned),
+) -> Vec<(ContentCoreStorageRow, ContentCoreVarlenOwned)> {
     (0..size).map(|_| f()).collect()
 }
 
@@ -279,7 +277,7 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
             // ── Lecture et assertion ──────────────────────────────────────────
             // SeqCst : garantit que toutes les écritures de render() sont visibles.
             let allocs = CountingAlloc::alloc_count();
-            let bytes  = CountingAlloc::alloc_bytes();
+            let bytes = CountingAlloc::alloc_bytes();
 
             assert_eq!(
                 allocs, 0,

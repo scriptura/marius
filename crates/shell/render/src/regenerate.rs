@@ -56,10 +56,10 @@ use std::time::Instant;
 use marius_projection::Projection;
 
 use crate::batch_renderer::BatchRenderer;
-use crate::pack_html_format::{write_packfile_footer, PackfileEntry, PackfileFooter};
+use crate::pack_html_format::{PackfileEntry, PackfileFooter, write_packfile_footer};
 use crate::pack_html_index::PackHtmlIndex;
-use crate::registry::{packfile_path_for, LiveRegistry};
-use crate::sweep::{merge_sweep, DeltaBatch, DeltaEntry};
+use crate::registry::{LiveRegistry, packfile_path_for};
+use crate::sweep::{DeltaBatch, DeltaEntry, merge_sweep};
 
 /// Taille de chunk pour le streaming fetch_batch → render_batch. Borne la
 /// clause SQL IN côté fetch_batch ; sans incidence sur le format produit —
@@ -224,7 +224,11 @@ async fn fetch_delta_batch<P: Projection>(
     let present: HashSet<i64> = payload_index.iter().map(|e| e.id).collect();
     for &id in ids {
         if !present.contains(&id) {
-            entries.push(DeltaEntry { entity_id: id, offset: 0, length: 0 });
+            entries.push(DeltaEntry {
+                entity_id: id,
+                offset: 0,
+                length: 0,
+            });
         }
     }
 
@@ -313,7 +317,13 @@ fn apply_merge_io_sync(
     // ---- merge_sweep : boîte noire pure (Phase 4.1), zéro-alloc interne ----
     let mut out_index: Vec<PackfileEntry> =
         Vec::with_capacity(old_index.len() + delta.entries.len());
-    let report = merge_sweep(old_blob, old_index, delta, &mut tmp_mmap[..], &mut out_index);
+    let report = merge_sweep(
+        old_blob,
+        old_index,
+        delta,
+        &mut tmp_mmap[..],
+        &mut out_index,
+    );
 
     // ---- align8 : padding explicite avant l'index ---------------------------
     let bytes_written = report.bytes_written;
@@ -475,8 +485,8 @@ mod tests {
     use std::collections::HashMap;
     use std::os::unix::fs::FileExt;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     // ---------------------------------------------------------------------
     // Pas de harnais block_on artisanal ici : `sqlx::PgPool::connect_lazy`
@@ -492,7 +502,12 @@ mod tests {
     // ── Helpers bas niveau — bytes bruts, sans Projection ────────────────────
 
     fn pe(id: i64, offset: u64, len: u32) -> PackfileEntry {
-        PackfileEntry { id, offset, len, _pad: [0u8; 4] }
+        PackfileEntry {
+            id,
+            offset,
+            len,
+            _pad: [0u8; 4],
+        }
     }
 
     fn write_raw_packfile(path: &Path, blob: &[u8], entries: &[PackfileEntry]) {
@@ -534,7 +549,11 @@ mod tests {
     // dans l'arithmétique mmap (bornes de slice, placement index/footer),
     // pas une tautologie qui réexécuterait le code testé.
 
-    fn compute_reference(old_blob: &[u8], old_index: &[PackfileEntry], delta: &DeltaBatch) -> Vec<u8> {
+    fn compute_reference(
+        old_blob: &[u8],
+        old_index: &[PackfileEntry],
+        delta: &DeltaBatch,
+    ) -> Vec<u8> {
         const ENTRY_SIZE: usize = std::mem::size_of::<PackfileEntry>();
         const FOOTER_SIZE: usize = std::mem::size_of::<PackfileFooter>();
 
@@ -580,9 +599,21 @@ mod tests {
         // test (pas seulement par le test de non-régression dédié).
         let delta = DeltaBatch {
             entries: vec![
-                DeltaEntry { entity_id: 1, offset: 0, length: 0 },
-                DeltaEntry { entity_id: 2, offset: 0, length: 4 },
-                DeltaEntry { entity_id: 4, offset: 4, length: 5 },
+                DeltaEntry {
+                    entity_id: 1,
+                    offset: 0,
+                    length: 0,
+                },
+                DeltaEntry {
+                    entity_id: 2,
+                    offset: 0,
+                    length: 4,
+                },
+                DeltaEntry {
+                    entity_id: 4,
+                    offset: 4,
+                    length: 5,
+                },
             ],
             payload: b"BBBBDDDDD".to_vec(),
         };
@@ -614,7 +645,11 @@ mod tests {
         let old_blob = b"X".to_vec();
         let old_index = vec![pe(1, 0, 1)];
         let delta = DeltaBatch {
-            entries: vec![DeltaEntry { entity_id: 2, offset: 0, length: 3 }],
+            entries: vec![DeltaEntry {
+                entity_id: 2,
+                offset: 0,
+                length: 3,
+            }],
             payload: b"YYY".to_vec(),
         };
 
@@ -689,7 +724,15 @@ mod tests {
                 .filter_map(|&id| {
                     db.iter()
                         .find(|&&(rid, _)| rid == id)
-                        .map(|&(rid, generation)| (StubRecord { id: rid as i32, generation }, ()))
+                        .map(|&(rid, generation)| {
+                            (
+                                StubRecord {
+                                    id: rid as i32,
+                                    generation,
+                                },
+                                (),
+                            )
+                        })
                 })
                 .collect();
             async move { Ok(batch) }
@@ -727,7 +770,11 @@ mod tests {
             _ids: &[i64],
         ) -> impl std::future::Future<Output = marius_projection::BatchResult<Self>> + Send
         {
-            async { Err(sqlx::Error::Io(std::io::Error::other("échec PostgreSQL simulé"))) }
+            async {
+                Err(sqlx::Error::Io(std::io::Error::other(
+                    "échec PostgreSQL simulé",
+                )))
+            }
         }
 
         fn render(record: &StubRecord, _varlena: &(), buf: &mut String) {
@@ -765,7 +812,9 @@ mod tests {
     fn read_fragment(idx: &PackHtmlIndex, id: i64) -> Option<String> {
         let (offset, len) = idx.lookup(id)?;
         let mut buf = vec![0u8; len as usize];
-        idx.file().read_at(&mut buf, offset).expect("read_at fragment");
+        idx.file()
+            .read_at(&mut buf, offset)
+            .expect("read_at fragment");
         Some(String::from_utf8(buf).expect("fragment UTF-8 valide"))
     }
 
@@ -796,9 +845,21 @@ mod tests {
             .expect("tick 1 doit réussir");
 
         let gen1 = registry.load(key).unwrap();
-        assert_eq!(read_fragment(&gen1, 1), Some("<g0>".to_string()), "id=1 doit survivre, absent du delta du tick 1");
-        assert_eq!(read_fragment(&gen1, 2), Some("<g1>".to_string()), "id=2 doit refléter le tick 1");
-        assert_eq!(read_fragment(&gen1, 3), Some("<g0>".to_string()), "id=3 doit survivre, absent du delta du tick 1");
+        assert_eq!(
+            read_fragment(&gen1, 1),
+            Some("<g0>".to_string()),
+            "id=1 doit survivre, absent du delta du tick 1"
+        );
+        assert_eq!(
+            read_fragment(&gen1, 2),
+            Some("<g1>".to_string()),
+            "id=2 doit refléter le tick 1"
+        );
+        assert_eq!(
+            read_fragment(&gen1, 3),
+            Some("<g0>".to_string()),
+            "id=3 doit survivre, absent du delta du tick 1"
+        );
 
         // Tick 2 : seul id=3 touché.
         db_set(&[(1, 0), (2, 1), (3, 2)]);
@@ -807,9 +868,21 @@ mod tests {
             .expect("tick 2 doit réussir");
 
         let gen2 = registry.load(key).unwrap();
-        assert_eq!(read_fragment(&gen2, 1), Some("<g0>".to_string()), "id=1 doit survivre deux cycles sans jamais figurer dans un delta — c'est précisément le bug que merge_sweep corrige");
-        assert_eq!(read_fragment(&gen2, 2), Some("<g1>".to_string()), "id=2 doit survivre, absent du delta du tick 2");
-        assert_eq!(read_fragment(&gen2, 3), Some("<g2>".to_string()), "id=3 doit refléter le tick 2");
+        assert_eq!(
+            read_fragment(&gen2, 1),
+            Some("<g0>".to_string()),
+            "id=1 doit survivre deux cycles sans jamais figurer dans un delta — c'est précisément le bug que merge_sweep corrige"
+        );
+        assert_eq!(
+            read_fragment(&gen2, 2),
+            Some("<g1>".to_string()),
+            "id=2 doit survivre, absent du delta du tick 2"
+        );
+        assert_eq!(
+            read_fragment(&gen2, 3),
+            Some("<g2>".to_string()),
+            "id=3 doit refléter le tick 2"
+        );
 
         // Tick 3 : suppression de id=1 (disparaît de la base).
         db_set(&[(2, 1), (3, 2)]);
@@ -818,9 +891,21 @@ mod tests {
             .expect("tick 3 (suppression) doit réussir");
 
         let gen3 = registry.load(key).unwrap();
-        assert_eq!(read_fragment(&gen3, 1), None, "id=1 doit avoir disparu après suppression");
-        assert_eq!(read_fragment(&gen3, 2), Some("<g1>".to_string()), "id=2 doit survivre au tick de suppression");
-        assert_eq!(read_fragment(&gen3, 3), Some("<g2>".to_string()), "id=3 doit survivre au tick de suppression");
+        assert_eq!(
+            read_fragment(&gen3, 1),
+            None,
+            "id=1 doit avoir disparu après suppression"
+        );
+        assert_eq!(
+            read_fragment(&gen3, 2),
+            Some("<g1>".to_string()),
+            "id=2 doit survivre au tick de suppression"
+        );
+        assert_eq!(
+            read_fragment(&gen3, 3),
+            Some("<g2>".to_string()),
+            "id=3 doit survivre au tick de suppression"
+        );
 
         cleanup(&packfile_path_for(key));
     }
@@ -859,7 +944,10 @@ mod tests {
             &io_sem,
         )
         .await;
-        assert!(result.is_err(), "un échec fetch_batch doit remonter en Err, jamais être absorbé");
+        assert!(
+            result.is_err(),
+            "un échec fetch_batch doit remonter en Err, jamais être absorbé"
+        );
 
         let after = registry.load(key).unwrap();
         assert!(
@@ -911,7 +999,11 @@ mod tests {
         // le fichier produit, avec entry_count() == 0.
         let index = PackHtmlIndex::open(&path)
             .expect("le fichier provisionné doit être un packfile valide selon le lecteur réel");
-        assert_eq!(index.entry_count(), 0, "un packfile provisionné doit être vide");
+        assert_eq!(
+            index.entry_count(),
+            0,
+            "un packfile provisionné doit être vide"
+        );
 
         cleanup(&path);
     }

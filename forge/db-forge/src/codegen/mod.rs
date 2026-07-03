@@ -21,15 +21,10 @@ use crate::mapping::PrimaryKey;
 use std::fmt::Write as _;
 
 /// En-tête de section dans `generated_schema.rs`.
-pub fn write_section_header(
-    out:    &mut String,
-    schema: &str,
-    table:  &str,
-    pk:     &PrimaryKey,
-) {
+pub fn write_section_header(out: &mut String, schema: &str, table: &str, pk: &PrimaryKey) {
     let pk_info = match pk {
         PrimaryKey::Single(col) => format!("PK={col}"),
-        PrimaryKey::Composite   => "PK composite — Collector N/A".to_string(),
+        PrimaryKey::Composite => "PK composite — Collector N/A".to_string(),
     };
     writeln!(out, "// {}", "=".repeat(60)).unwrap();
     writeln!(out, "// {schema}.{table} · {pk_info}").unwrap();

@@ -29,8 +29,8 @@
 // les importe pour construire sa propre ROUTE_TABLE, pas l'inverse.
 // =============================================================================
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -193,7 +193,7 @@ impl LiveRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pack_html_format::{write_packfile_footer, PackfileEntry};
+    use crate::pack_html_format::{PackfileEntry, write_packfile_footer};
     use crate::pack_html_index::ALIVE_INSTANCES;
     use std::io::{BufWriter, Write};
     use std::os::unix::fs::FileExt;
@@ -269,9 +269,9 @@ mod tests {
                         IDS_AND_FRAGMENTS[(reader_id + i) % IDS_AND_FRAGMENTS.len()];
 
                     let idx = registry.load(KEY).expect("clé provisionnée au démarrage");
-                    let (offset, len) = idx
-                        .lookup(id)
-                        .unwrap_or_else(|| panic!("id={id} absent — présent dans chaque génération"));
+                    let (offset, len) = idx.lookup(id).unwrap_or_else(|| {
+                        panic!("id={id} absent — présent dans chaque génération")
+                    });
 
                     let mut buf = vec![0u8; len as usize];
                     idx.file()
@@ -404,10 +404,14 @@ mod tests {
 
         let registry = LiveRegistry::cold_start(route_table).expect("cold_start doit réussir");
 
-        let idx_a = registry.load(key_a).expect("clé a provisionnée par cold_start");
+        let idx_a = registry
+            .load(key_a)
+            .expect("clé a provisionnée par cold_start");
         assert_eq!(idx_a.lookup(1), Some((0, 11)));
 
-        let idx_b = registry.load(key_b).expect("clé b provisionnée par cold_start");
+        let idx_b = registry
+            .load(key_b)
+            .expect("clé b provisionnée par cold_start");
         assert_eq!(idx_b.lookup(1), Some((0, 11)));
     }
 

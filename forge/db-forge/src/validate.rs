@@ -39,10 +39,7 @@ use crate::mapping::{Column, map_type};
 ///
 /// * `columns`        — toutes les colonnes de la table (fixed + varlena), triées par attnum.
 /// * `intent_density` — meta.containment_intent.intent_density_bytes.
-pub fn validate_layout(
-    columns:        &[Column],
-    intent_density: i16,
-) -> Result<(), String> {
+pub fn validate_layout(columns: &[Column], intent_density: i16) -> Result<(), String> {
     // n_total : toutes les colonnes du heap tuple (fixed + varlena, hors systèmes).
     let n_total = columns.len();
 
@@ -51,12 +48,12 @@ pub fn validate_layout(
 
     // Payload : somme des colonnes fixed-length, paddée à max_align.
     let mut payload_bytes = 0usize;
-    let mut max_align     = 1usize;
+    let mut max_align = 1usize;
     for col in columns {
         let m = map_type(&col.sql_type);
         if m.is_fixed {
             payload_bytes += m.size_bytes;
-            max_align      = max_align.max(m.alignment);
+            max_align = max_align.max(m.alignment);
         }
     }
     let padded_payload = payload_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
@@ -119,8 +116,8 @@ mod tests {
     #[test]
     fn header_includes_varlena_in_null_bitmap() {
         let columns = vec![
-            col("id",    "int8", true),
-            col("label", "text", false),  // varlena — contribue au null bitmap
+            col("id", "int8", true),
+            col("label", "text", false), // varlena — contribue au null bitmap
         ];
         // n_total = 2, header = ((23 + 1) + 7) / 8 * 8 = 24
         // payload = 8, total = 32
@@ -150,8 +147,17 @@ mod tests {
     fn error_message_contains_computed_and_registered() {
         let columns = vec![col("id", "int8", true)];
         let err = validate_layout(&columns, 99).unwrap_err();
-        assert!(err.contains("32"),  "message doit mentionner la valeur calculée (32B)");
-        assert!(err.contains("99"),  "message doit mentionner la valeur enregistrée (99B)");
-        assert!(err.contains("diverge"), "message doit mentionner la divergence");
+        assert!(
+            err.contains("32"),
+            "message doit mentionner la valeur calculée (32B)"
+        );
+        assert!(
+            err.contains("99"),
+            "message doit mentionner la valeur enregistrée (99B)"
+        );
+        assert!(
+            err.contains("diverge"),
+            "message doit mentionner la divergence"
+        );
     }
 }

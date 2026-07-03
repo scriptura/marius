@@ -20,7 +20,7 @@ use std::mem;
 
 use bytemuck::Pod;
 
-use marius_projection::{align8, PackfileStoreHeader, Projection, VarlenSlot};
+use marius_projection::{PackfileStoreHeader, Projection, VarlenSlot, align8};
 
 // ── Builder ───────────────────────────────────────────────────────────────────
 
@@ -28,11 +28,11 @@ pub struct PackfileBuilder<P: Projection>
 where
     P::Record: Pod,
 {
-    records:      Vec<P::Record>,
-    id_index:     Vec<i64>,
-    varlena_toc:  Vec<VarlenSlot>,
+    records: Vec<P::Record>,
+    id_index: Vec<i64>,
+    varlena_toc: Vec<VarlenSlot>,
     varlena_heap: Vec<u8>,
-    _proj:        PhantomData<P>,
+    _proj: PhantomData<P>,
 }
 
 impl<P: Projection> PackfileBuilder<P>
@@ -44,11 +44,11 @@ where
     pub fn new(capacity: usize) -> Self {
         let vf = P::varlena_field_count() as usize;
         Self {
-            records:      Vec::with_capacity(capacity),
-            id_index:     Vec::with_capacity(capacity),
-            varlena_toc:  Vec::with_capacity(capacity * vf),
+            records: Vec::with_capacity(capacity),
+            id_index: Vec::with_capacity(capacity),
+            varlena_toc: Vec::with_capacity(capacity * vf),
             varlena_heap: Vec::with_capacity(capacity * 64), // heuristique : 64B/enreg.
-            _proj:        PhantomData,
+            _proj: PhantomData,
         }
     }
 
@@ -71,24 +71,24 @@ where
     /// Le writer doit supporter Write (BufWriter<File>).
     pub fn write<W: Write>(&self, writer: &mut BufWriter<W>) -> io::Result<()> {
         let row_count = self.records.len() as u64;
-        let stride    = mem::size_of::<P::Record>() as u32;
-        let vf        = P::varlena_field_count() as u64;
+        let stride = mem::size_of::<P::Record>() as u32;
+        let vf = P::varlena_field_count() as u64;
 
         // ── Calcul des offsets de section (align8 importé de marius_projection) ─
-        let rows_section         = 64u64;
-        let id_index_section     = align8(rows_section + row_count * stride as u64);
-        let varlena_toc_section  = align8(id_index_section + row_count * 8);
+        let rows_section = 64u64;
+        let id_index_section = align8(rows_section + row_count * stride as u64);
+        let varlena_toc_section = align8(id_index_section + row_count * 8);
         let varlena_heap_section = align8(varlena_toc_section + row_count * vf * 8);
-        let varlena_heap_len     = self.varlena_heap.len() as u64;
+        let varlena_heap_len = self.varlena_heap.len() as u64;
 
         // ── Header (PackfileStoreHeader importé de marius_projection) ────────
         let header = PackfileStoreHeader {
-            magic:                *b"MARIUSDB",
-            version:              1,
+            magic: *b"MARIUSDB",
+            version: 1,
             stride,
             row_count,
-            varlena_field_count:  P::varlena_field_count(),
-            _pad:                 [0u8; 6],
+            varlena_field_count: P::varlena_field_count(),
+            _pad: [0u8; 6],
             id_index_section,
             varlena_toc_section,
             varlena_heap_section,
@@ -98,15 +98,24 @@ where
 
         // ── StorageRow array (zero-copy) ─────────────────────────────────────
         writer.write_all(bytemuck::cast_slice(&self.records))?;
-        pad_to(writer, id_index_section - (rows_section + row_count * stride as u64))?;
+        pad_to(
+            writer,
+            id_index_section - (rows_section + row_count * stride as u64),
+        )?;
 
         // ── ID Index ─────────────────────────────────────────────────────────
         writer.write_all(bytemuck::cast_slice(&self.id_index))?;
-        pad_to(writer, varlena_toc_section - id_index_section - row_count * 8)?;
+        pad_to(
+            writer,
+            varlena_toc_section - id_index_section - row_count * 8,
+        )?;
 
         // ── Varlena TOC ───────────────────────────────────────────────────────
         writer.write_all(bytemuck::cast_slice(&self.varlena_toc))?;
-        pad_to(writer, varlena_heap_section - varlena_toc_section - row_count * vf * 8)?;
+        pad_to(
+            writer,
+            varlena_heap_section - varlena_toc_section - row_count * vf * 8,
+        )?;
 
         // ── Varlena Heap ─────────────────────────────────────────────────────
         writer.write_all(&self.varlena_heap)?;
@@ -115,7 +124,9 @@ where
     }
 
     #[inline(always)]
-    pub fn row_count(&self) -> usize { self.records.len() }
+    pub fn row_count(&self) -> usize {
+        self.records.len()
+    }
 }
 
 // ── Helper IO ─────────────────────────────────────────────────────────────────
@@ -139,7 +150,10 @@ mod tests {
 
     #[test]
     fn varlena_null_sentinel_is_u32_max() {
-        let slot = VarlenSlot { offset: u32::MAX, len: 0 };
+        let slot = VarlenSlot {
+            offset: u32::MAX,
+            len: 0,
+        };
         assert!(slot.offset == u32::MAX && slot.len == 0);
     }
 }

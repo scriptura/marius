@@ -24,29 +24,30 @@ use crate::naming::to_pascal;
 ///
 ///   size_of et align_of vérifiés à la compilation. Un ALTER TABLE non suivi
 ///   d'une reconstruction déclenche une erreur compilateur, pas une corruption.
-pub fn write_store_struct(
-    out:     &mut String,
-    schema:  &str,
-    table:   &str,
-    columns: &[Column],
-) {
+pub fn write_store_struct(out: &mut String, schema: &str, table: &str, columns: &[Column]) {
     let name = to_pascal(&format!("{schema}_{table}"));
 
-    writeln!(out,
+    writeln!(
+        out,
         "/// Struct de stockage en mémoire contiguë pour {schema}.{table}.\n\
          /// #[repr(C)] : layout bit-à-bit aligné sur le heap tuple PostgreSQL.\n\
          /// Champs fixed-length uniquement. Nullable → sentinel (0 ou -1 selon type).\n\
          /// Varlena exclues : portées par VarlenOwned.\n\
          ///\n\
          /// AVERTISSEMENT NULLABLE : sentinel domain-specific (Phase 3 : pg_description)."
-    ).unwrap();
+    )
+    .unwrap();
     writeln!(out, "#[repr(C)]").unwrap();
     // INTEGRATION PHASE 1.4 : Dérivation sécurisée via bytemuck
-    writeln!(out, "#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]").unwrap();
+    writeln!(
+        out,
+        "#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]"
+    )
+    .unwrap();
     writeln!(out, "pub struct {name}StorageRow {{").unwrap();
 
     let mut layout_bytes = 0usize;
-    let mut max_align    = 1usize;
+    let mut max_align = 1usize;
 
     for col in columns {
         let m = map_type(&col.sql_type);
@@ -59,20 +60,27 @@ pub fn write_store_struct(
             };
 
             // INTEGRATION PHASE 1.4 : bool n'est pas Pod-safe (un bit à 0x02 est invalide), substitution par u8
-            let emit_type = if m.store_type == "bool" { "u8" } else { m.store_type };
+            let emit_type = if m.store_type == "bool" {
+                "u8"
+            } else {
+                m.store_type
+            };
 
-            writeln!(out,
+            writeln!(
+                out,
                 "    pub {}: {},{}  // attnum={}, {}B{}",
-                col.name, emit_type, pad,
-                col.attnum, m.size_bytes, null_marker,
-            ).unwrap();
+                col.name, emit_type, pad, col.attnum, m.size_bytes, null_marker,
+            )
+            .unwrap();
             layout_bytes += m.size_bytes;
-            max_align     = max_align.max(m.alignment);
+            max_align = max_align.max(m.alignment);
         } else {
-            writeln!(out,
+            writeln!(
+                out,
                 "    // VARLENA exclu : {} ({}) → VarlenOwned",
                 col.name, col.sql_type
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 
@@ -80,7 +88,11 @@ pub fn write_store_struct(
     let padded_size = layout_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
     let tail_pad = padded_size - layout_bytes;
     if tail_pad > 0 {
-        writeln!(out, "    pub _pad: [u8; {tail_pad}], // Tail padding explicite pour alignement Pod").unwrap();
+        writeln!(
+            out,
+            "    pub _pad: [u8; {tail_pad}], // Tail padding explicite pour alignement Pod"
+        )
+        .unwrap();
     }
 
     writeln!(out, "}}").unwrap();
@@ -89,11 +101,16 @@ pub fn write_store_struct(
     writeln!(out,
         "// Layout fixed-length : {layout_bytes}B données → {padded_size}B padded (align={max_align}B)"
     ).unwrap();
-    writeln!(out,
+    writeln!(
+        out,
         "// + {}B header heap PostgreSQL (MAXALIGN(23 + ceil({}/8)))",
-        { let n = columns.len(); (23 + n.div_ceil(8)).div_ceil(8) * 8 },
+        {
+            let n = columns.len();
+            (23 + n.div_ceil(8)).div_ceil(8) * 8
+        },
         columns.len()
-    ).unwrap();
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     // static_assertions : symétrie binaire à la compilation
@@ -103,11 +120,13 @@ pub fn write_store_struct(
          \"DB-Forge [{schema}.{table}]: size_of diverge du DDL — reconstruire après ALTER TABLE\",\n\
          );"
     ).unwrap();
-    writeln!(out,
+    writeln!(
+        out,
         "const _: () = assert!(\n    \
          std::mem::align_of::<{name}StorageRow>() == {max_align},\n    \
          \"DB-Forge [{schema}.{table}]: align_of diverge du DDL — vérifier les types colonnes\",\n\
          );"
-    ).unwrap();
+    )
+    .unwrap();
     writeln!(out).unwrap();
 }

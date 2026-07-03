@@ -115,12 +115,12 @@ impl FieldKind {
     /// no-realloc → détecté par test_{name}_no_realloc().
     pub const fn max_display_width(self) -> usize {
         match self {
-            Self::I64  => 20,  // "-9223372036854775808"
-            Self::I32  => 11,  // "-2147483648"
-            Self::I16  => 6,   // "-32768"
-            Self::Bool => 5,   // "false"
-            Self::F32  => 14,  // "-3.40282347e38" (approximation conservative)
-            Self::F64  => 24,  // représentation longue
+            Self::I64 => 20, // "-9223372036854775808"
+            Self::I32 => 11, // "-2147483648"
+            Self::I16 => 6,  // "-32768"
+            Self::Bool => 5, // "false"
+            Self::F32 => 14, // "-3.40282347e38" (approximation conservative)
+            Self::F64 => 24, // représentation longue
         }
     }
 
@@ -132,16 +132,24 @@ impl FieldKind {
     pub fn from_sql_type(sql_type: &str) -> Option<Self> {
         // Normalise "character varying(255)" → "character varying"
         // pour que le match soit insensible à la précision.
-        let t = sql_type.split('(').next().unwrap_or(sql_type).trim().to_lowercase();
+        let t = sql_type
+            .split('(')
+            .next()
+            .unwrap_or(sql_type)
+            .trim()
+            .to_lowercase();
         match t.as_str() {
-            "int8" | "bigint"
-            | "timestamptz" | "timestamp with time zone"
-            | "timestamp"   | "timestamp without time zone" => Some(Self::I64),
+            "int8"
+            | "bigint"
+            | "timestamptz"
+            | "timestamp with time zone"
+            | "timestamp"
+            | "timestamp without time zone" => Some(Self::I64),
             "int4" | "integer" | "int" | "serial" | "date" => Some(Self::I32),
-            "int2" | "smallint"                            => Some(Self::I16),
-            "bool" | "boolean"                             => Some(Self::Bool),
-            "float4" | "real"                              => Some(Self::F32),
-            "float8" | "double precision"                  => Some(Self::F64),
+            "int2" | "smallint" => Some(Self::I16),
+            "bool" | "boolean" => Some(Self::Bool),
+            "float4" | "real" => Some(Self::F32),
+            "float8" | "double precision" => Some(Self::F64),
             // Varlena, pg_lsn, types inconnus → exclu du pipeline fixed-length.
             _ => None,
         }
@@ -156,9 +164,9 @@ impl FieldKind {
 #[derive(Debug, Clone)]
 pub struct FieldSpec {
     /// Nom de la colonne (attname).
-    pub name:   String,
+    pub name: String,
     /// Catégorie de type (détermine max_display_width).
-    pub kind:   FieldKind,
+    pub kind: FieldKind,
     /// Numéro d'attribut physique dans le heap PostgreSQL (pg_attribute.attnum).
     /// Strictement positif (les colonnes système ont attnum <= 0).
     pub attnum: i16,
@@ -197,7 +205,7 @@ pub struct FieldSpec {
 #[derive(Debug, Clone)]
 pub struct VarlenField {
     /// Nom de la colonne dans la table jointe.
-    pub name:                    String,
+    pub name: String,
     /// Borne supérieure en octets, si elle existe dans le schéma PostgreSQL
     /// (VARCHAR(N) via atttypmod, ou TEXT avec CHECK(length(col) <= N) parsable).
     ///
@@ -207,19 +215,19 @@ pub struct VarlenField {
     /// selon que le champ est référencé ou non par le template résolu.
     /// Aucun fallback numérique n'est jamais substitué à None — une absence
     /// de borne reste une absence de borne jusqu'à la frontière de résolution.
-    pub max_len:                  Option<usize>,
+    pub max_len: Option<usize>,
     /// true si le contenu est certifié pré-échappé (tag 'marius:pre_escaped').
     /// Facteur de capacité = 1 au lieu de HTML_ESCAPE_FACTOR.
-    pub pre_escaped:               bool,
+    pub pre_escaped: bool,
     /// true si la colonne DDL est nullable (Option<String> dans VarlenOwned).
     /// En v1, toujours true (LEFT JOIN produit systématiquement Option).
     /// Réservé v2 : champ NOT NULL → String directe, court-circuite l'Option.
-    pub nullable:                  bool,
+    pub nullable: bool,
     /// Surcharge manuelle de max_escaped_len. None = calculé (max_len × facteur).
     /// Utile quand la borne théorique est trop conservative pour un champ donné.
     /// Sans effet si `max_len` est également `None` — il n'y a alors rien à
     /// surcharger, `max_escaped_len()` retourne None indépendamment de ce champ.
-    pub max_escaped_len_override:  Option<usize>,
+    pub max_escaped_len_override: Option<usize>,
 }
 
 impl VarlenField {
@@ -262,7 +270,7 @@ impl VarlenField {
 /// ce qui rend un HashMap superflu et moins cache-friendly.
 pub struct SchemaIndex<'a> {
     /// Champs fixed-length du StorageRow, dans l'ordre attnum.
-    pub fixed:   &'a [FieldSpec],
+    pub fixed: &'a [FieldSpec],
     /// Champs varlena de la table jointe.
     pub varlena: &'a [VarlenField],
 }
@@ -324,10 +332,7 @@ pub fn static_const_ident(path: &str) -> String {
 /// `manifest_dir`       : CARGO_MANIFEST_DIR du crate appelant build.rs.
 /// `rel_from_manifest`  : chemin du template relatif au manifeste
 ///                        (ex: "templates/page.marius").
-pub fn relative_path_for_include_str(
-    manifest_dir:      &str,
-    rel_from_manifest: &str,
-) -> String {
+pub fn relative_path_for_include_str(manifest_dir: &str, rel_from_manifest: &str) -> String {
     use std::path::Path;
     Path::new(manifest_dir)
         .join(rel_from_manifest)
@@ -371,9 +376,9 @@ pub fn relative_path_for_include_str(
 /// bornés). `TemplateMetrics::total_dynamic_bytes` est l'unique source de
 /// vérité pour la capacité dynamique.
 pub fn static_capacity(
-    schema:  &str,
-    table:   &str,
-    fields:  &[FieldSpec],
+    schema: &str,
+    table: &str,
+    fields: &[FieldSpec],
     varlena: &[VarlenField],
 ) -> usize {
     // `<article class="` = 16 octets
@@ -483,16 +488,10 @@ pub enum FlatPageToken<'src> {
     Static(&'src str),
 
     /// Interpolation de champ : `{{ entity.field }}`.
-    Field {
-        entity: &'src str,
-        field:  &'src str,
-    },
+    Field { entity: &'src str, field: &'src str },
 
     /// Bloc conditionnel booléen : `{% if entity.field %}`.
-    IfBool {
-        entity: &'src str,
-        field:  &'src str,
-    },
+    IfBool { entity: &'src str, field: &'src str },
 
     /// Fermeture de bloc : `{% endif %}`.
     EndIf,
@@ -502,9 +501,9 @@ pub enum FlatPageToken<'src> {
     /// `len` : longueur en octets du fichier inclus, connue à la compilation
     /// (via `std::fs::metadata`). Composante directe de `PAGE_STATIC_CAP`.
     StaticInclude {
-        original_path:     &'src str,
+        original_path: &'src str,
         rel_from_manifest: &'src str,
-        len:               usize,
+        len: usize,
     },
 }
 
@@ -534,13 +533,19 @@ mod tests_phase_1_1 {
     fn all_variants_are_copy() {
         let tokens: [FlatPageToken<'_>; 5] = [
             FlatPageToken::Static("content"),
-            FlatPageToken::Field   { entity: "user", field: "name" },
-            FlatPageToken::IfBool  { entity: "user", field: "active" },
+            FlatPageToken::Field {
+                entity: "user",
+                field: "name",
+            },
+            FlatPageToken::IfBool {
+                entity: "user",
+                field: "active",
+            },
             FlatPageToken::EndIf,
             FlatPageToken::StaticInclude {
-                original_path:     "templates/header.html",
+                original_path: "templates/header.html",
                 rel_from_manifest: "../templates/header.html",
-                len:               42,
+                len: 42,
             },
         ];
 
@@ -588,27 +593,31 @@ pub enum SpanKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawSpan<'src> {
     pub slice: &'src str,
-    pub kind:  SpanKind,
+    pub kind: SpanKind,
 }
 
 // ─── État interne ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    Literal,  // Entre les blocs : tout est HTML statique jusqu'au prochain délimiteur.
-    InExpr,   // Intérieur de `{{ … }}` : Ident, Punct, ExprClose.
-    InBlock,  // Intérieur de `{% … %}` : Ident (token brut), BlockClose.
+    Literal, // Entre les blocs : tout est HTML statique jusqu'au prochain délimiteur.
+    InExpr,  // Intérieur de `{{ … }}` : Ident, Punct, ExprClose.
+    InBlock, // Intérieur de `{% … %}` : Ident (token brut), BlockClose.
 }
 
 struct Scanner<'src> {
-    src:  &'src str,
-    pos:  usize,   // Offset byte courant — toujours sur une frontière char valide.
+    src: &'src str,
+    pos: usize, // Offset byte courant — toujours sur une frontière char valide.
     mode: Mode,
 }
 
 impl<'src> Scanner<'src> {
     fn new(src: &'src str) -> Self {
-        Self { src, pos: 0, mode: Mode::Literal }
+        Self {
+            src,
+            pos: 0,
+            mode: Mode::Literal,
+        }
     }
 
     /// Avance `pos` au-delà des espaces ASCII (U+0009, U+000A, U+000D, U+0020).
@@ -638,7 +647,6 @@ impl<'src> Iterator for Scanner<'src> {
         }
 
         match self.mode {
-
             // ─── Literal ───────────────────────────────────────────────────
             // Cherche le prochain `{{` ou `{%`.
             // Émet le Literal précédant le délimiteur, puis le délimiteur lui-même
@@ -650,13 +658,16 @@ impl<'src> Iterator for Scanner<'src> {
                 let rel = match (rest.find("{{"), rest.find("{%")) {
                     (Some(a), Some(b)) => Some(a.min(b)),
                     (Some(a), None) | (None, Some(a)) => Some(a),
-                    (None, None)                       => None,
+                    (None, None) => None,
                 };
 
                 match rel {
                     // Pas de délimiteur : le reste est un unique Literal.
                     None => {
-                        let span = RawSpan { slice: &src[self.pos..], kind: SpanKind::Literal };
+                        let span = RawSpan {
+                            slice: &src[self.pos..],
+                            kind: SpanKind::Literal,
+                        };
                         self.pos = src.len();
                         Some(span)
                     }
@@ -665,21 +676,30 @@ impl<'src> Iterator for Scanner<'src> {
                         let p = self.pos;
                         if src[p..].starts_with("{{") {
                             self.mode = Mode::InExpr;
-                            self.pos  = p + 2;
-                            Some(RawSpan { slice: &src[p..p + 2], kind: SpanKind::ExprOpen })
+                            self.pos = p + 2;
+                            Some(RawSpan {
+                                slice: &src[p..p + 2],
+                                kind: SpanKind::ExprOpen,
+                            })
                         } else {
                             // starts_with("{%") — seule autre option possible
                             self.mode = Mode::InBlock;
-                            self.pos  = p + 2;
-                            Some(RawSpan { slice: &src[p..p + 2], kind: SpanKind::BlockOpen })
+                            self.pos = p + 2;
+                            Some(RawSpan {
+                                slice: &src[p..p + 2],
+                                kind: SpanKind::BlockOpen,
+                            })
                         }
                     }
                     // Literal précède le délimiteur.
                     // On émet le Literal et on reste en mode Literal :
                     // le délimiteur sera émis au prochain appel.
                     Some(rel) => {
-                        let end  = self.pos + rel;
-                        let span = RawSpan { slice: &src[self.pos..end], kind: SpanKind::Literal };
+                        let end = self.pos + rel;
+                        let span = RawSpan {
+                            slice: &src[self.pos..end],
+                            kind: SpanKind::Literal,
+                        };
                         self.pos = end;
                         Some(span)
                     }
@@ -700,19 +720,25 @@ impl<'src> Iterator for Scanner<'src> {
 
                 if src[p..].starts_with("}}") {
                     self.mode = Mode::Literal;
-                    self.pos  = p + 2;
-                    return Some(RawSpan { slice: &src[p..p + 2], kind: SpanKind::ExprClose });
+                    self.pos = p + 2;
+                    return Some(RawSpan {
+                        slice: &src[p..p + 2],
+                        kind: SpanKind::ExprClose,
+                    });
                 }
 
                 if src[p..].starts_with('.') {
                     self.pos = p + 1;
-                    return Some(RawSpan { slice: &src[p..p + 1], kind: SpanKind::Punct });
+                    return Some(RawSpan {
+                        slice: &src[p..p + 1],
+                        kind: SpanKind::Punct,
+                    });
                 }
 
                 // Identifiant : séquence de bytes ASCII alphanumériques ou `_`.
                 // Tous single-byte → `pos` reste sur une frontière valide.
                 let start = p;
-                let b     = src.as_bytes();
+                let b = src.as_bytes();
                 while self.pos < src.len()
                     && (b[self.pos].is_ascii_alphanumeric() || b[self.pos] == b'_')
                 {
@@ -720,7 +746,10 @@ impl<'src> Iterator for Scanner<'src> {
                 }
 
                 if self.pos > start {
-                    Some(RawSpan { slice: &src[start..self.pos], kind: SpanKind::Ident })
+                    Some(RawSpan {
+                        slice: &src[start..self.pos],
+                        kind: SpanKind::Ident,
+                    })
                 } else {
                     // Byte inattendu (non-ASCII ou ponctuation inconnue).
                     // Avance d'un byte et relance : la récursion est bornée à 1 niveau
@@ -746,8 +775,11 @@ impl<'src> Iterator for Scanner<'src> {
 
                 if b[p] == b'%' && p + 1 < src.len() && b[p + 1] == b'}' {
                     self.mode = Mode::Literal;
-                    self.pos  = p + 2;
-                    return Some(RawSpan { slice: &src[p..p + 2], kind: SpanKind::BlockClose });
+                    self.pos = p + 2;
+                    return Some(RawSpan {
+                        slice: &src[p..p + 2],
+                        kind: SpanKind::BlockClose,
+                    });
                 }
 
                 // Scan byte par byte jusqu'à un espace ou `%}`.
@@ -767,7 +799,10 @@ impl<'src> Iterator for Scanner<'src> {
                 }
 
                 if self.pos > start {
-                    Some(RawSpan { slice: &src[start..self.pos], kind: SpanKind::Ident })
+                    Some(RawSpan {
+                        slice: &src[start..self.pos],
+                        kind: SpanKind::Ident,
+                    })
                 } else {
                     None // Byte non-ASCII isolé — Phase 1.4 remonte l'erreur structurelle.
                 }
@@ -790,7 +825,7 @@ pub fn scan(src: &str) -> impl Iterator<Item = RawSpan<'_>> {
 
 #[cfg(test)]
 mod tests_phase_1_2 {
-    use super::{scan, RawSpan, SpanKind};
+    use super::{RawSpan, SpanKind, scan};
 
     // Helper : construit un RawSpan depuis une &'static str.
     // PartialEq sur &str compare le contenu, pas l'adresse.
@@ -806,17 +841,17 @@ mod tests_phase_1_2 {
     /// Pas d'assertion sur les adresses mémoire (la découpe par contenu suffit).
     #[test]
     fn scan_expr_interpolation() {
-        let src  = "hello {{ user.name }} world";
+        let src = "hello {{ user.name }} world";
         let got: Vec<_> = scan(src).collect();
 
         let expected = [
-            s("hello ",  SpanKind::Literal),
-            s("{{",      SpanKind::ExprOpen),
-            s("user",    SpanKind::Ident),
-            s(".",       SpanKind::Punct),
-            s("name",    SpanKind::Ident),
-            s("}}",      SpanKind::ExprClose),
-            s(" world",  SpanKind::Literal),
+            s("hello ", SpanKind::Literal),
+            s("{{", SpanKind::ExprOpen),
+            s("user", SpanKind::Ident),
+            s(".", SpanKind::Punct),
+            s("name", SpanKind::Ident),
+            s("}}", SpanKind::ExprClose),
+            s(" world", SpanKind::Literal),
         ];
 
         assert_eq!(got.len(), expected.len(), "nombre de spans incorrect");
@@ -834,14 +869,14 @@ mod tests_phase_1_2 {
         let got: Vec<_> = scan(src).collect();
 
         let expected = [
-            s("{%",           SpanKind::BlockOpen),
-            s("if",           SpanKind::Ident),
-            s("user.active",  SpanKind::Ident),
-            s("%}",           SpanKind::BlockClose),
-            s("oui",          SpanKind::Literal),
-            s("{%",           SpanKind::BlockOpen),
-            s("endif",        SpanKind::Ident),
-            s("%}",           SpanKind::BlockClose),
+            s("{%", SpanKind::BlockOpen),
+            s("if", SpanKind::Ident),
+            s("user.active", SpanKind::Ident),
+            s("%}", SpanKind::BlockClose),
+            s("oui", SpanKind::Literal),
+            s("{%", SpanKind::BlockOpen),
+            s("endif", SpanKind::Ident),
+            s("%}", SpanKind::BlockClose),
         ];
 
         assert_eq!(got.len(), expected.len(), "nombre de spans incorrect");
@@ -853,7 +888,10 @@ mod tests_phase_1_2 {
     /// Cas limites : source vide et source sans délimiteur.
     #[test]
     fn scan_empty_and_literal_only() {
-        assert!(scan("").next().is_none(), "source vide doit être épuisée immédiatement");
+        assert!(
+            scan("").next().is_none(),
+            "source vide doit être épuisée immédiatement"
+        );
 
         let got: Vec<_> = scan("<p>texte statique</p>").collect();
         assert_eq!(got, [s("<p>texte statique</p>", SpanKind::Literal)]);
@@ -863,8 +901,11 @@ mod tests_phase_1_2 {
     #[test]
     fn scan_delimiter_at_start() {
         let got: Vec<_> = scan("{{ x }}").collect();
-        assert_eq!(got[0].kind, SpanKind::ExprOpen,
-            "le premier span doit être ExprOpen, pas un Literal vide");
+        assert_eq!(
+            got[0].kind,
+            SpanKind::ExprOpen,
+            "le premier span doit être ExprOpen, pas un Literal vide"
+        );
     }
 }
 
@@ -888,7 +929,10 @@ mod tests_phase_1_2 {
 #[derive(Debug, PartialEq, Eq)]
 pub enum PageParseError {
     /// Token reçu ≠ token attendu à cette position de l'automate.
-    UnexpectedToken { expected: &'static str, got: SpanKind },
+    UnexpectedToken {
+        expected: &'static str,
+        got: SpanKind,
+    },
     /// Itérateur épuisé alors qu'un token était requis pour compléter un pattern.
     UnexpectedEof,
     /// Séquence de bloc non reconnue :
@@ -911,25 +955,27 @@ pub fn parse_tokens<'src>(
     spans: impl Iterator<Item = RawSpan<'src>>,
 ) -> Result<Vec<FlatPageToken<'src>>, PageParseError> {
     let mut iter = spans.peekable();
-    let mut ast  = Vec::new();
+    let mut ast = Vec::new();
 
     while let Some(span) = iter.next() {
         let token = match span.kind {
             // Texte HTML verbatim → Static directement.
-            SpanKind::Literal  => FlatPageToken::Static(span.slice),
+            SpanKind::Literal => FlatPageToken::Static(span.slice),
 
             // `{{ entity.field }}` → Field.
-            SpanKind::ExprOpen  => parse_expr(&mut iter)?,
+            SpanKind::ExprOpen => parse_expr(&mut iter)?,
 
             // `{% keyword … %}` → IfBool | EndIf | StaticInclude.
             SpanKind::BlockOpen => parse_block(&mut iter)?,
 
             // Tout autre span en position initiale est une erreur structurelle.
             // ExprClose, BlockClose, Ident, Punct ne peuvent pas ouvrir un token.
-            got => return Err(PageParseError::UnexpectedToken {
-                expected: "Literal | ExprOpen | BlockOpen",
-                got,
-            }),
+            got => {
+                return Err(PageParseError::UnexpectedToken {
+                    expected: "Literal | ExprOpen | BlockOpen",
+                    got,
+                });
+            }
         };
         ast.push(token);
     }
@@ -947,8 +993,8 @@ where
     I: Iterator<Item = RawSpan<'src>>,
 {
     let entity = expect_ident(iter, "Ident(entity)")?;
-    expect_kind(iter, SpanKind::Punct,     "Punct('.')")?;
-    let field  = expect_ident(iter, "Ident(field)")?;
+    expect_kind(iter, SpanKind::Punct, "Punct('.')")?;
+    let field = expect_ident(iter, "Ident(field)")?;
     expect_kind(iter, SpanKind::ExprClose, "ExprClose('}}')")?;
     Ok(FlatPageToken::Field { entity, field })
 }
@@ -972,7 +1018,7 @@ where
 
     match keyword {
         "if" => {
-            let raw            = expect_ident(iter, "Ident(entity.field)")?;
+            let raw = expect_ident(iter, "Ident(entity.field)")?;
             let (entity, field) = split_dotted(raw)?;
             expect_kind(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
             Ok(FlatPageToken::IfBool { entity, field })
@@ -985,9 +1031,9 @@ where
             let path = expect_ident(iter, "Ident(path)")?;
             expect_kind(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
             Ok(FlatPageToken::StaticInclude {
-                original_path:     path,
+                original_path: path,
                 rel_from_manifest: path, // provisoire : sera résolu par l'orchestrateur
-                len:               0,    // provisoire : idem
+                len: 0,                  // provisoire : idem
             })
         }
         _ => Err(PageParseError::InvalidBlockSequence),
@@ -999,17 +1045,17 @@ where
 /// Consomme le span suivant et retourne sa slice si c'est un `Ident`.
 /// Retourne une erreur décrivant ce qui était attendu sinon.
 #[inline]
-fn expect_ident<'src, I>(
-    iter:     &mut I,
-    expected: &'static str,
-) -> Result<&'src str, PageParseError>
+fn expect_ident<'src, I>(iter: &mut I, expected: &'static str) -> Result<&'src str, PageParseError>
 where
     I: Iterator<Item = RawSpan<'src>>,
 {
     match iter.next() {
         Some(span) if span.kind == SpanKind::Ident => Ok(span.slice),
-        Some(span) => Err(PageParseError::UnexpectedToken { expected, got: span.kind }),
-        None       => Err(PageParseError::UnexpectedEof),
+        Some(span) => Err(PageParseError::UnexpectedToken {
+            expected,
+            got: span.kind,
+        }),
+        None => Err(PageParseError::UnexpectedEof),
     }
 }
 
@@ -1017,8 +1063,8 @@ where
 /// La slice n'est pas retournée (les délimiteurs ne portent pas de sémantique).
 #[inline]
 fn expect_kind<'src, I>(
-    iter:     &mut I,
-    kind:     SpanKind,
+    iter: &mut I,
+    kind: SpanKind,
     expected: &'static str,
 ) -> Result<(), PageParseError>
 where
@@ -1026,8 +1072,11 @@ where
 {
     match iter.next() {
         Some(span) if span.kind == kind => Ok(()),
-        Some(span) => Err(PageParseError::UnexpectedToken { expected, got: span.kind }),
-        None       => Err(PageParseError::UnexpectedEof),
+        Some(span) => Err(PageParseError::UnexpectedToken {
+            expected,
+            got: span.kind,
+        }),
+        None => Err(PageParseError::UnexpectedEof),
     }
 }
 
@@ -1050,11 +1099,7 @@ fn split_dotted(raw: &str) -> Result<(&str, &str), PageParseError> {
 
 #[cfg(test)]
 mod tests_phase_1_3 {
-    use super::{
-        parse_tokens, PageParseError,
-        scan, SpanKind,
-        FlatPageToken,
-    };
+    use super::{FlatPageToken, PageParseError, SpanKind, parse_tokens, scan};
 
     /// Jalon Vert Phase 1.3.
     ///
@@ -1067,27 +1112,39 @@ mod tests_phase_1_3 {
     /// à l'orchestrateur ou à un éventuel pass de compression — pas au parseur.
     #[test]
     fn parse_full_template() {
-        let src = "hello {{ user.name }} {% if user.active %} {% include fragment.html %} {% endif %}";
+        let src =
+            "hello {{ user.name }} {% if user.active %} {% include fragment.html %} {% endif %}";
         let got = parse_tokens(scan(src)).expect("parsing doit réussir sur un template valide");
 
         // Note : FlatPageToken doit dériver PartialEq, Eq (ajout non-cassant sur Phase 1.1).
         let expected: &[FlatPageToken<'_>] = &[
             FlatPageToken::Static("hello "),
-            FlatPageToken::Field { entity: "user", field: "name" },
+            FlatPageToken::Field {
+                entity: "user",
+                field: "name",
+            },
             FlatPageToken::Static(" "),
-            FlatPageToken::IfBool { entity: "user", field: "active" },
+            FlatPageToken::IfBool {
+                entity: "user",
+                field: "active",
+            },
             FlatPageToken::Static(" "),
             FlatPageToken::StaticInclude {
-                original_path:     "fragment.html",
+                original_path: "fragment.html",
                 rel_from_manifest: "fragment.html",
-                len:               0,
+                len: 0,
             },
             FlatPageToken::Static(" "),
             FlatPageToken::EndIf,
         ];
 
-        assert_eq!(got.len(), expected.len(),
-            "nombre de tokens incorrect : got {}, expected {}", got.len(), expected.len());
+        assert_eq!(
+            got.len(),
+            expected.len(),
+            "nombre de tokens incorrect : got {}, expected {}",
+            got.len(),
+            expected.len()
+        );
 
         for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
             assert_eq!(g, e, "token[{i}] incorrect");
@@ -1099,14 +1156,17 @@ mod tests_phase_1_3 {
     fn error_on_unexpected_top_level_span() {
         // Scanner ne peut pas produire un ExprClose seul en position initiale,
         // mais ce test vérifie le chemin d'erreur de parse_tokens directement.
-        use super::{RawSpan};
-        let orphan = [RawSpan { slice: "}}", kind: SpanKind::ExprClose }];
+        use super::RawSpan;
+        let orphan = [RawSpan {
+            slice: "}}",
+            kind: SpanKind::ExprClose,
+        }];
         let err = parse_tokens(orphan.into_iter()).unwrap_err();
         assert_eq!(
             err,
             PageParseError::UnexpectedToken {
                 expected: "Literal | ExprOpen | BlockOpen",
-                got:      SpanKind::ExprClose,
+                got: SpanKind::ExprClose,
             }
         );
     }
@@ -1129,7 +1189,7 @@ mod tests_phase_1_3 {
             err,
             PageParseError::UnexpectedToken {
                 expected: "keyword (if | endif | include)",
-                got:      SpanKind::BlockClose,
+                got: SpanKind::BlockClose,
             }
         );
     }
@@ -1166,7 +1226,10 @@ pub enum SemanticError<'src> {
     /// Un `{% if %}` rencontré alors qu'un bloc était déjà ouvert.
     /// L'ouverture imbriquée est ignorée (heuristique de récupération) :
     /// l'état courant est préservé, le prochain `EndIf` ferme le bloc externe.
-    NestedIfNotSupported { nested_entity: &'src str, nested_field: &'src str },
+    NestedIfNotSupported {
+        nested_entity: &'src str,
+        nested_field: &'src str,
+    },
     /// Fin de l'AST atteinte alors qu'un bloc `if` était encore ouvert.
     UnclosedIf { entity: &'src str, field: &'src str },
 }
@@ -1191,9 +1254,7 @@ pub enum SemanticError<'src> {
 /// # Allocation
 /// `Vec::new()` n'alloue pas avant le premier `push` :
 /// un AST valide produit `Ok(())` sans allocation heap.
-pub fn validate_ast<'src>(
-    tokens: &[FlatPageToken<'src>],
-) -> Result<(), Vec<SemanticError<'src>>> {
+pub fn validate_ast<'src>(tokens: &[FlatPageToken<'src>]) -> Result<(), Vec<SemanticError<'src>>> {
     let mut errors: Vec<SemanticError<'src>> = Vec::new();
 
     // `None`              : pas de bloc conditionnel ouvert.
@@ -1215,7 +1276,7 @@ pub fn validate_ast<'src>(
                     // fermera correctement ce bloc plutôt que de le laisser ouvert.
                     errors.push(SemanticError::NestedIfNotSupported {
                         nested_entity: entity,
-                        nested_field:  field,
+                        nested_field: field,
                     });
                 }
             },
@@ -1247,7 +1308,11 @@ pub fn validate_ast<'src>(
         errors.push(SemanticError::UnclosedIf { entity, field });
     }
 
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 // =============================================================================
@@ -1256,7 +1321,7 @@ pub fn validate_ast<'src>(
 
 #[cfg(test)]
 mod tests_phase_1_4 {
-    use super::{validate_ast, SemanticError, FlatPageToken};
+    use super::{FlatPageToken, SemanticError, validate_ast};
 
     /// Jalon Vert — séquence valide : deux blocs if séquentiels non imbriqués.
     ///
@@ -1266,11 +1331,20 @@ mod tests_phase_1_4 {
     fn test_semantic_valid() {
         let tokens: &[FlatPageToken<'_>] = &[
             FlatPageToken::Static("avant"),
-            FlatPageToken::IfBool  { entity: "user", field: "active" },
-            FlatPageToken::Field   { entity: "user", field: "name"   },
+            FlatPageToken::IfBool {
+                entity: "user",
+                field: "active",
+            },
+            FlatPageToken::Field {
+                entity: "user",
+                field: "name",
+            },
             FlatPageToken::EndIf,
             FlatPageToken::Static("entre"),
-            FlatPageToken::IfBool  { entity: "user", field: "admin"  },
+            FlatPageToken::IfBool {
+                entity: "user",
+                field: "admin",
+            },
             FlatPageToken::Static("accès restreint"),
             FlatPageToken::EndIf,
             FlatPageToken::Static("après"),
@@ -1299,24 +1373,33 @@ mod tests_phase_1_4 {
             // [1] EndIf orphelin
             FlatPageToken::EndIf,
             // Ouverture d'un bloc externe
-            FlatPageToken::IfBool { entity: "user", field: "active"  },
+            FlatPageToken::IfBool {
+                entity: "user",
+                field: "active",
+            },
             // [2] Imbrication interdite — l'externe reste actif
-            FlatPageToken::IfBool { entity: "user", field: "admin"   },
+            FlatPageToken::IfBool {
+                entity: "user",
+                field: "admin",
+            },
             // Ferme le bloc externe (l'imbriqué a été ignoré)
             FlatPageToken::EndIf,
             // [3] Bloc non fermé à l'EOF
-            FlatPageToken::IfBool { entity: "user", field: "premium" },
+            FlatPageToken::IfBool {
+                entity: "user",
+                field: "premium",
+            },
         ];
 
         let expected = vec![
             SemanticError::UnexpectedEndIf,
             SemanticError::NestedIfNotSupported {
                 nested_entity: "user",
-                nested_field:  "admin",
+                nested_field: "admin",
             },
             SemanticError::UnclosedIf {
                 entity: "user",
-                field:  "premium",
+                field: "premium",
             },
         ];
 
@@ -1352,7 +1435,7 @@ mod tests_phase_1_4 {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TemplateMetrics {
     /// Somme exacte en octets de tous les `Static` et `StaticInclude` résolus.
-    pub total_static_bytes:  usize,
+    pub total_static_bytes: usize,
     /// Somme des pires cas d'affichage de tous les champs Field du template.
     /// Fixed-length : FieldKind::max_display_width().
     /// Varlena : VarlenField::max_escaped_len() (facteur escape × max_len).
@@ -1398,33 +1481,36 @@ pub enum ResolverError<'src> {
 /// `Vec::new()` n'alloue pas de bloc heap avant le premier `push`.
 /// Un projet sans fichier manquant traverse cette fonction sans allocation.
 pub fn resolve_and_measure<'src>(
-    tokens:        &mut [FlatPageToken<'src>],
-    schema:        &SchemaIndex<'_>,
+    tokens: &mut [FlatPageToken<'src>],
+    schema: &SchemaIndex<'_>,
     get_file_size: impl Fn(&str) -> Result<usize, String>,
 ) -> Result<TemplateMetrics, Vec<ResolverError<'src>>> {
     let mut metrics = TemplateMetrics {
-        total_static_bytes:  0,
+        total_static_bytes: 0,
         total_dynamic_bytes: 0,
-        include_count:       0,
+        include_count: 0,
     };
-    let mut errors:  Vec<ResolverError<'src>> = Vec::new();
+    let mut errors: Vec<ResolverError<'src>> = Vec::new();
 
     for token in tokens.iter_mut() {
         match token {
-
             // Octets HTML connus statiquement : contribution directe.
             FlatPageToken::Static(s) => {
                 metrics.total_static_bytes += s.len();
             }
 
             // Inclusion externe : résolution I/O et mutation en place.
-            FlatPageToken::StaticInclude { rel_from_manifest, len, .. } => {
+            FlatPageToken::StaticInclude {
+                rel_from_manifest,
+                len,
+                ..
+            } => {
                 let path = *rel_from_manifest;
                 match get_file_size(path) {
                     Ok(size) => {
                         *len = size;
                         metrics.total_static_bytes += size;
-                        metrics.include_count      += 1;
+                        metrics.include_count += 1;
                     }
                     Err(details) => {
                         errors.push(ResolverError::IoError { path, details });
@@ -1448,7 +1534,7 @@ pub fn resolve_and_measure<'src>(
                 } else if let Some(v) = schema.find_varlena(field) {
                     match v.max_escaped_len() {
                         Some(n) => metrics.total_dynamic_bytes += n,
-                        None    => errors.push(ResolverError::UnboundedField { entity, field }),
+                        None => errors.push(ResolverError::UnboundedField { entity, field }),
                     }
                 } else {
                     errors.push(ResolverError::UnknownField { entity, field });
@@ -1469,7 +1555,11 @@ pub fn resolve_and_measure<'src>(
         }
     }
 
-    if errors.is_empty() { Ok(metrics) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(metrics)
+    } else {
+        Err(errors)
+    }
 }
 
 // =============================================================================
@@ -1478,16 +1568,19 @@ pub fn resolve_and_measure<'src>(
 
 #[cfg(test)]
 mod tests_phase_2_1 {
-    use super::{resolve_and_measure, ResolverError, TemplateMetrics, FlatPageToken, SchemaIndex, FieldSpec, FieldKind, VarlenField};
+    use super::{
+        FieldKind, FieldSpec, FlatPageToken, ResolverError, SchemaIndex, TemplateMetrics,
+        VarlenField, resolve_and_measure,
+    };
 
     /// Construit un StaticInclude avec len = 0 (valeur provisoire Phase 1.3).
     /// Les deux paths sont identiques : l'orchestrateur n'a pas encore calculé
     /// le chemin relatif au manifest.
     fn make_include(path: &str) -> FlatPageToken<'_> {
         FlatPageToken::StaticInclude {
-            original_path:     path,
+            original_path: path,
             rel_from_manifest: path,
-            len:               0,
+            len: 0,
         }
     }
 
@@ -1496,29 +1589,37 @@ mod tests_phase_2_1 {
     /// total_static_bytes = 6 (Static "<html>") + 10 (StaticInclude "a.html") = 16.
     #[test]
     fn test_resolve_success() {
-        let mut tokens = vec![
-            FlatPageToken::Static("<html>"),
-            make_include("a.html"),
-        ];
+        let mut tokens = vec![FlatPageToken::Static("<html>"), make_include("a.html")];
 
-        let schema = SchemaIndex { fixed: &[], varlena: &[] };
+        let schema = SchemaIndex {
+            fixed: &[],
+            varlena: &[],
+        };
         let result = resolve_and_measure(&mut tokens, &schema, |path| match path {
             "a.html" => Ok(10),
-            other    => Err(format!("unknown : {other}")),
+            other => Err(format!("unknown : {other}")),
         });
 
         // Métriques correctes.
         assert_eq!(
             result,
-            Ok(TemplateMetrics { total_static_bytes: 16, total_dynamic_bytes: 0, include_count: 1 }),
+            Ok(TemplateMetrics {
+                total_static_bytes: 16,
+                total_dynamic_bytes: 0,
+                include_count: 1
+            }),
         );
 
         // Preuve de mutation en place : len vaut 10, pas 0.
         // Les slices &'src str sont inchangées — seul le scalaire `len` a évolué.
         match &tokens[1] {
-            FlatPageToken::StaticInclude { len, original_path, rel_from_manifest } => {
-                assert_eq!(*len,               10,       "len doit être muté de 0 à 10");
-                assert_eq!(*original_path,     "a.html", "original_path inchangé");
+            FlatPageToken::StaticInclude {
+                len,
+                original_path,
+                rel_from_manifest,
+            } => {
+                assert_eq!(*len, 10, "len doit être muté de 0 à 10");
+                assert_eq!(*original_path, "a.html", "original_path inchangé");
                 assert_eq!(*rel_from_manifest, "a.html", "rel_from_manifest inchangé");
             }
             _ => panic!("tokens[1] doit être un StaticInclude"),
@@ -1543,10 +1644,13 @@ mod tests_phase_2_1 {
             make_include("missing.html"),
         ];
 
-        let schema = SchemaIndex { fixed: &[], varlena: &[] };
+        let schema = SchemaIndex {
+            fixed: &[],
+            varlena: &[],
+        };
         let result = resolve_and_measure(&mut tokens, &schema, |path| match path {
             "a.html" => Ok(10),
-            other    => Err(format!("introuvable : {other}")),
+            other => Err(format!("introuvable : {other}")),
         });
 
         // Exactement 1 erreur accumulée.
@@ -1572,7 +1676,10 @@ mod tests_phase_2_1 {
         // Invariant fail-slow : "a.html" a bien été muté malgré l'erreur suivante.
         match &tokens[1] {
             FlatPageToken::StaticInclude { len, .. } => {
-                assert_eq!(*len, 10, "la mutation de a.html doit survivre à l'erreur partielle");
+                assert_eq!(
+                    *len, 10,
+                    "la mutation de a.html doit survivre à l'erreur partielle"
+                );
             }
             _ => panic!("tokens[1] doit rester un StaticInclude"),
         }
@@ -1586,23 +1693,31 @@ mod tests_phase_2_1 {
     fn test_resolve_no_includes() {
         let mut tokens = vec![
             FlatPageToken::Static("<p>"),
-            FlatPageToken::Field { entity: "user", field: "name" },
+            FlatPageToken::Field {
+                entity: "user",
+                field: "name",
+            },
             FlatPageToken::Static("</p>"),
         ];
 
-        let fixed = vec![FieldSpec { name: "name".to_string(), kind: FieldKind::I32, attnum: 1 }];
-        let schema = SchemaIndex { fixed: &fixed, varlena: &[] };
+        let fixed = vec![FieldSpec {
+            name: "name".to_string(),
+            kind: FieldKind::I32,
+            attnum: 1,
+        }];
+        let schema = SchemaIndex {
+            fixed: &fixed,
+            varlena: &[],
+        };
 
         assert_eq!(
-            resolve_and_measure(
-                &mut tokens,
-                &schema,
-                |_| unreachable!("get_file_size ne doit pas être appelé sans StaticInclude"),
-            ),
+            resolve_and_measure(&mut tokens, &schema, |_| unreachable!(
+                "get_file_size ne doit pas être appelé sans StaticInclude"
+            ),),
             Ok(TemplateMetrics {
-                total_static_bytes:  7,
+                total_static_bytes: 7,
                 total_dynamic_bytes: FieldKind::I32.max_display_width(),
-                include_count:       0,
+                include_count: 0,
             }),
         );
     }
@@ -1645,20 +1760,26 @@ mod tests_phase_2_1 {
     /// à total_dynamic_bytes — la compilation doit échouer explicitement.
     #[test]
     fn unbounded_field_referenced_fails_resolution() {
-        let mut tokens = vec![
-            FlatPageToken::Field { entity: "record", field: "description" },
-        ];
+        let mut tokens = vec![FlatPageToken::Field {
+            entity: "record",
+            field: "description",
+        }];
         let varlena = vec![unbounded_field("description")];
-        let schema = SchemaIndex { fixed: &[], varlena: &varlena };
+        let schema = SchemaIndex {
+            fixed: &[],
+            varlena: &varlena,
+        };
 
-        let result = resolve_and_measure(
-            &mut tokens, &schema,
-            |_| unreachable!("aucun StaticInclude dans ce test"),
-        );
+        let result = resolve_and_measure(&mut tokens, &schema, |_| {
+            unreachable!("aucun StaticInclude dans ce test")
+        });
 
         assert_eq!(
             result,
-            Err(vec![ResolverError::UnboundedField { entity: "record", field: "description" }]),
+            Err(vec![ResolverError::UnboundedField {
+                entity: "record",
+                field: "description"
+            }]),
         );
     }
 
@@ -1668,18 +1789,25 @@ mod tests_phase_2_1 {
     /// pour garantir qu'il n'a pas régressé avec le passage à Option<usize>.
     #[test]
     fn bounded_field_referenced_contributes_normally() {
-        let mut tokens = vec![
-            FlatPageToken::Field { entity: "record", field: "headline" },
-        ];
+        let mut tokens = vec![FlatPageToken::Field {
+            entity: "record",
+            field: "headline",
+        }];
         let varlena = vec![bounded_field("headline", 100)];
-        let schema = SchemaIndex { fixed: &[], varlena: &varlena };
+        let schema = SchemaIndex {
+            fixed: &[],
+            varlena: &varlena,
+        };
 
-        let metrics = resolve_and_measure(
-            &mut tokens, &schema,
-            |_| unreachable!("aucun StaticInclude dans ce test"),
-        ).expect("champ borné référencé : résolution attendue en succès");
+        let metrics = resolve_and_measure(&mut tokens, &schema, |_| {
+            unreachable!("aucun StaticInclude dans ce test")
+        })
+        .expect("champ borné référencé : résolution attendue en succès");
 
-        assert_eq!(metrics.total_dynamic_bytes, 100 * VarlenField::HTML_ESCAPE_FACTOR);
+        assert_eq!(
+            metrics.total_dynamic_bytes,
+            100 * VarlenField::HTML_ESCAPE_FACTOR
+        );
         assert_eq!(metrics.total_static_bytes, 0);
     }
 
@@ -1692,18 +1820,22 @@ mod tests_phase_2_1 {
     /// "non borné" seul ne suffit jamais.
     #[test]
     fn unbounded_field_not_referenced_is_cold() {
-        let mut tokens = vec![
-            FlatPageToken::Static("<article></article>"),
-        ];
+        let mut tokens = vec![FlatPageToken::Static("<article></article>")];
         let varlena = vec![unbounded_field("description")];
-        let schema = SchemaIndex { fixed: &[], varlena: &varlena };
+        let schema = SchemaIndex {
+            fixed: &[],
+            varlena: &varlena,
+        };
 
-        let metrics = resolve_and_measure(
-            &mut tokens, &schema,
-            |_| unreachable!("aucun StaticInclude dans ce test"),
-        ).expect("champ Cold non référencé : résolution attendue en succès");
+        let metrics = resolve_and_measure(&mut tokens, &schema, |_| {
+            unreachable!("aucun StaticInclude dans ce test")
+        })
+        .expect("champ Cold non référencé : résolution attendue en succès");
 
-        assert_eq!(metrics.total_dynamic_bytes, 0, "champ Cold ne doit jamais contribuer");
+        assert_eq!(
+            metrics.total_dynamic_bytes, 0,
+            "champ Cold ne doit jamais contribuer"
+        );
         assert_eq!(metrics.total_static_bytes, 19); // "<article></article>".len()
     }
 }
@@ -1745,17 +1877,23 @@ pub fn generate_aot_snippet<'src>(
     let mut out = String::with_capacity(25 + tokens.len() * 60);
 
     // ── Déclarations de références varlena ────────────────────────────────────
-    let mut varlena_seen: Vec<&str> = tokens.iter()
+    let mut varlena_seen: Vec<&str> = tokens
+        .iter()
         .filter_map(|t| match t {
-            FlatPageToken::Field { field, .. }
-                if schema.find_varlena(field).is_some() => Some(*field),
+            FlatPageToken::Field { field, .. } if schema.find_varlena(field).is_some() => {
+                Some(*field)
+            }
             _ => None,
         })
         .collect();
     varlena_seen.sort_unstable();
     varlena_seen.dedup();
     for name in &varlena_seen {
-        writeln!(out, "let {name}_ref: Option<&str> = varlena.{name}.as_deref();").unwrap();
+        writeln!(
+            out,
+            "let {name}_ref: Option<&str> = varlena.{name}.as_deref();"
+        )
+        .unwrap();
     }
 
     let mut indent: &str = "";
@@ -1772,7 +1910,8 @@ pub fn generate_aot_snippet<'src>(
                         out,
                         "{}if let Some(s) = {field}_ref {{ marius_html_escape(s, buf); }}",
                         indent,
-                    ).unwrap();
+                    )
+                    .unwrap();
                 } else {
                     writeln!(
                         out,
@@ -1793,12 +1932,15 @@ pub fn generate_aot_snippet<'src>(
                 out.push_str("}\n");
             }
 
-            FlatPageToken::StaticInclude { rel_from_manifest, .. } => {
+            FlatPageToken::StaticInclude {
+                rel_from_manifest, ..
+            } => {
                 writeln!(
                     out,
                     "{}buf.push_str(include_str!({:?}));",
                     indent, rel_from_manifest,
-                ).unwrap();
+                )
+                .unwrap();
             }
         }
     }
@@ -1812,7 +1954,9 @@ pub fn generate_aot_snippet<'src>(
 
 #[cfg(test)]
 mod tests_phase_2_2 {
-    use super::{generate_aot_snippet, SchemaIndex, FieldSpec, FieldKind, VarlenField, FlatPageToken};
+    use super::{
+        FieldKind, FieldSpec, FlatPageToken, SchemaIndex, VarlenField, generate_aot_snippet,
+    };
 
     fn make_schema<'a>(fixed: &'a [FieldSpec], varlena: &'a [VarlenField]) -> SchemaIndex<'a> {
         SchemaIndex { fixed, varlena }
@@ -1824,29 +1968,44 @@ mod tests_phase_2_2 {
     #[test]
     fn test_generate_aot_snippet_typed() {
         let fixed = vec![
-            FieldSpec { name: "title".to_string(),     kind: FieldKind::I32, attnum: 1 },
-            FieldSpec { name: "is_published".to_string(), kind: FieldKind::Bool, attnum: 2 },
-        ];
-        let varlena = vec![
-            VarlenField {
-                name: "body".to_string(),
-                max_len: Some(1000),
-                pre_escaped: false,
-                nullable: true,
-                max_escaped_len_override: None,
+            FieldSpec {
+                name: "title".to_string(),
+                kind: FieldKind::I32,
+                attnum: 1,
+            },
+            FieldSpec {
+                name: "is_published".to_string(),
+                kind: FieldKind::Bool,
+                attnum: 2,
             },
         ];
+        let varlena = vec![VarlenField {
+            name: "body".to_string(),
+            max_len: Some(1000),
+            pre_escaped: false,
+            nullable: true,
+            max_escaped_len_override: None,
+        }];
         let schema = make_schema(&fixed, &varlena);
 
         let tokens: &[FlatPageToken<'_>] = &[
             FlatPageToken::Static("<article>"),
-            FlatPageToken::Field   { entity: "record", field: "title" },
-            FlatPageToken::Field   { entity: "varlena", field: "body" },
-            FlatPageToken::IfBool  { entity: "record", field: "is_published" },
+            FlatPageToken::Field {
+                entity: "record",
+                field: "title",
+            },
+            FlatPageToken::Field {
+                entity: "varlena",
+                field: "body",
+            },
+            FlatPageToken::IfBool {
+                entity: "record",
+                field: "is_published",
+            },
             FlatPageToken::Static("<span>publié</span>"),
             FlatPageToken::EndIf,
             FlatPageToken::StaticInclude {
-                original_path:     "...",
+                original_path: "...",
                 rel_from_manifest: "frag.html",
                 len: 42,
             },
@@ -1855,39 +2014,66 @@ mod tests_phase_2_2 {
         let got = generate_aot_snippet(tokens, &schema);
 
         // Varlena ref déclarée en tête, triée.
-        assert!(got.contains("let body_ref: Option<&str> = varlena.body.as_deref();"),
-            "déclaration varlena absente:\n{got}");
+        assert!(
+            got.contains("let body_ref: Option<&str> = varlena.body.as_deref();"),
+            "déclaration varlena absente:\n{got}"
+        );
         // Fixed → write_fmt.
-        assert!(got.contains(r#"::std::fmt::Write::write_fmt(buf, format_args!("{}", record.title)).ok();"#),
-            "write_fmt absent:\n{got}");
+        assert!(
+            got.contains(
+                r#"::std::fmt::Write::write_fmt(buf, format_args!("{}", record.title)).ok();"#
+            ),
+            "write_fmt absent:\n{got}"
+        );
         // Varlena → html_escape.
-        assert!(got.contains("if let Some(s) = body_ref { marius_html_escape(s, buf); }"),
-            "html_escape absent:\n{got}");
+        assert!(
+            got.contains("if let Some(s) = body_ref { marius_html_escape(s, buf); }"),
+            "html_escape absent:\n{got}"
+        );
         // IfBool → != 0 (u8).
-        assert!(got.contains("if record.is_published != 0 {"),
-            "condition u8 absente:\n{got}");
+        assert!(
+            got.contains("if record.is_published != 0 {"),
+            "condition u8 absente:\n{got}"
+        );
         // StaticInclude.
-        assert!(got.contains(r#"buf.push_str(include_str!("frag.html"));"#),
-            "include_str absent:\n{got}");
+        assert!(
+            got.contains(r#"buf.push_str(include_str!("frag.html"));"#),
+            "include_str absent:\n{got}"
+        );
         // Pas de buf.reserve dans le snippet.
-        assert!(!got.contains("buf.reserve"),
-            "buf.reserve ne doit pas être dans le snippet:\n{got}");
+        assert!(
+            !got.contains("buf.reserve"),
+            "buf.reserve ne doit pas être dans le snippet:\n{got}"
+        );
     }
 
     /// Snippet sans varlena : aucune déclaration de ref.
     #[test]
     fn test_generate_aot_snippet_no_varlena() {
-        let fixed = vec![FieldSpec { name: "id".to_string(), kind: FieldKind::I64, attnum: 1 }];
+        let fixed = vec![FieldSpec {
+            name: "id".to_string(),
+            kind: FieldKind::I64,
+            attnum: 1,
+        }];
         let schema = make_schema(&fixed, &[]);
         let tokens: &[FlatPageToken<'_>] = &[
             FlatPageToken::Static("<p>"),
-            FlatPageToken::Field { entity: "record", field: "id" },
+            FlatPageToken::Field {
+                entity: "record",
+                field: "id",
+            },
             FlatPageToken::Static("</p>"),
         ];
         let got = generate_aot_snippet(tokens, &schema);
-        assert!(!got.contains("_ref"), "pas de déclaration ref sans varlena:\n{got}");
+        assert!(
+            !got.contains("_ref"),
+            "pas de déclaration ref sans varlena:\n{got}"
+        );
         assert!(got.contains("record.id"), "champ id absent:\n{got}");
-        assert!(!got.contains("buf.reserve"), "buf.reserve hors scope:\n{got}");
+        assert!(
+            !got.contains("buf.reserve"),
+            "buf.reserve hors scope:\n{got}"
+        );
     }
 }
 
@@ -2022,15 +2208,15 @@ pub struct NamedBlockRange<'src> {
     /// parent — deux blocs de même nom dans un même enfant sont une erreur
     /// de linking (`PageLinkError::OrphanBlock` ou variante dédiée future),
     /// pas une responsabilité de ce type.
-    pub name:     &'src str,
+    pub name: &'src str,
     /// Arène d'origine des indices `start`/`end` ci-dessous.
     pub template: TemplateId,
     /// Index de début de la plage de contenu (inclusif), dans l'AST référencé
     /// par `template`.
-    pub start:    usize,
+    pub start: usize,
     /// Index de fin de la plage de contenu (exclusif), dans l'AST référencé
     /// par `template`.
-    pub end:      usize,
+    pub end: usize,
 }
 
 /// Template enfant, forme pré-fusion.
@@ -2170,21 +2356,25 @@ pub enum PageComposeParseError {
     /// mot-clé par ailleurs traité comme grammaticalement significatif à ce
     /// stade. Symétrique de `PageParseError::InvalidBlockSequence`.
     ///
-    /// Portée Phase 4.5 : cette variante couvre aussi, temporairement, tout
-    /// mot-clé de bloc encore non représentable par `PageSourceToken` à ce
-    /// stade du classifieur (tout mot-clé hors grammaire runtime) —
-    /// Document 1 §3 autorise explicitement l'échec de ces fichiers avant
-    /// la clôture du classifieur (Phase 4.7). `block` et `endblock` en sont
-    /// sortis en Phase 4.4 (branche `Block` dédiée) ; `static` en est sorti
-    /// en Phase 4.5 (branche `Static` dédiée) ; `extends` en est sorti à
-    /// son tour en Phase 4.6 — sa forme structurelle (`Ident(path)
-    /// BlockClose`) reste jugée ici, seule sa *position* est jugée par
-    /// `ExtendsNotFirst`, domaine disjoint (cf. doc de `parse_page_tokens`).
-    /// Le catch-all `Unsupported` clôturera la grammaire (4.7) — sans que
-    /// cette variante d'erreur ne soit retirée : elle reste le domaine des
-    /// erreurs de grammaire structurelle des mots-clés déjà reconnus
-    /// (`if`/`endif`/`block`/`endblock`/`static`/`extends`) — par exemple
-    /// un `{% if %}` sans point dans l'identifiant, cf. `split_dotted_page`.
+    /// Portée Phase 4.7 : cette variante couvrait, temporairement (Phases
+    /// 4.3 à 4.6), tout mot-clé de bloc encore non représentable par
+    /// `PageSourceToken` à ce stade du classifieur. `block` et `endblock`
+    /// en sont sortis en Phase 4.4 (branche `Block` dédiée) ; `static` en
+    /// est sorti en Phase 4.5 (branche `Static` dédiée) ; `extends` en est
+    /// sorti en Phase 4.6 (sa forme structurelle — `Ident(path) BlockClose`
+    /// — reste jugée ici, seule sa *position* relève d'`ExtendsNotFirst`,
+    /// domaine disjoint, cf. doc de `parse_page_tokens`). Le catch-all
+    /// `Unsupported` a clos la grammaire en Phase 4.7 : tout mot-clé de
+    /// bloc syntaxiquement bien formé (`Ident … BlockClose`) mais hors
+    /// grammaire runtime connue est désormais capturé, jamais rejeté ici.
+    /// Cette variante d'erreur n'est pas retirée pour autant : elle reste,
+    /// à titre définitif, le domaine des erreurs de grammaire structurelle
+    /// des mots-clés déjà reconnus (`if`/`endif`/`block`/`endblock`/
+    /// `static`/`extends` — par exemple un `{% if %}` sans point dans
+    /// l'identifiant, cf. `split_dotted_page`) **et** celui d'`include`,
+    /// explicitement exclu du catch-all `Unsupported` (Phase 4.7, cf. doc
+    /// de `parse_page_block`) : structurellement absent de la grammaire
+    /// Mode Page, `include` n'est jamais « non supporté », il est rejeté.
     InvalidBlockSequence,
 }
 
@@ -2297,8 +2487,8 @@ pub struct StaticPartialRef<'src> {
 #[cfg(test)]
 mod tests_phase_3_0_page_mode_types {
     use super::{
-        ChildTemplateSpec, NamedBlockRange, PageBlockToken, PageComposeParseError,
-        PageLinkError, PageValidationError, StaticPartialRef, TemplateId,
+        ChildTemplateSpec, NamedBlockRange, PageBlockToken, PageComposeParseError, PageLinkError,
+        PageValidationError, StaticPartialRef, TemplateId,
     };
 
     /// Jalon Vert — les nouveaux types sont Copy/Clone/PartialEq comme leurs
@@ -2321,12 +2511,29 @@ mod tests_phase_3_0_page_mode_types {
     fn named_block_range_is_copy_half_open_and_arena_tagged() {
         let child_a = TemplateId(0);
         let child_b = TemplateId(1);
-        let r_a = NamedBlockRange { name: "header", template: child_a, start: 3, end: 7 };
-        let r_b = NamedBlockRange { name: "header", template: child_b, start: 3, end: 7 };
+        let r_a = NamedBlockRange {
+            name: "header",
+            template: child_a,
+            start: 3,
+            end: 7,
+        };
+        let r_b = NamedBlockRange {
+            name: "header",
+            template: child_b,
+            start: 3,
+            end: 7,
+        };
         let _copy = r_a; // Copy, pas de move
 
-        assert_eq!(r_a.end - r_a.start, 4, "plage [start, end) : 4 tokens couverts");
-        assert_ne!(r_a, r_b, "même range, arène différente : distinguable par valeur");
+        assert_eq!(
+            r_a.end - r_a.start,
+            4,
+            "plage [start, end) : 4 tokens couverts"
+        );
+        assert_ne!(
+            r_a, r_b,
+            "même range, arène différente : distinguable par valeur"
+        );
     }
 
     /// Jalon Vert — ChildTemplateSpec ne porte que de la métadonnée, jamais
@@ -2338,8 +2545,18 @@ mod tests_phase_3_0_page_mode_types {
         let spec = ChildTemplateSpec {
             extends: "layouts/base.marius",
             blocks: vec![
-                NamedBlockRange { name: "header", template: this_child, start: 0, end: 2 },
-                NamedBlockRange { name: "body",   template: this_child, start: 3, end: 9 },
+                NamedBlockRange {
+                    name: "header",
+                    template: this_child,
+                    start: 0,
+                    end: 2,
+                },
+                NamedBlockRange {
+                    name: "body",
+                    template: this_child,
+                    start: 3,
+                    end: 9,
+                },
             ],
         };
         assert_eq!(spec.blocks.len(), 2);
@@ -2352,7 +2569,9 @@ mod tests_phase_3_0_page_mode_types {
     /// pas par une assertion runtime (le compilateur est la preuve).
     #[test]
     fn static_partial_ref_has_no_len_field() {
-        let r = StaticPartialRef { original_path: "partials/nav.html" };
+        let r = StaticPartialRef {
+            original_path: "partials/nav.html",
+        };
         assert_eq!(r.original_path, "partials/nav.html");
     }
 
@@ -2367,8 +2586,7 @@ mod tests_phase_3_0_page_mode_types {
     fn phase_errors_are_distinct_types() {
         let _parse: PageComposeParseError = PageComposeParseError::ExtendsNotFirst;
         let _link: PageLinkError<'_> = PageLinkError::OrphanBlock { name: "sidebar" };
-        let _validation: PageValidationError<'_> =
-            PageValidationError::ForLoopDetected;
+        let _validation: PageValidationError<'_> = PageValidationError::ForLoopDetected;
     }
 }
 
@@ -2716,14 +2934,16 @@ mod tests_phase_4_2_detect_extends {
 //     que `if`/`endif` — y compris `include` (absent de la grammaire Mode
 //     Page par construction du type `PageSourceToken::Runtime`, cf. Phase
 //     4.1) — échouait avec `PageComposeParseError::InvalidBlockSequence`.
-//     Depuis, `block`/`endblock` (Phase 4.4), `static` (Phase 4.5) et
-//     `extends` (Phase 4.6) sont sortis de ce catch-all — voir sections
-//     dédiées ci-dessous. Seul le catch-all `Unsupported` (4.7) reste à
-//     migrer, sans anticipation.
+//     Depuis, `block`/`endblock` (Phase 4.4), `static` (Phase 4.5),
+//     `extends` (Phase 4.6) et le catch-all `Unsupported` avec l'exclusion
+//     explicite d'`include` (Phase 4.7) sont sortis de ce catch-all — voir
+//     sections dédiées ci-dessous. La grammaire des mots-clés de bloc est
+//     désormais close (Document 1 clos sur ce point).
 //   - `{% block %}` / `{% endblock %}` (Phase 4.4), `{% static %}` (Phase
-//     4.5) et `{% extends %}` (Phase 4.6) : voir sections dédiées
-//     ci-dessous, qui étendent `parse_page_block` (seule fonction modifiée
-//     à chaque fois) sans toucher à ce dispatch de tête.
+//     4.5), `{% extends %}` (Phase 4.6) et le catch-all `Unsupported` /
+//     `{% include %}` (Phase 4.7) : voir sections dédiées ci-dessous, qui
+//     étendent `parse_page_block` (seule fonction modifiée à chaque fois)
+//     sans toucher à ce dispatch de tête.
 
 // =============================================================================
 // Phase 4.6 — Position d'`extends` + `ExtendsNotFirst`
@@ -2781,12 +3001,14 @@ mod tests_phase_4_2_detect_extends {
 /// pas d'accumulation). Un fichier sans aucun `extends` (parent) laisse ce
 /// champ à `None` sans qu'aucune erreur ne soit levée — Document 1 §3.
 ///
-/// ─── Ce que cette fonction ne fait pas encore ──────────────────────────────
+/// ─── Grammaire close (Phase 4.7) ───────────────────────────────────────────
 ///
-/// Ne reconnaît pas le catch-all `Unsupported` (Phase 4.7) : tout mot-clé de
-/// bloc hors `if`/`endif`/`block`/`endblock`/`static`/`extends` échoue
-/// encore avec `PageComposeParseError::InvalidBlockSequence` (voir note de
-/// portée en tête de section).
+/// Reconnaît désormais tout mot-clé de bloc : `if`/`endif`/`block`/
+/// `endblock`/`static`/`extends` chacun sous sa forme dédiée, `include`
+/// explicitement exclu (`PageComposeParseError::InvalidBlockSequence`), et
+/// tout le reste sous `PageSourceToken::Unsupported` (catch-all, voir doc de
+/// `parse_page_block`). Aucun mot-clé de tête ne peut plus atteindre un
+/// chemin d'erreur générique non informatif — Document 1 clos sur ce point.
 ///
 /// ─── Invariants mémoire ─────────────────────────────────────────────────────
 ///
@@ -2842,7 +3064,7 @@ pub fn parse_page_tokens<'src>(
                 return Err(PageComposeParseError::UnexpectedToken {
                     expected: "Literal | ExprOpen | BlockOpen",
                     got,
-                })
+                });
             }
         }
     }
@@ -2929,12 +3151,14 @@ enum PageBlockOutcome<'src> {
 /// correspondant. Précondition : `BlockOpen` vient d'être consommé par
 /// `parse_page_tokens`.
 ///
-/// Portée Phase 4.6 : reconnaît `if`/`endif` (Phase 4.3, logique inchangée),
+/// Portée Phase 4.7 : reconnaît `if`/`endif` (Phase 4.3, logique inchangée),
 /// `block`/`endblock` (Phase 4.4, logique inchangée), `static` (Phase 4.5,
-/// logique inchangée) et `extends` (introduit ici). Tout autre mot-clé
-/// (`include`, ou inconnu) retourne toujours `InvalidBlockSequence` —
-/// comportement temporaire, qui sera remplacé par le catch-all `Unsupported`
-/// en Phase 4.7.
+/// logique inchangée), `extends` (Phase 4.6, logique inchangée), `include`
+/// (exclusion explicite, introduite ici) et le catch-all `Unsupported`
+/// (introduit ici) pour tout le reste. Cette fonction est désormais totale
+/// sur la grammaire lexicale des mots-clés de bloc : aucun `Ident` de tête
+/// ne peut plus atteindre un chemin d'erreur générique non informatif —
+/// Document 1 clos sur ce point (roadmap §4.7).
 ///
 /// ─── Pourquoi le type de retour change : `PageBlockOutcome`, plus
 ///     `PageSourceToken` directement ─────────────────────────────────────────
@@ -3038,7 +3262,76 @@ where
             expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
             Ok(PageBlockOutcome::Extends(path))
         }
-        _ => Err(PageComposeParseError::InvalidBlockSequence),
+        // `{% include path %}` (Phase 4.7) : exclusion explicite du catch-all
+        // `Unsupported` ci-dessous — roadmap §4.7 exige `∉ {if, endif,
+        // include, extends, block, endblock, static}` pour la branche
+        // par défaut. `include` n'est pas « non supporté » au sens
+        // d'`Unsupported` (un mot-clé dont la grammaire est inconnue de ce
+        // Parser) : sa grammaire *est* connue (Mode Fragment, `parse_block`,
+        // gelé) — il est structurellement absent de la grammaire Mode Page
+        // par construction du type (`PageSourceToken::Runtime` n'émet
+        // jamais `FlatPageToken::StaticInclude`, cf. doc de cette variante).
+        // Le confondre avec `Unsupported` ferait porter à la Validation
+        // (Document 2) la charge de distinguer, au sein d'un même verdict
+        // « non supporté », un mot-clé simplement pas encore implémenté
+        // (`for`) d'un mot-clé délibérément interdit dans ce mode
+        // (`include`, qui a un équivalent : `static`) — une confusion que
+        // Document 1 §0 proscrit explicitement (fusion syntaxe/sémantique).
+        // Bras explicite plutôt que laissé retomber dans le catch-all : sans
+        // lui, `include` migrerait silencieusement vers `Unsupported` dès
+        // que le catch-all serait ajouté — un effet de bord de ce diff, pas
+        // une décision prise consciemment.
+        "include" => Err(PageComposeParseError::InvalidBlockSequence),
+        // Catch-all (Phase 4.7, roadmap §4.7, Document 1 §2.1) : tout
+        // mot-clé de bloc hors grammaire déjà reconnue (`for`, `join`,
+        // `where`, `filter`, `group`, ou tout mot-clé inconnu) est capturé
+        // sous `Unsupported`, jamais rejeté à ce stade — Document 1 §6 :
+        // « jamais silencieusement ignoré ni rejeté ». Cette branche clôt la
+        // grammaire de `parse_page_block` : plus aucun mot-clé ne peut
+        // atteindre un chemin d'erreur générique non informatif.
+        //
+        // ─── Arité non contrainte (0, 1 ou N tokens avant `%}`) ────────────
+        //
+        // Ce Parser ne connaît pas la grammaire de ces mots-clés — il ignore
+        // si `for` attend `item in items` (3 tokens), `filter` un unique
+        // prédicat, ou si un mot-clé inconnu n'attend rien du tout. Il ne
+        // doit donc jamais échouer sur l'arité : tous les tokens jusqu'à
+        // `BlockClose` sont consommés sans jugement de forme, en une seule
+        // passe, sans retour arrière — cohérent avec l'automate `O(n)` sans
+        // backtracking de ce module (cf. doc du fichier d'architecture).
+        //
+        // ─── `tail` : premier token suivant le mot-clé, ou vide ───────────
+        //
+        // `tail` capture le premier `Ident` rencontré après le mot-clé
+        // (`""` si `BlockClose` suit immédiatement) — un indice minimal,
+        // suffisant pour que la Validation (Document 2) nomme le rejet
+        // (`ForLoopDetected`, `RelationalKeyword`, etc.) sans que ce Parser
+        // ne tente de reconstituer la totalité du contenu du bloc. Tout
+        // token additionnel au-delà du premier est consommé mais non
+        // conservé : cette consommation ne vise qu'à resynchroniser
+        // l'automate sur `BlockClose`, pas à préserver le contenu — zéro
+        // allocation (`tail` reste un emprunt direct sur `spans`, jamais une
+        // concaténation).
+        keyword => {
+            let mut tail = "";
+            let mut seen_first = false;
+            loop {
+                match iter.next() {
+                    Some(span) if span.kind == SpanKind::BlockClose => break,
+                    Some(span) => {
+                        if !seen_first {
+                            tail = span.slice;
+                            seen_first = true;
+                        }
+                    }
+                    None => return Err(PageComposeParseError::UnexpectedEof),
+                }
+            }
+            Ok(PageBlockOutcome::Token(PageSourceToken::Unsupported {
+                keyword,
+                tail,
+            }))
+        }
     }
 }
 
@@ -3099,8 +3392,8 @@ fn split_dotted_page(raw: &str) -> Result<(&str, &str), PageComposeParseError> {
 #[cfg(test)]
 mod tests_phase_4_3_parse_page_tokens_runtime_subset {
     use super::{
-        parse_page_tokens, parse_tokens, scan, FlatPageToken, PageComposeParseError,
-        PageSourceToken,
+        FlatPageToken, PageComposeParseError, PageSourceToken, parse_page_tokens, parse_tokens,
+        scan,
     };
 
     /// Dépouille l'enveloppe `Runtime` d'un AST Mode Page pour comparaison
@@ -3160,16 +3453,18 @@ mod tests_phase_4_3_parse_page_tokens_runtime_subset {
         assert_eq!(strip_runtime_envelope(actual.tokens), expected);
     }
 
-    /// Jalon Vert — un mot-clé hors grammaire runtime et non encore reconnu
-    /// par le classifieur à ce stade (`for`, catch-all `Unsupported` non
-    /// implémenté avant la Phase 4.7) échoue explicitement plutôt que
-    /// d'être silencieusement accepté ou ignoré — comportement documenté,
-    /// pas un effet de bord. `extends` n'illustre plus cet invariant depuis
-    /// la Phase 4.6, qui l'a fait sortir de ce catch-all (position jugée par
-    /// `ExtendsNotFirst` — voir `tests_phase_4_6_extends_position`).
+    /// Jalon Vert — un mot-clé structurellement exclu de la grammaire Mode
+    /// Page (`include`) échoue explicitement plutôt que d'être
+    /// silencieusement accepté ou ignoré — comportement documenté, pas un
+    /// effet de bord. Ni `extends` (sorti en Phase 4.6, position jugée par
+    /// `ExtendsNotFirst`) ni `for` (capturé sous `Unsupported` depuis le
+    /// catch-all de la Phase 4.7, cf. `tests_phase_4_7_unsupported_catch_all`)
+    /// n'illustrent plus cet invariant : `include` est désormais le seul
+    /// mot-clé qui échoue encore ici, de façon définitive — cf. doc de
+    /// `parse_page_block` (Phase 4.7, exclusion explicite du catch-all).
     #[test]
     fn composition_keyword_out_of_scope_fails_explicitly() {
-        let src = r#"{% for item %}"#;
+        let src = r#"{% include fragment.html %}"#;
         let result = parse_page_tokens(scan(src));
         assert_eq!(result, Err(PageComposeParseError::InvalidBlockSequence));
     }
@@ -3181,7 +3476,7 @@ mod tests_phase_4_3_parse_page_tokens_runtime_subset {
 
 #[cfg(test)]
 mod tests_phase_4_4_block_endblock {
-    use super::{parse_page_tokens, scan, FlatPageToken, PageBlockToken, PageSourceToken};
+    use super::{FlatPageToken, PageBlockToken, PageSourceToken, parse_page_tokens, scan};
 
     /// Jalon Vert — template à 1 bloc top-level : `{% block name %}` produit
     /// exactement `BlockOpen { name }`, `{% endblock %}` produit exactement
@@ -3235,7 +3530,7 @@ mod tests_phase_4_4_block_endblock {
 
 #[cfg(test)]
 mod tests_phase_4_5_static {
-    use super::{parse_page_tokens, scan, FlatPageToken, PageSourceToken, StaticPartialRef};
+    use super::{FlatPageToken, PageSourceToken, StaticPartialRef, parse_page_tokens, scan};
 
     /// Jalon Vert (roadmap §4.5) — un chemin syntaxiquement valide mais
     /// absent du disque est accepté : cette fonction ne fait aucune E/S,
@@ -3270,7 +3565,7 @@ mod tests_phase_4_5_static {
 
 #[cfg(test)]
 mod tests_phase_4_6_extends_position {
-    use super::{parse_page_tokens, scan, FlatPageToken, PageComposeParseError, PageSourceToken};
+    use super::{FlatPageToken, PageComposeParseError, PageSourceToken, parse_page_tokens, scan};
 
     /// Jalon Vert (roadmap §4.6) — `extends` en tête de fichier est capturé
     /// dans `ParsedPageTemplate::extends`, et n'apparaît jamais dans
@@ -3314,5 +3609,43 @@ mod tests_phase_4_6_extends_position {
             parse_page_tokens(scan(src)).expect("parse_page_tokens doit réussir sans extends");
 
         assert_eq!(actual.extends, None);
+    }
+}
+
+// =============================================================================
+// Tests — Phase 4.7
+// =============================================================================
+
+#[cfg(test)]
+mod tests_phase_4_7_unsupported_catch_all {
+    use super::{PageSourceToken, parse_page_tokens, scan};
+
+    /// Jalon Vert (roadmap §4.7) — paramétré sur `for`, `join`, `where`,
+    /// `filter`, `group`, et un mot-clé arbitraire inconnu : chacun produit
+    /// `Unsupported { keyword, .. }` avec le bon `keyword`, jamais un rejet
+    /// générique (`InvalidBlockSequence`) ni un rejet silencieux.
+    #[test]
+    fn unsupported_catch_all_captures_arbitrary_keywords() {
+        let keywords = ["for", "join", "where", "filter", "group", "frobnicate"];
+
+        for keyword in keywords {
+            let src = format!("{{% {keyword} arg %}}");
+            let actual = parse_page_tokens(scan(&src)).unwrap_or_else(|e| {
+                panic!("mot-clé {keyword:?} doit être capturé, pas rejeté (erreur : {e:?})")
+            });
+
+            assert_eq!(
+                actual.tokens.len(),
+                1,
+                "mot-clé {keyword:?} : un seul token attendu dans le flux"
+            );
+            match actual.tokens[0] {
+                PageSourceToken::Unsupported {
+                    keyword: got_keyword,
+                    ..
+                } => assert_eq!(got_keyword, keyword, "keyword capturé incorrect"),
+                other => panic!("mot-clé {keyword:?} : attendu Unsupported, obtenu {other:?}"),
+            }
+        }
     }
 }

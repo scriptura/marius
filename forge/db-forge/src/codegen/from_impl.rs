@@ -18,12 +18,12 @@ use crate::naming::to_pascal;
 ///
 /// L'appelant applique ensuite le cast u8 si `m.row_type == "bool"`.
 pub(crate) fn build_nullable_expr(col: &Column, prefix: &str) -> String {
-    let m        = map_type(&col.sql_type);
-    let field    = format!("{prefix}{}", col.name);
+    let m = map_type(&col.sql_type);
+    let field = format!("{prefix}{}", col.name);
     let sentinel = col.sentinel.as_deref().unwrap_or(m.default_sentinel);
 
     m.from_expr
-        .replace("{field}",    &field)
+        .replace("{field}", &field)
         .replace("{sentinel}", sentinel)
 }
 
@@ -38,36 +38,30 @@ pub(crate) fn build_nullable_expr(col: &Column, prefix: &str) -> String {
 /// Note : si la table a des champs varlena JOIN, From<Row> N'EST PAS appelé
 /// dans fetch_batch Phase 2 (lecture mmap). Il reste généré pour cohérence et
 /// sera actif quand marius-dump sera découplé de fetch_batch (dette Phase 2).
-pub fn write_from_impl(
-    out:     &mut String,
-    schema:  &str,
-    table:   &str,
-    columns: &[Column],
-) {
+pub fn write_from_impl(out: &mut String, schema: &str, table: &str, columns: &[Column]) {
     let name = to_pascal(&format!("{schema}_{table}"));
     writeln!(out, "impl From<{name}Row> for {name}StorageRow {{").unwrap();
     writeln!(out, "    fn from(r: {name}Row) -> Self {{").unwrap();
     writeln!(out, "        Self {{").unwrap();
 
     let mut layout_bytes = 0usize;
-    let mut max_align    = 1usize;
+    let mut max_align = 1usize;
 
     for col in columns {
         let m = map_type(&col.sql_type);
-        if !m.is_fixed { continue; }
+        if !m.is_fixed {
+            continue;
+        }
 
         layout_bytes += m.size_bytes;
-        max_align     = max_align.max(m.alignment);
+        max_align = max_align.max(m.alignment);
 
         let mut expr = if col.is_notnull {
             // NOT NULL : expression directe, pas de sentinel.
             match m.row_type {
-                "chrono::DateTime<chrono::Utc>" =>
-                    format!("r.{}.timestamp_micros()", col.name),
-                "chrono::NaiveDateTime" =>
-                    format!("r.{}.and_utc().timestamp_micros()", col.name),
-                "chrono::NaiveDate" =>
-                    format!("r.{}.num_days_from_ce()", col.name),
+                "chrono::DateTime<chrono::Utc>" => format!("r.{}.timestamp_micros()", col.name),
+                "chrono::NaiveDateTime" => format!("r.{}.and_utc().timestamp_micros()", col.name),
+                "chrono::NaiveDate" => format!("r.{}.num_days_from_ce()", col.name),
                 _ => format!("r.{}", col.name),
             }
         } else {
@@ -89,7 +83,7 @@ pub fn write_from_impl(
 
     // Tail padding calculé statiquement pour satisfaire bytemuck::Pod.
     let padded_size = layout_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
-    let tail_pad    = padded_size - layout_bytes;
+    let tail_pad = padded_size - layout_bytes;
     if tail_pad > 0 {
         writeln!(out, "            _pad: [0u8; {tail_pad}],").unwrap();
     }

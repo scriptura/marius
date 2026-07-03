@@ -1,4 +1,3 @@
-
 // marius — crate façade
 // Réexporte les types publics fondamentaux depuis leurs crates canoniques.
 //

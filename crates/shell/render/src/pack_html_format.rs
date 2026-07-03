@@ -56,8 +56,8 @@ pub struct PackfileFooter {
     pub _pad: [u8; 4],
     pub entry_count: u64,
     pub index_len: u64, // = entry_count * size_of::<PackfileEntry>() — redondant
-                         // mais explicite : permet de faire évoluer la taille
-                         // d'une entrée sans recalcul implicite côté lecteur.
+                        // mais explicite : permet de faire évoluer la taille
+                        // d'une entrée sans recalcul implicite côté lecteur.
 }
 
 const _: () = assert!(

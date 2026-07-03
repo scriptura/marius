@@ -54,8 +54,8 @@ use marius_render::{Dispatcher, DispatcherConfig, IdSource, LiveRegistry, RouteE
 // Si la forge a produit un nom différent, cargo build échoue explicitement
 // sur cet import, pas un bug silencieux à l'exécution.
 use marius_schema::{
-    CommerceProductCoreProjection, ContentCoreProjection, COMMERCE_PRODUCT_CORE_COLLECTOR,
-    COMMERCE_PRODUCT_CORE_TOTAL_CAP, CONTENT_CORE_COLLECTOR, CONTENT_CORE_TOTAL_CAP,
+    COMMERCE_PRODUCT_CORE_COLLECTOR, COMMERCE_PRODUCT_CORE_TOTAL_CAP, CONTENT_CORE_COLLECTOR,
+    CONTENT_CORE_TOTAL_CAP, CommerceProductCoreProjection, ContentCoreProjection,
 };
 
 // Phase 5.2 : seul InsertResult est nommé ici. Collector<MAX, WORDS> reste
@@ -93,13 +93,13 @@ static ROUTE_TABLE: &[RouteEntry] = &[
 /// réinjecté par valeur à chaque site d'usage (`SHARDS` ci-dessous), aucune
 /// indirection, aucune allocation.
 const DEFAULT_DISPATCHER_CONFIG: DispatcherConfig = DispatcherConfig {
-    tick_default:    Duration::from_millis(500),
-    tick_min:        Duration::from_millis(100),
-    tick_max:        Duration::from_secs(2),
+    tick_default: Duration::from_millis(500),
+    tick_min: Duration::from_millis(100),
+    tick_max: Duration::from_secs(2),
     threshold_flush: 128,
-    threshold_low:   10,
-    threshold_high:  100,
-    render_budget:   Duration::from_millis(200),
+    threshold_low: 10,
+    threshold_high: 100,
+    render_budget: Duration::from_millis(200),
 };
 
 /// Faits non génériques par shard, rassemblés en un seul endroit pour qu'ils
@@ -120,16 +120,16 @@ struct ShardMetadata {
 static SHARDS: &[ShardMetadata] = &[
     ShardMetadata {
         packfile_key: "content_core",
-        channel:      "content_core_updates",
-        config:       DEFAULT_DISPATCHER_CONFIG,
+        channel: "content_core_updates",
+        config: DEFAULT_DISPATCHER_CONFIG,
     },
     ShardMetadata {
         packfile_key: "commerce_product_core",
         // Arbitrage architecte (cette session) : trigger DB déjà migré vers
         // la convention symétrique {packfile_key}_updates (spec §10, acté).
         // L'ancien nom "product_core_updates" (spec §2) n'est plus valide.
-        channel:      "commerce_product_core_updates",
-        config:       DEFAULT_DISPATCHER_CONFIG,
+        channel: "commerce_product_core_updates",
+        config: DEFAULT_DISPATCHER_CONFIG,
     },
 ];
 
@@ -652,7 +652,8 @@ mod tests {
         }
 
         for h in handles {
-            h.await.expect("une requête a paniqué pendant le swap concurrent");
+            h.await
+                .expect("une requête a paniqué pendant le swap concurrent");
         }
         writer.await.expect("la tâche d'écriture a paniqué");
     }

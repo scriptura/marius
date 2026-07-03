@@ -15,19 +15,21 @@ use marius_fragment_forge::VarlenField;
 /// Champs varlena de la table principale : String ou Option<String>.
 /// Champs varlena de la table jointe (LEFT JOIN) : toujours Option<String>.
 pub fn write_row_struct(
-    out:     &mut String,
-    schema:  &str,
-    table:   &str,
+    out: &mut String,
+    schema: &str,
+    table: &str,
     columns: &[Column],
     varlena: &[VarlenField],
 ) {
     let name = to_pascal(&format!("{schema}_{table}"));
-    writeln!(out,
+    writeln!(
+        out,
         "/// Struct de désérialisation sqlx pour {schema}.{table}.\n\
          /// Types natifs Rust + Option<T> pour nullable. NON repr(C).\n\
          /// Varlena JOIN : Option<String> (allocation sqlx, durée éphémère).\n\
          /// Transformer en StorageRow (From impl) + VarlenOwned avant usage."
-    ).unwrap();
+    )
+    .unwrap();
     writeln!(out, "#[derive(Debug, sqlx::FromRow)]").unwrap();
     writeln!(out, "pub struct {name}Row {{").unwrap();
 
@@ -37,27 +39,35 @@ pub fn write_row_struct(
             if col.is_notnull {
                 writeln!(out, "    pub {}: {},", col.name, m.row_type).unwrap();
             } else {
-                writeln!(out,
+                writeln!(
+                    out,
                     "    pub {}: Option<{}>,  // NULLABLE → sentinel dans StorageRow",
                     col.name, m.row_type
-                ).unwrap();
+                )
+                .unwrap();
             }
         } else if m.row_type.starts_with("/*") {
             // Phase 2 ou type inconnu : commentaire uniquement.
-            writeln!(out,
+            writeln!(
+                out,
                 "    // EXCLU Phase 1 : {} ({}) — {}",
                 col.name, col.sql_type, m.row_type
-            ).unwrap();
+            )
+            .unwrap();
         } else if col.is_notnull {
-            writeln!(out,
+            writeln!(
+                out,
                 "    pub {}: {},  // varlena table principale",
                 col.name, m.row_type
-            ).unwrap();
+            )
+            .unwrap();
         } else {
-            writeln!(out,
+            writeln!(
+                out,
                 "    pub {}: Option<{}>,  // varlena NULLABLE table principale",
                 col.name, m.row_type
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 
@@ -67,12 +77,14 @@ pub fn write_row_struct(
         // (TEXT non borné) plutôt que masqué. Cohérent avec varlen.rs.
         let bound_descr = match v.max_len {
             Some(n) => format!("VARCHAR({n})"),
-            None    => "TEXT non borné".to_string(),
+            None => "TEXT non borné".to_string(),
         };
-        writeln!(out,
+        writeln!(
+            out,
             "    pub {}: Option<String>,  // varlena JOIN {} — → as_deref()",
             v.name, bound_descr
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     writeln!(out, "}}\n").unwrap();

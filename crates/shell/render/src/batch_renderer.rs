@@ -153,7 +153,7 @@ impl<P: Projection> BatchRenderer<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pack_html_format::{write_packfile_footer, PackfileFooter};
+    use crate::pack_html_format::{PackfileFooter, write_packfile_footer};
     use std::io::BufWriter;
     use std::path::PathBuf;
 

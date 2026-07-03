@@ -15,25 +15,29 @@ use marius_fragment_forge::VarlenField;
 ///
 /// Si aucun varlena : commentaire uniquement (type VarlenOwned = () dans le trait).
 pub fn write_varlen_owned_struct(
-    out:     &mut String,
-    schema:  &str,
-    table:   &str,
+    out: &mut String,
+    schema: &str,
+    table: &str,
     varlena: &[VarlenField],
 ) {
     if varlena.is_empty() {
-        writeln!(out,
+        writeln!(
+            out,
             "// {schema}.{table} : aucun champ varlena — type VarlenOwned = () dans le trait.\n"
-        ).unwrap();
+        )
+        .unwrap();
         return;
     }
 
     let name = to_pascal(&format!("{schema}_{table}"));
 
-    writeln!(out,
+    writeln!(
+        out,
         "/// Données varlena possédées pour {schema}.{table}.\n\
          /// Send + 'static : traversée tokio::spawn et rayon::par_iter.\n\
          /// render() reconstruit les &str localement via as_deref() — zéro copie."
-    ).unwrap();
+    )
+    .unwrap();
     writeln!(out, "#[derive(Debug, Default)]").unwrap();
     writeln!(out, "pub struct {name}VarlenOwned {{").unwrap();
 
@@ -47,14 +51,24 @@ pub fn write_varlen_owned_struct(
         // un ResolverError::UnboundedField s'il est référencé par un template.
         let bound_descr = match v.max_len {
             Some(n) => format!("VARCHAR({n})"),
-            None    => "TEXT (non borné — Cold sauf si référencé)".to_string(),
+            None => "TEXT (non borné — Cold sauf si référencé)".to_string(),
         };
-        writeln!(out,
+        writeln!(
+            out,
             "    /// {} — {} × {}.",
             bound_descr,
-            if v.pre_escaped { "pré-échappé, facteur" } else { "escape HTML, facteur" },
-            if v.pre_escaped { 1 } else { VarlenField::HTML_ESCAPE_FACTOR },
-        ).unwrap();
+            if v.pre_escaped {
+                "pré-échappé, facteur"
+            } else {
+                "escape HTML, facteur"
+            },
+            if v.pre_escaped {
+                1
+            } else {
+                VarlenField::HTML_ESCAPE_FACTOR
+            },
+        )
+        .unwrap();
         writeln!(out, "    pub {}: Option<String>,", v.name).unwrap();
     }
 

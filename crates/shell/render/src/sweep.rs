@@ -62,7 +62,10 @@ pub fn merge_sweep(
         "C2 violé : old_index n'est pas strictement trié par id"
     );
     debug_assert!(
-        delta.entries.windows(2).all(|w| w[0].entity_id < w[1].entity_id),
+        delta
+            .entries
+            .windows(2)
+            .all(|w| w[0].entity_id < w[1].entity_id),
         "C1 violé : delta.entries n'est pas strictement trié par entity_id"
     );
 
@@ -81,15 +84,24 @@ pub fn merge_sweep(
         let delta_avail = j < delta_len;
 
         if !old_avail && !delta_avail {
-            out_pos = flush_run(old_blob, old_index, run_start, i, out_blob, out_pos, out_index, &mut report);
+            out_pos = flush_run(
+                old_blob,
+                old_index,
+                run_start,
+                i,
+                out_blob,
+                out_pos,
+                out_index,
+                &mut report,
+            );
             break;
         }
 
         // Flux épuisé == traité comme infini (ligne "Drainage" de la table).
         let old_lt_delta = match (old_avail, delta_avail) {
             (true, true) => old_index[i].id < delta.entries[j].entity_id,
-            (true, false) => true,  // delta infini -> old reste toujours "plus petit" -> extension de run
-            (false, _) => false,    // old infini -> jamais "plus petit"
+            (true, false) => true, // delta infini -> old reste toujours "plus petit" -> extension de run
+            (false, _) => false,   // old infini -> jamais "plus petit"
         };
 
         if old_lt_delta {
@@ -102,7 +114,16 @@ pub fn merge_sweep(
         // ré-avance de `i` (Greater répétés), run_start == i déjà, donc cet
         // appel se résout en court-circuit (cf. flush_run) — coût d'une
         // comparaison, branche parfaitement prédictible.
-        out_pos = flush_run(old_blob, old_index, run_start, i, out_blob, out_pos, out_index, &mut report);
+        out_pos = flush_run(
+            old_blob,
+            old_index,
+            run_start,
+            i,
+            out_blob,
+            out_pos,
+            out_index,
+            &mut report,
+        );
 
         // delta_avail garanti vrai ici : si delta_avail était faux, old_avail
         // serait vrai (sinon double-épuisement déjà intercepté plus haut),
@@ -188,7 +209,10 @@ fn flush_run(
     if shift != 0 {
         for entry in &mut out_index[out_idx_start..] {
             let new_offset = entry.offset as i64 + shift;
-            debug_assert!(new_offset >= 0, "Violation d'invariant : offset négatif calculé");
+            debug_assert!(
+                new_offset >= 0,
+                "Violation d'invariant : offset négatif calculé"
+            );
             entry.offset = new_offset as u64;
         }
     }
@@ -213,7 +237,8 @@ fn emit_fragment(
     let src_start = d.offset as usize;
     let src_end = src_start + d.length as usize;
 
-    out_blob[out_pos..out_pos + d.length as usize].copy_from_slice(&delta.payload[src_start..src_end]);
+    out_blob[out_pos..out_pos + d.length as usize]
+        .copy_from_slice(&delta.payload[src_start..src_end]);
 
     out_index.push(PackfileEntry {
         id: d.entity_id,
@@ -262,10 +287,19 @@ mod tests {
 
     // --- Helpers de construction ---------------------------------------------
     fn pe(id: i64, offset: u64, length: u32) -> PackfileEntry {
-        PackfileEntry { id, offset, len: length, _pad: [0u8; 4] }
+        PackfileEntry {
+            id,
+            offset,
+            len: length,
+            _pad: [0u8; 4],
+        }
     }
     fn de(id: i64, offset: u32, length: u32) -> DeltaEntry {
-        DeltaEntry { entity_id: id, offset, length }
+        DeltaEntry {
+            entity_id: id,
+            offset,
+            length,
+        }
     }
 
     // --- DELETE (avec shift négatif) -----------------------------------------
@@ -274,14 +308,20 @@ mod tests {
         // old: id1[0..10]=0xAA, id2[10..20]=0xBB, id3[20..30]=0xCC
         let old_blob: Vec<u8> = [vec![0xAA; 10], vec![0xBB; 10], vec![0xCC; 10]].concat();
         let old_index = vec![pe(1, 0, 10), pe(2, 10, 10), pe(3, 20, 10)];
-        let delta = DeltaBatch { entries: vec![de(2, 0, 0)], payload: vec![] };
+        let delta = DeltaBatch {
+            entries: vec![de(2, 0, 0)],
+            payload: vec![],
+        };
 
         let mut out_blob = vec![0u8; 30];
         let mut out_index = Vec::with_capacity(3);
         let report = merge_sweep(&old_blob, &old_index, &delta, &mut out_blob, &mut out_index);
 
         assert_eq!(out_index, vec![pe(1, 0, 10), pe(3, 10, 10)]); // shift = -10
-        assert_eq!(&out_blob[..20], &[vec![0xAA; 10], vec![0xCC; 10]].concat()[..]);
+        assert_eq!(
+            &out_blob[..20],
+            &[vec![0xAA; 10], vec![0xCC; 10]].concat()[..]
+        );
         assert_eq!(report.deletes_applied, 1);
         assert_eq!(report.runs_count, 2);
         assert_eq!(report.bytes_written, 20);
@@ -294,14 +334,20 @@ mod tests {
     fn insert_new_entity() {
         let old_blob = vec![0xAA; 5];
         let old_index = vec![pe(1, 0, 5)];
-        let delta = DeltaBatch { entries: vec![de(2, 0, 5)], payload: vec![0xDD; 5] };
+        let delta = DeltaBatch {
+            entries: vec![de(2, 0, 5)],
+            payload: vec![0xDD; 5],
+        };
 
         let mut out_blob = vec![0u8; 10];
         let mut out_index = Vec::with_capacity(2);
         let report = merge_sweep(&old_blob, &old_index, &delta, &mut out_blob, &mut out_index);
 
         assert_eq!(out_index, vec![pe(1, 0, 5), pe(2, 5, 5)]);
-        assert_eq!(&out_blob[..10], &[vec![0xAA; 5], vec![0xDD; 5]].concat()[..]);
+        assert_eq!(
+            &out_blob[..10],
+            &[vec![0xAA; 5], vec![0xDD; 5]].concat()[..]
+        );
         assert_eq!(report.inserts_applied, 1);
         assert_eq!(report.bytes_inserted_from_delta, 5);
         assert_eq!(report.runs_count, 1);
@@ -312,14 +358,20 @@ mod tests {
     fn update_existing_entity() {
         let old_blob: Vec<u8> = [vec![0xAA; 5], vec![0xBB; 5]].concat();
         let old_index = vec![pe(1, 0, 5), pe(2, 5, 5)];
-        let delta = DeltaBatch { entries: vec![de(2, 0, 8)], payload: vec![0xEE; 8] };
+        let delta = DeltaBatch {
+            entries: vec![de(2, 0, 8)],
+            payload: vec![0xEE; 8],
+        };
 
         let mut out_blob = vec![0u8; 13];
         let mut out_index = Vec::with_capacity(2);
         let report = merge_sweep(&old_blob, &old_index, &delta, &mut out_blob, &mut out_index);
 
         assert_eq!(out_index, vec![pe(1, 0, 5), pe(2, 5, 8)]);
-        assert_eq!(&out_blob[..13], &[vec![0xAA; 5], vec![0xEE; 8]].concat()[..]);
+        assert_eq!(
+            &out_blob[..13],
+            &[vec![0xAA; 5], vec![0xEE; 8]].concat()[..]
+        );
         assert_eq!(report.updates_applied, 1);
         assert_eq!(report.bytes_inserted_from_delta, 8);
         assert_eq!(report.runs_count, 1);
@@ -329,8 +381,17 @@ mod tests {
     #[test]
     fn long_run_with_empty_delta() {
         let old_blob: Vec<u8> = (0..20u8).collect(); // 5 entrées * 4 octets
-        let old_index = vec![pe(1, 0, 4), pe(2, 4, 4), pe(3, 8, 4), pe(4, 12, 4), pe(5, 16, 4)];
-        let delta = DeltaBatch { entries: vec![], payload: vec![] };
+        let old_index = vec![
+            pe(1, 0, 4),
+            pe(2, 4, 4),
+            pe(3, 8, 4),
+            pe(4, 12, 4),
+            pe(5, 16, 4),
+        ];
+        let delta = DeltaBatch {
+            entries: vec![],
+            payload: vec![],
+        };
 
         let mut out_blob = vec![0u8; 20];
         let mut out_index = Vec::with_capacity(5);
@@ -341,7 +402,10 @@ mod tests {
         assert_eq!(report.runs_count, 1); // une seule run pour les 5 entrées
         assert_eq!(report.bytes_copied_from_old, 20);
         assert_eq!(report.entries_written, 5);
-        assert_eq!(report.deletes_applied + report.inserts_applied + report.updates_applied, 0);
+        assert_eq!(
+            report.deletes_applied + report.inserts_applied + report.updates_applied,
+            0
+        );
     }
 
     // --- Drainage flux droit (old vide) -----------------------------------
@@ -369,7 +433,10 @@ mod tests {
     fn both_empty() {
         let old_blob: Vec<u8> = vec![];
         let old_index: Vec<PackfileEntry> = vec![];
-        let delta = DeltaBatch { entries: vec![], payload: vec![] };
+        let delta = DeltaBatch {
+            entries: vec![],
+            payload: vec![],
+        };
 
         let mut out_blob: Vec<u8> = vec![];
         let mut out_index = Vec::new();
@@ -410,9 +477,17 @@ mod tests {
     fn interleaved_run_update_run_update_run() {
         let old_blob: Vec<u8> = (0..22u8).collect(); // 11 entrées * 2 octets
         let old_index = vec![
-            pe(1, 0, 2), pe(2, 2, 2), pe(3, 4, 2), pe(4, 6, 2),
-            pe(5, 8, 2), pe(6, 10, 2), pe(7, 12, 2), pe(8, 14, 2),
-            pe(9, 16, 2), pe(10, 18, 2), pe(11, 20, 2),
+            pe(1, 0, 2),
+            pe(2, 2, 2),
+            pe(3, 4, 2),
+            pe(4, 6, 2),
+            pe(5, 8, 2),
+            pe(6, 10, 2),
+            pe(7, 12, 2),
+            pe(8, 14, 2),
+            pe(9, 16, 2),
+            pe(10, 18, 2),
+            pe(11, 20, 2),
         ];
         let delta = DeltaBatch {
             entries: vec![de(4, 0, 5), de(8, 5, 3)], // deux UPDATE isolés
@@ -424,9 +499,17 @@ mod tests {
         let report = merge_sweep(&old_blob, &old_index, &delta, &mut out_blob, &mut out_index);
 
         let expected_index = vec![
-            pe(1, 0, 2), pe(2, 2, 2), pe(3, 4, 2), pe(4, 6, 5),   // run1 + update id4
-            pe(5, 11, 2), pe(6, 13, 2), pe(7, 15, 2), pe(8, 17, 3), // run2 (shift +3) + update id8
-            pe(9, 20, 2), pe(10, 22, 2), pe(11, 24, 2),             // run3 (shift +4)
+            pe(1, 0, 2),
+            pe(2, 2, 2),
+            pe(3, 4, 2),
+            pe(4, 6, 5), // run1 + update id4
+            pe(5, 11, 2),
+            pe(6, 13, 2),
+            pe(7, 15, 2),
+            pe(8, 17, 3), // run2 (shift +3) + update id8
+            pe(9, 20, 2),
+            pe(10, 22, 2),
+            pe(11, 24, 2), // run3 (shift +4)
         ];
         assert_eq!(out_index, expected_index);
 
@@ -458,7 +541,10 @@ mod tests {
     fn zero_allocation_inside_merge_sweep() {
         let old_blob: Vec<u8> = [vec![0xAA; 10], vec![0xBB; 10], vec![0xCC; 10]].concat();
         let old_index = vec![pe(1, 0, 10), pe(2, 10, 10), pe(3, 20, 10)];
-        let delta = DeltaBatch { entries: vec![de(2, 0, 0)], payload: vec![] };
+        let delta = DeltaBatch {
+            entries: vec![de(2, 0, 0)],
+            payload: vec![],
+        };
 
         // Buffers pré-alloués AVANT la fenêtre de mesure.
         let mut out_blob = vec![0u8; 30];
@@ -468,6 +554,9 @@ mod tests {
         let _report = merge_sweep(&old_blob, &old_index, &delta, &mut out_blob, &mut out_index);
         let after = alloc_count();
 
-        assert_eq!(before, after, "allocation détectée à l'intérieur de merge_sweep");
+        assert_eq!(
+            before, after,
+            "allocation détectée à l'intérieur de merge_sweep"
+        );
     }
 }

@@ -98,7 +98,9 @@ impl PackHtmlIndex {
         let expected_index_len = footer
             .entry_count
             .checked_mul(ENTRY_SIZE as u64)
-            .ok_or_else(|| io::Error::other("overflow : entry_count * size_of::<PackfileEntry>()"))?;
+            .ok_or_else(|| {
+                io::Error::other("overflow : entry_count * size_of::<PackfileEntry>()")
+            })?;
         if footer.index_len != expected_index_len {
             return Err(io::Error::other(format!(
                 "index_len ({}) incohérent avec entry_count ({}) — attendu {}",
@@ -108,7 +110,9 @@ impl PackHtmlIndex {
 
         let index_start = (footer_start as u64)
             .checked_sub(footer.index_len)
-            .ok_or_else(|| io::Error::other("index_len dépasse la taille disponible avant le footer"))?;
+            .ok_or_else(|| {
+                io::Error::other("index_len dépasse la taille disponible avant le footer")
+            })?;
 
         // mmap borné exactement à la région d'index — c'est cette borne,
         // pas un commentaire, qui garantit que le blob n'est jamais mappé.
@@ -318,7 +322,11 @@ mod tests {
         }
 
         for absent in [0i64, 5, 15, 25, 35, 45, 55, 999] {
-            assert_eq!(index.lookup(absent), None, "id={absent} ne devrait jamais matcher");
+            assert_eq!(
+                index.lookup(absent),
+                None,
+                "id={absent} ne devrait jamais matcher"
+            );
         }
 
         cleanup(&path);
@@ -376,7 +384,10 @@ mod tests {
         // de test (même convention que batch_renderer.rs : renderer.buf,
         // renderer.index).
         let mapped_len = index.mmap.as_ref().map(|m| m.len()).unwrap_or(0);
-        assert_eq!(mapped_len, ENTRY_SIZE, "mmap doit couvrir exactement 1 entrée (24B)");
+        assert_eq!(
+            mapped_len, ENTRY_SIZE,
+            "mmap doit couvrir exactement 1 entrée (24B)"
+        );
         assert!(
             mapped_len < (file_len / 1000) as usize,
             "mmap ({mapped_len}B) devrait être négligeable face au fichier ({file_len}B)"
@@ -411,7 +422,10 @@ mod tests {
         let path = write_raw_footer("bad_magic", b"", &footer);
 
         let result = PackHtmlIndex::open(&path);
-        assert!(result.is_err(), "magic invalide doit produire une erreur, pas un panic");
+        assert!(
+            result.is_err(),
+            "magic invalide doit produire une erreur, pas un panic"
+        );
 
         cleanup(&path);
     }
@@ -430,7 +444,10 @@ mod tests {
         let path = write_raw_footer("bad_version", b"", &footer);
 
         let result = PackHtmlIndex::open(&path);
-        assert!(result.is_err(), "version inconnue doit produire une erreur, pas un panic");
+        assert!(
+            result.is_err(),
+            "version inconnue doit produire une erreur, pas un panic"
+        );
 
         cleanup(&path);
     }

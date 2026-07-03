@@ -103,11 +103,11 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_fetch_content_core() {
-        let pool = sqlx::PgPool::connect(
-            &std::env::var("DATABASE_URL").unwrap()
-        ).await.unwrap();
+        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
 
-        let ids     = vec![1i64, 2, 3];
+        let ids = vec![1i64, 2, 3];
         let results = ContentCoreProjection::fetch_batch(&pool, &ids)
             .await
             .unwrap();
@@ -121,17 +121,20 @@ mod tests {
         println!("ContentCore[0] : {buf}");
 
         assert!(buf.contains("content-core"), "classe CSS absente");
-        assert!(buf.contains("<dt>document_id</dt>"), "champ document_id absent");
+        assert!(
+            buf.contains("<dt>document_id</dt>"),
+            "champ document_id absent"
+        );
     }
 
     #[tokio::test]
     #[ignore]
     async fn test_fetch_product_core() {
-        let pool = sqlx::PgPool::connect(
-            &std::env::var("DATABASE_URL").unwrap()
-        ).await.unwrap();
+        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
 
-        let ids     = vec![1i64, 2, 3];
+        let ids = vec![1i64, 2, 3];
         let results = CommerceProductCoreProjection::fetch_batch(&pool, &ids)
             .await
             .unwrap();
@@ -155,16 +158,16 @@ mod tests {
     #[test]
     fn test_content_core_no_realloc() {
         let storage = ContentCoreStorageRow {
-            published_at:        i64::MIN,
-            created_at:          i64::MIN,
-            modified_at:         i64::MIN,
-            document_id:         i32::MIN,
-            author_entity_id:    i32::MIN,
-            status:              i16::MIN,
-            is_readable:         0,
-            is_commentable:      0,
+            published_at: i64::MIN,
+            created_at: i64::MIN,
+            modified_at: i64::MIN,
+            document_id: i32::MIN,
+            author_entity_id: i32::MIN,
+            status: i16::MIN,
+            is_readable: 0,
+            is_commentable: 0,
             is_visible_comments: 0,
-            _pad:                [0; 3],
+            _pad: [0; 3],
         };
 
         let varlena = ContentCoreVarlenOwned {
@@ -172,23 +175,30 @@ mod tests {
         };
 
         let initial_cap = CONTENT_CORE_TOTAL_CAP;
-        let mut buf     = String::with_capacity(initial_cap);
+        let mut buf = String::with_capacity(initial_cap);
 
         ContentCoreProjection::render(&storage, &varlena, &mut buf);
 
         assert_eq!(
-            buf.capacity(), initial_cap,
+            buf.capacity(),
+            initial_cap,
             "REALLOC détecté sur ContentCore : capacity {} → {}.\n\
              Fragment-Forge sous-estime la capacité.\n\
              Longueur réelle du HTML : {} octets.",
-            initial_cap, buf.capacity(), buf.len()
+            initial_cap,
+            buf.capacity(),
+            buf.len()
         );
 
         assert!(buf.starts_with("<article"), "tag ouvrant manquant");
-        assert!(buf.trim_end().ends_with("</article>"), "tag fermant manquant");
+        assert!(
+            buf.trim_end().ends_with("</article>"),
+            "tag fermant manquant"
+        );
         println!(
             "[no-realloc] ContentCore : cap={}, len={}, ratio={:.0}%",
-            initial_cap, buf.len(),
+            initial_cap,
+            buf.len(),
             buf.len() as f64 / initial_cap as f64 * 100.0
         );
     }
@@ -196,31 +206,38 @@ mod tests {
     #[test]
     fn test_product_core_no_realloc() {
         let storage = CommerceProductCoreStorageRow {
-            price_cents:  i64::MIN,
-            id:           i32::MIN,
-            stock:        i32::MIN,
-            media_id:     i32::MIN,
+            price_cents: i64::MIN,
+            id: i32::MIN,
+            stock: i32::MIN,
+            media_id: i32::MIN,
             is_available: 0,
-            _pad:         [0; 3],
+            _pad: [0; 3],
         };
 
         let initial_cap = COMMERCE_PRODUCT_CORE_TOTAL_CAP;
-        let mut buf     = String::with_capacity(initial_cap);
+        let mut buf = String::with_capacity(initial_cap);
 
         CommerceProductCoreProjection::render(&storage, &(), &mut buf);
 
         assert_eq!(
-            buf.capacity(), initial_cap,
+            buf.capacity(),
+            initial_cap,
             "REALLOC détecté sur CommerceProductCore : capacity {} → {}.\n\
              Longueur réelle : {} octets.",
-            initial_cap, buf.capacity(), buf.len()
+            initial_cap,
+            buf.capacity(),
+            buf.len()
         );
 
         assert!(buf.starts_with("<article"), "tag ouvrant manquant");
-        assert!(buf.trim_end().ends_with("</article>"), "tag fermant manquant");
+        assert!(
+            buf.trim_end().ends_with("</article>"),
+            "tag fermant manquant"
+        );
         println!(
             "[no-realloc] ProductCore : cap={}, len={}, ratio={:.0}%",
-            initial_cap, buf.len(),
+            initial_cap,
+            buf.len(),
             buf.len() as f64 / initial_cap as f64 * 100.0
         );
     }
@@ -247,16 +264,16 @@ mod tests {
     #[test]
     fn diag_content_core_ratio() {
         let storage = ContentCoreStorageRow {
-            published_at:        1_700_000_000_000_000i64,
-            created_at:          1_700_000_000_000_000i64,
-            modified_at:         1_700_000_000_000_000i64,
-            document_id:         42,
-            author_entity_id:    7,
-            status:              1,
-            is_readable:         0,
-            is_commentable:      0,
+            published_at: 1_700_000_000_000_000i64,
+            created_at: 1_700_000_000_000_000i64,
+            modified_at: 1_700_000_000_000_000i64,
+            document_id: 42,
+            author_entity_id: 7,
+            status: 1,
+            is_readable: 0,
+            is_commentable: 0,
             is_visible_comments: 0,
-            _pad:                [0; 3],
+            _pad: [0; 3],
         };
 
         // Fixture minimal (varlena vides) — ce diagnostic ne prétend plus
@@ -273,19 +290,21 @@ mod tests {
         eprintln!(
             "[diag] ContentCore (fixture varlena vide) : {}/{} = {:.1}% \
              — informatif uniquement, voir ADR-007.",
-            buf.len(), CONTENT_CORE_TOTAL_CAP, ratio
+            buf.len(),
+            CONTENT_CORE_TOTAL_CAP,
+            ratio
         );
     }
 
     #[test]
     fn diag_product_core_ratio() {
         let storage = CommerceProductCoreStorageRow {
-            price_cents:  1999,
-            id:           42,
-            stock:        150,
-            media_id:     7,
+            price_cents: 1999,
+            id: 42,
+            stock: 150,
+            media_id: 7,
             is_available: 1,
-            _pad:         [0; 3],
+            _pad: [0; 3],
         };
 
         let mut buf = String::new();
@@ -294,7 +313,9 @@ mod tests {
         let ratio = buf.len() as f64 / COMMERCE_PRODUCT_CORE_TOTAL_CAP as f64 * 100.0;
         eprintln!(
             "[diag] ProductCore : {}/{} = {:.1}% — informatif uniquement, voir ADR-007.",
-            buf.len(), COMMERCE_PRODUCT_CORE_TOTAL_CAP, ratio
+            buf.len(),
+            COMMERCE_PRODUCT_CORE_TOTAL_CAP,
+            ratio
         );
     }
 }

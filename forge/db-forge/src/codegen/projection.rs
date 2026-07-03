@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use crate::mapping::{Column, PrimaryKey, map_type};
 use crate::naming::{to_pascal, to_screaming};
-use marius_fragment_forge::{FieldSpec, VarlenField, TemplateMetrics};
+use marius_fragment_forge::{FieldSpec, TemplateMetrics, VarlenField};
 
 /// Génère le stub `impl Projection` complet pour une table.
 ///
@@ -31,16 +31,16 @@ use marius_fragment_forge::{FieldSpec, VarlenField, TemplateMetrics};
 ///     capacités à zéro (comportement de transition, render() ne fait rien).
 #[allow(clippy::too_many_arguments)]
 pub fn write_projection_stub(
-    out:          &mut String,
-    schema:       &str,
-    table:        &str,
-    columns:      &[Column],
-    pk:           &PrimaryKey,
-    varlena:      &[VarlenField],
+    out: &mut String,
+    schema: &str,
+    table: &str,
+    columns: &[Column],
+    pk: &PrimaryKey,
+    varlena: &[VarlenField],
     varlena_join: Option<(&str, &str, &str)>,
-    render:       Option<(&str, &TemplateMetrics)>,
+    render: Option<(&str, &TemplateMetrics)>,
 ) {
-    let name      = to_pascal(&format!("{schema}_{table}"));
+    let name = to_pascal(&format!("{schema}_{table}"));
     let proj_name = format!("{name}Projection");
     let screaming = to_screaming(&format!("{schema}_{table}"));
 
@@ -51,7 +51,8 @@ pub fn write_projection_stub(
     };
 
     // ── Colonnes fixed-length pour le SELECT ─────────────────────────────────
-    let fixed_cols: Vec<&str> = columns.iter()
+    let fixed_cols: Vec<&str> = columns
+        .iter()
         .filter(|c| map_type(&c.sql_type).is_fixed)
         .map(|c| c.name.as_str())
         .collect();
@@ -67,10 +68,10 @@ pub fn write_projection_stub(
     // Ces variables alimentent le corps SQLx de fetch_from_pg ci-dessous.
     // Non utilisées par fetch_batch (Voie d'Exécution mmap).
     let (select, from_clause) = if let Some((vs, vt, _fk)) = varlena_join {
-        let varlena_cols: Vec<String> = varlena.iter()
-            .map(|v| format!("{vt}.{}", v.name))
-            .collect();
-        let all_cols: Vec<String> = fixed_cols.iter()
+        let varlena_cols: Vec<String> =
+            varlena.iter().map(|v| format!("{vt}.{}", v.name)).collect();
+        let all_cols: Vec<String> = fixed_cols
+            .iter()
             .map(|c| format!("{schema}.{table}.{c}"))
             .chain(varlena_cols)
             .collect();
@@ -83,9 +84,9 @@ pub fn write_projection_stub(
     };
 
     let where_clause = match pk {
-        PrimaryKey::Single(col) => format!(
-            "WHERE {schema}.{table}.{col} = ANY($1) ORDER BY {schema}.{table}.{col} ASC"
-        ),
+        PrimaryKey::Single(col) => {
+            format!("WHERE {schema}.{table}.{col} = ANY($1) ORDER BY {schema}.{table}.{col} ASC")
+        }
         PrimaryKey::Composite => "WHERE 1=1 /* PK composite: adapter */".to_string(),
     };
 
@@ -98,7 +99,7 @@ pub fn write_projection_stub(
     // pk_field : résolution pour record_id() (invariant : PK Single dans field_specs).
     let pk_col_name: &str = match pk {
         PrimaryKey::Single(col) => col.as_str(),
-        PrimaryKey::Composite   => fixed_cols.first().copied().unwrap_or("id"),
+        PrimaryKey::Composite => fixed_cols.first().copied().unwrap_or("id"),
     };
     let pk_field: &FieldSpec = field_specs
         .iter()
@@ -155,7 +156,11 @@ pub fn write_projection_stub(
     ).unwrap();
     writeln!(out).unwrap();
 
-    writeln!(out, "// Phase 2 AOT : _pool ignoré — lecture via OnceLock<PackfileReader>.").unwrap();
+    writeln!(
+        out,
+        "// Phase 2 AOT : _pool ignoré — lecture via OnceLock<PackfileReader>."
+    )
+    .unwrap();
     writeln!(out, "// RLS         : voir 09_rls/01_policies.sql").unwrap();
     writeln!(out, "impl crate::projection::Projection for {proj_name} {{").unwrap();
     writeln!(out, "    type Record = {name}StorageRow;").unwrap();
@@ -170,30 +175,50 @@ pub fn write_projection_stub(
     writeln!(out, "    async fn fetch_batch(").unwrap();
     writeln!(out, "        _pool: &sqlx::PgPool,").unwrap();
     writeln!(out, "        ids:   &[i64],").unwrap();
-    writeln!(out, "    ) -> Result<Vec<(Self::Record, Self::VarlenOwned)>, sqlx::Error> {{").unwrap();
+    writeln!(
+        out,
+        "    ) -> Result<Vec<(Self::Record, Self::VarlenOwned)>, sqlx::Error> {{"
+    )
+    .unwrap();
 
     if fixed_cols.is_empty() {
-        writeln!(out,
+        writeln!(
+            out,
             "        todo!(\"DB-Forge: aucune colonne fixed-length pour {schema}.{table}\")"
-        ).unwrap();
+        )
+        .unwrap();
     } else {
         // Montage du PackfileReader au premier appel — OnceLock garantit l'unicité.
-        writeln!(out, "        let reader = {screaming}_STORE.get_or_init(|| {{").unwrap();
+        writeln!(
+            out,
+            "        let reader = {screaming}_STORE.get_or_init(|| {{"
+        )
+        .unwrap();
         writeln!(out,
             "            marius_projection::packfile_reader::PackfileReader::open(&{proj_name}::store_path())"
         ).unwrap();
-        writeln!(out,
+        writeln!(
+            out,
             "                .expect(\"[fetch_batch:{schema}.{table}] store.bin absent \
              — exécuter marius-dump avant de démarrer le serveur\")"
-        ).unwrap();
+        )
+        .unwrap();
         writeln!(out, "        }});").unwrap();
         writeln!(out).unwrap();
 
         // Itération sur les ids demandés — lookup O(log N) par binary search.
         // Les ids absents du store sont silencieusement ignorés (enreg. supprimé).
-        writeln!(out, "        let mut batch = Vec::with_capacity(ids.len());").unwrap();
+        writeln!(
+            out,
+            "        let mut batch = Vec::with_capacity(ids.len());"
+        )
+        .unwrap();
         writeln!(out, "        for &id in ids {{").unwrap();
-        writeln!(out, "            if let Some((record, _vrefs)) = reader.lookup(id) {{").unwrap();
+        writeln!(
+            out,
+            "            if let Some((record, _vrefs)) = reader.lookup(id) {{"
+        )
+        .unwrap();
 
         if varlena.is_empty() {
             // Table sans varlena : copie du Record, VarlenOwned = ().
@@ -203,10 +228,12 @@ pub fn write_projection_stub(
             // to_owned() : unique allocation tolérée — bornée, isolée avant render().
             writeln!(out, "                let owned = {name}VarlenOwned {{").unwrap();
             for (i, v) in varlena.iter().enumerate() {
-                writeln!(out,
+                writeln!(
+                    out,
                     "                    {}: _vrefs.get({i}).map(str::to_owned),",
                     v.name
-                ).unwrap();
+                )
+                .unwrap();
             }
             writeln!(out, "                }};").unwrap();
             writeln!(out, "                batch.push((*record, owned));").unwrap();
@@ -227,15 +254,25 @@ pub fn write_projection_stub(
     writeln!(out, "    async fn fetch_from_pg(").unwrap();
     writeln!(out, "        pool: &sqlx::PgPool,").unwrap();
     writeln!(out, "        ids:  &[i64],").unwrap();
-    writeln!(out, "    ) -> Result<Vec<(Self::Record, Self::VarlenOwned)>, sqlx::Error> {{").unwrap();
+    writeln!(
+        out,
+        "    ) -> Result<Vec<(Self::Record, Self::VarlenOwned)>, sqlx::Error> {{"
+    )
+    .unwrap();
 
     if fixed_cols.is_empty() {
-        writeln!(out,
+        writeln!(
+            out,
             "        todo!(\"DB-Forge: aucune colonne fixed-length pour {schema}.{table}\")"
-        ).unwrap();
+        )
+        .unwrap();
     } else {
         writeln!(out, "        let rows = sqlx::query_as::<_, {name}Row>(").unwrap();
-        writeln!(out, "            \"SELECT {select} FROM {from_clause} {where_clause}\",").unwrap();
+        writeln!(
+            out,
+            "            \"SELECT {select} FROM {from_clause} {where_clause}\","
+        )
+        .unwrap();
         writeln!(out, "        )").unwrap();
         writeln!(out, "        .bind(ids)").unwrap();
         writeln!(out, "        .fetch_all(pool)").unwrap();
@@ -243,9 +280,11 @@ pub fn write_projection_stub(
 
         if varlena.is_empty() {
             // Pas de varlena : From<Row> pour la conversion.
-            writeln!(out,
+            writeln!(
+                out,
                 "        Ok(rows.into_iter().map(|r| ({name}StorageRow::from(r), ())).collect())"
-            ).unwrap();
+            )
+            .unwrap();
         } else {
             // Avec varlena : déstructuration complète (évite E0382 partial move).
             writeln!(out, "        Ok(rows.into_iter().map(|r| {{").unwrap();
@@ -274,25 +313,28 @@ pub fn write_projection_stub(
             writeln!(out, "            let storage = {name}StorageRow {{").unwrap();
 
             let mut layout_bytes = 0usize;
-            let mut max_align    = 1usize;
+            let mut max_align = 1usize;
 
             for col in columns {
                 let m = map_type(&col.sql_type);
-                if !m.is_fixed { continue; }
+                if !m.is_fixed {
+                    continue;
+                }
 
                 layout_bytes += m.size_bytes;
-                max_align     = max_align.max(m.alignment);
+                max_align = max_align.max(m.alignment);
 
                 let sentinel = col.sentinel.as_deref().unwrap_or(m.default_sentinel);
 
                 let mut expr = if col.is_notnull {
                     match m.row_type {
-                        "chrono::DateTime<chrono::Utc>" =>
-                            format!("{}.timestamp_micros()", col.name),
-                        "chrono::NaiveDateTime" =>
-                            format!("{}.and_utc().timestamp_micros()", col.name),
-                        "chrono::NaiveDate" =>
-                            format!("{}.num_days_from_ce()", col.name),
+                        "chrono::DateTime<chrono::Utc>" => {
+                            format!("{}.timestamp_micros()", col.name)
+                        }
+                        "chrono::NaiveDateTime" => {
+                            format!("{}.and_utc().timestamp_micros()", col.name)
+                        }
+                        "chrono::NaiveDate" => format!("{}.num_days_from_ce()", col.name),
                         _ => col.name.clone(),
                     }
                 } else {
@@ -313,7 +355,7 @@ pub fn write_projection_stub(
             }
 
             let padded_size = layout_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
-            let tail_pad    = padded_size - layout_bytes;
+            let tail_pad = padded_size - layout_bytes;
             if tail_pad > 0 {
                 writeln!(out, "                _pad: [0u8; {tail_pad}],").unwrap();
             }
@@ -340,9 +382,11 @@ pub fn write_projection_stub(
     } else {
         format!("_varlena: &{name}VarlenOwned")
     };
-    writeln!(out,
+    writeln!(
+        out,
         "    fn render(record: &Self::Record, {varlena_param}, buf: &mut String) {{"
-    ).unwrap();
+    )
+    .unwrap();
     if render_body.is_empty() {
         // Aucun template .marius trouvé pour cette table — stub neutre.
         writeln!(out, "        let _ = (record, buf);").unwrap();
@@ -386,21 +430,41 @@ pub fn write_projection_stub(
     // Chemin statique par table — aucun paramètre record.
     // Un seul open() par batch (INV O(1) syscalls).
     writeln!(out, "    fn packfile_path() -> ::std::path::PathBuf {{").unwrap();
-    writeln!(out, "        let root = std::env::var(\"MARIUS_ARTIFACTS_DIR\")").unwrap();
-    writeln!(out, "            .unwrap_or_else(|_| \"artifacts\".to_string());").unwrap();
-    writeln!(out,
+    writeln!(
+        out,
+        "        let root = std::env::var(\"MARIUS_ARTIFACTS_DIR\")"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            .unwrap_or_else(|_| \"artifacts\".to_string());"
+    )
+    .unwrap();
+    writeln!(
+        out,
         "        ::std::path::PathBuf::from(format!(\"{{root}}/{schema}_{table}_pack.bin\"))"
-    ).unwrap();
+    )
+    .unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
     // ── store_path() (Phase 1.4 : binary dump) ────────────────────────────────
     writeln!(out, "    fn store_path() -> ::std::path::PathBuf {{").unwrap();
-    writeln!(out, "        let root = std::env::var(\"MARIUS_ARTIFACTS_DIR\")").unwrap();
-    writeln!(out, "            .unwrap_or_else(|_| \"artifacts\".to_string());").unwrap();
-    writeln!(out,
+    writeln!(
+        out,
+        "        let root = std::env::var(\"MARIUS_ARTIFACTS_DIR\")"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            .unwrap_or_else(|_| \"artifacts\".to_string());"
+    )
+    .unwrap();
+    writeln!(
+        out,
         "        ::std::path::PathBuf::from(format!(\"{{root}}/{schema}_{table}_store.bin\"))"
-    ).unwrap();
+    )
+    .unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
@@ -423,7 +487,11 @@ pub fn write_projection_stub(
         writeln!(out, "    fn encode_varlena(").unwrap();
         writeln!(out, "        owned: &Self::VarlenOwned,").unwrap();
         writeln!(out, "        heap:  &mut Vec<u8>,").unwrap();
-        writeln!(out, "        toc:   &mut Vec<marius_projection::VarlenSlot>,").unwrap();
+        writeln!(
+            out,
+            "        toc:   &mut Vec<marius_projection::VarlenSlot>,"
+        )
+        .unwrap();
         writeln!(out, "    ) {{").unwrap();
         for v in varlena {
             writeln!(out, "        match owned.{}.as_deref() {{", v.name).unwrap();
@@ -431,7 +499,11 @@ pub fn write_projection_stub(
             writeln!(out, "                let offset = heap.len() as u32;").unwrap();
             writeln!(out, "                let len    = s.len() as u32;").unwrap();
             writeln!(out, "                heap.extend_from_slice(s.as_bytes());").unwrap();
-            writeln!(out, "                toc.push(marius_projection::VarlenSlot {{ offset, len }});").unwrap();
+            writeln!(
+                out,
+                "                toc.push(marius_projection::VarlenSlot {{ offset, len }});"
+            )
+            .unwrap();
             writeln!(out, "            }}").unwrap();
             writeln!(out, "            _ => toc.push(marius_projection::VarlenSlot {{ offset: u32::MAX, len: 0 }}),").unwrap();
             writeln!(out, "        }}").unwrap();

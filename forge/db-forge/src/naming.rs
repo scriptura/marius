@@ -6,13 +6,15 @@
 /// "content_core" → "ContentCore"
 /// "commerce_product_core" → "CommerceProductCore"
 pub fn to_pascal(s: &str) -> String {
-    s.split('_').map(|w| {
-        let mut c = w.chars();
-        match c.next() {
-            None    => String::new(),
-            Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-        }
-    }).collect()
+    s.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        })
+        .collect()
 }
 
 /// "content_core" → "CONTENT_CORE"
@@ -41,6 +43,9 @@ mod tests {
 
     #[test]
     fn screaming_compound() {
-        assert_eq!(to_screaming("commerce_product_core"), "COMMERCE_PRODUCT_CORE");
+        assert_eq!(
+            to_screaming("commerce_product_core"),
+            "COMMERCE_PRODUCT_CORE"
+        );
     }
 }

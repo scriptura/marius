@@ -19,9 +19,9 @@ use marius_fragment_forge::VarlenField;
 /// l'ordre des champs dans {Name}StorageRow (#[repr(C)]) correspond exactement
 /// à l'ordre des colonnes dans le heap tuple PostgreSQL.
 pub async fn fetch_columns(
-    pool:   &sqlx::PgPool,
+    pool: &sqlx::PgPool,
     schema: &str,
-    table:  &str,
+    table: &str,
 ) -> Result<Vec<Column>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT
@@ -44,13 +44,16 @@ pub async fn fetch_columns(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|r| Column {
-        attnum:     r.get::<i16,    _>(0),
-        name:       r.get::<String, _>(1),
-        sql_type:   r.get::<String, _>(2),
-        is_notnull: r.get::<bool,   _>(3),
-        sentinel:   parse_sentinel(&r.get::<String, _>(4)),
-    }).collect())
+    Ok(rows
+        .into_iter()
+        .map(|r| Column {
+            attnum: r.get::<i16, _>(0),
+            name: r.get::<String, _>(1),
+            sql_type: r.get::<String, _>(2),
+            is_notnull: r.get::<bool, _>(3),
+            sentinel: parse_sentinel(&r.get::<String, _>(4)),
+        })
+        .collect())
 }
 
 // =============================================================================
@@ -62,9 +65,9 @@ pub async fn fetch_columns(
 /// Retourne Single(col) si PK sur une colonne unique, Composite sinon.
 /// Une PK Composite rend le Collector inapplicable.
 pub async fn fetch_pk_column(
-    pool:   &sqlx::PgPool,
+    pool: &sqlx::PgPool,
     schema: &str,
-    table:  &str,
+    table: &str,
 ) -> Result<PrimaryKey, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT kcu.column_name::text
@@ -90,7 +93,9 @@ pub async fn fetch_pk_column(
         }
         1 => Ok(PrimaryKey::Single(rows[0].get::<String, _>(0))),
         n => {
-            eprintln!("DB-Forge [{schema}.{table}] : PK composite ({n} colonnes) — Collector ignoré.");
+            eprintln!(
+                "DB-Forge [{schema}.{table}] : PK composite ({n} colonnes) — Collector ignoré."
+            );
             Ok(PrimaryKey::Composite)
         }
     }
@@ -108,24 +113,22 @@ pub async fn fetch_pk_column(
 ///   words_aligned = next_power_of_two().
 ///   max_entity_id = words_aligned × 64.
 pub async fn fetch_max_id(
-    pool:    &sqlx::PgPool,
-    schema:  &str,
-    table:   &str,
-    pk_col:  &str,
+    pool: &sqlx::PgPool,
+    schema: &str,
+    table: &str,
+    pk_col: &str,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     // format! obligatoire : sqlx ne supporte pas l'interpolation d'identifiants SQL.
     // Risque injection nul : pk_col est issu de pg_constraint (catalogue système).
-    let query = format!(
-        "SELECT COALESCE(MAX({pk_col}), 0)::BIGINT FROM {schema}.{table}"
-    );
+    let query = format!("SELECT COALESCE(MAX({pk_col}), 0)::BIGINT FROM {schema}.{table}");
 
     let max_id: i64 = sqlx::query_scalar::<_, i64>(&query)
         .fetch_one(pool)
         .await
         .unwrap_or(0);
 
-    let with_margin   = (max_id as f64 * 1.20).ceil() as usize;
-    let words_needed  = with_margin.max(64).div_ceil(64);
+    let with_margin = (max_id as f64 * 1.20).ceil() as usize;
+    let words_needed = with_margin.max(64).div_ceil(64);
     let words_aligned = words_needed.next_power_of_two();
     let max_entity_id = words_aligned * 64;
 
@@ -166,9 +169,9 @@ pub async fn fetch_max_id(
 ///   Si COMMENT ON COLUMN ... IS 'marius:pre_escaped' → facteur escape = 1.
 ///   Sinon : facteur = VarlenField::HTML_ESCAPE_FACTOR (6).
 pub async fn fetch_varlena_cols(
-    pool:   &sqlx::PgPool,
+    pool: &sqlx::PgPool,
     schema: &str,
-    table:  &str,
+    table: &str,
 ) -> Result<Vec<VarlenField>, Box<dyn std::error::Error>> {
     let rows = sqlx::query(
         "SELECT
@@ -199,8 +202,8 @@ pub async fn fetch_varlena_cols(
     let mut fields = Vec::new();
 
     for row in rows {
-        let name:        String = row.get(0);
-        let typmod:      i32    = row.get(1);
+        let name: String = row.get(0);
+        let typmod: i32 = row.get(1);
         let description: String = row.get(2);
 
         let pre_escaped = description.trim() == "marius:pre_escaped";
@@ -277,8 +280,12 @@ pub async fn fetch_varlena_cols(
         // Seulement si une borne existe — un champ non borné n'a rien à valider
         // ici ; sa validation est différée à resolve_and_measure (Étape 3).
         if let Some(n) = max_len {
-            let escape_factor = if pre_escaped { 1 } else { VarlenField::HTML_ESCAPE_FACTOR };
-            let max_escaped   = n * escape_factor;
+            let escape_factor = if pre_escaped {
+                1
+            } else {
+                VarlenField::HTML_ESCAPE_FACTOR
+            };
+            let max_escaped = n * escape_factor;
             if max_escaped > 65_536 {
                 panic!(
                     "DB-Forge [{schema}.{table}.{name}]: \
@@ -376,12 +383,18 @@ mod tests {
 
     #[test]
     fn parse_check_simple() {
-        assert_eq!(parse_check_length_limit("(length(label) <= 255)"), Some(255));
+        assert_eq!(
+            parse_check_length_limit("(length(label) <= 255)"),
+            Some(255)
+        );
     }
 
     #[test]
     fn parse_check_char_length() {
-        assert_eq!(parse_check_length_limit("(char_length(bio) <= 1000)"), Some(1000));
+        assert_eq!(
+            parse_check_length_limit("(char_length(bio) <= 1000)"),
+            Some(1000)
+        );
     }
 
     #[test]
@@ -441,7 +454,8 @@ mod integration {
     async fn connect() -> sqlx::PgPool {
         let url = std::env::var("DATABASE_URL")
             .expect("DATABASE_URL requis pour les tests d'intégration");
-        sqlx::PgPool::connect(&url).await
+        sqlx::PgPool::connect(&url)
+            .await
             .expect("Connexion PgPool échouée")
     }
 
@@ -451,13 +465,17 @@ mod integration {
     #[tokio::test]
     #[ignore]
     async fn fetch_component_list_returns_at_least_two() {
-        let pool  = connect().await;
-        let comps = fetch_component_list(&pool).await
+        let pool = connect().await;
+        let comps = fetch_component_list(&pool)
+            .await
             .expect("fetch_component_list échoué");
         assert!(
             comps.len() >= 2,
             "Moins de 2 composants — meta.containment_intent vide ou incomplet : {:?}",
-            comps.iter().map(|c| format!("{}.{}", c.schema, c.table)).collect::<Vec<_>>()
+            comps
+                .iter()
+                .map(|c| format!("{}.{}", c.schema, c.table))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -467,7 +485,8 @@ mod integration {
     #[ignore]
     async fn fetch_columns_content_core_ordered_by_attnum() {
         let pool = connect().await;
-        let cols = fetch_columns(&pool, "content", "core").await
+        let cols = fetch_columns(&pool, "content", "core")
+            .await
             .expect("fetch_columns échoué");
         assert!(
             !cols.is_empty(),
@@ -477,8 +496,10 @@ mod integration {
             assert!(
                 w[0].attnum < w[1].attnum,
                 "Colonnes non triées par attnum : {} ({}) >= {} ({})",
-                w[0].name, w[0].attnum,
-                w[1].name, w[1].attnum,
+                w[0].name,
+                w[0].attnum,
+                w[1].name,
+                w[1].attnum,
             );
         }
     }
@@ -489,21 +510,25 @@ mod integration {
     #[tokio::test]
     #[ignore]
     async fn validate_layout_passes_for_all_registered_components() {
-        let pool  = connect().await;
-        let comps = fetch_component_list(&pool).await
+        let pool = connect().await;
+        let comps = fetch_component_list(&pool)
+            .await
             .expect("fetch_component_list échoué");
 
         for comp in &comps {
-            if comp.intent_density == 0 { continue; }
+            if comp.intent_density == 0 {
+                continue;
+            }
 
-            let cols = fetch_columns(&pool, &comp.schema, &comp.table).await
-                .expect(&format!("fetch_columns échoué pour {}.{}", comp.schema, comp.table));
+            let cols = fetch_columns(&pool, &comp.schema, &comp.table)
+                .await
+                .expect(&format!(
+                    "fetch_columns échoué pour {}.{}",
+                    comp.schema, comp.table
+                ));
 
             validate_layout(&cols, comp.intent_density)
-                .unwrap_or_else(|msg| panic!(
-                    "{}.{} : {}",
-                    comp.schema, comp.table, msg
-                ));
+                .unwrap_or_else(|msg| panic!("{}.{} : {}", comp.schema, comp.table, msg));
         }
     }
 }

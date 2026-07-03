@@ -28,17 +28,17 @@ pub struct Collector<const MAX: usize, const WORDS: usize> {
     /// Bit-vector de présence. Bit (id-1) = signal en attente.
     presence: [AtomicU64; WORDS],
     /// Approximation du nombre de bits positionnés.
-    count:    AtomicUsize,
+    count: AtomicUsize,
     /// Signaux ignorés car id > MAX — désynchronisation de configuration.
-    dropped:  AtomicU64,
+    dropped: AtomicU64,
 }
 
 impl<const MAX: usize, const WORDS: usize> Collector<MAX, WORDS> {
     pub const fn new_zeroed() -> Self {
         Self {
             presence: [const { AtomicU64::new(0) }; WORDS],
-            count:    AtomicUsize::new(0),
-            dropped:  AtomicU64::new(0),
+            count: AtomicUsize::new(0),
+            dropped: AtomicU64::new(0),
         }
     }
 
@@ -51,9 +51,9 @@ impl<const MAX: usize, const WORDS: usize> Collector<MAX, WORDS> {
             return InsertResult::Dropped;
         }
 
-        let idx  = (id - 1) as usize;
+        let idx = (id - 1) as usize;
         let word = idx / 64;
-        let bit  = 1u64 << (idx % 64);
+        let bit = 1u64 << (idx % 64);
 
         let old = self.presence[word].fetch_or(bit, Release);
 

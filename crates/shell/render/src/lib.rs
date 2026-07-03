@@ -6,18 +6,18 @@
 
 mod sweep;
 
-pub mod dispatcher;
 pub mod batch_renderer;
-pub mod packfile_builder;
+pub mod dispatcher;
+pub mod dumper;
 pub mod pack_html_format;
 pub mod pack_html_index;
-pub mod registry;
-pub mod dumper;
+pub mod packfile_builder;
 pub mod regenerate;
+pub mod registry;
 
 // Ré-export pour la façade
-pub use dispatcher::{Dispatcher, DispatcherConfig};
 pub use batch_renderer::BatchRenderer;
+pub use dispatcher::{Dispatcher, DispatcherConfig};
 pub use pack_html_format::PackfileEntry;
 pub use packfile_builder::PackfileBuilder;
 
@@ -32,14 +32,14 @@ pub use regenerate::regenerate_and_swap;
 // regenerate_and_swap ci-dessus (fonction/type principal d'un module,
 // ré-exporté à plat). main.rs l'appelle via marius_render::ensure_provisioned,
 // pas marius_render::regenerate::ensure_provisioned.
-pub use regenerate::{ensure_provisioned, ProvisionOutcome};
+pub use regenerate::{ProvisionOutcome, ensure_provisioned};
 
 // LiveRegistry, RouteEntry, IdSource, packfile_path_for : même convention que
 // BatchRenderer ci-dessus (type principal d'un module, ré-exporté à plat).
 // RouteEntry/IdSource/packfile_path_for ajoutés en Phase 3 — nécessaires dès
 // que la frontière réseau (marius-server) doit construire sa ROUTE_TABLE et
 // résoudre les chemins de packfiles avec les mêmes types que cold_start().
-pub use registry::{packfile_path_for, IdSource, LiveRegistry, RouteEntry};
+pub use registry::{IdSource, LiveRegistry, RouteEntry, packfile_path_for};
 
 // PackHtmlIndex — non ré-exporté avant cette session ("pas étendu, hors
 // périmètre de la Phase 2"). Phase 3 le requiert : LiveRegistry::load()

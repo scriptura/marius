@@ -13,7 +13,7 @@ use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 
 use axum::extract::{Extension, Path, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use marius_render::{IdSource, LiveRegistry, PackHtmlIndex, RouteEntry};
@@ -79,17 +79,20 @@ async fn deliver(index: Arc<PackHtmlIndex>, offset: u64, len: u32) -> Response {
     match result {
         // Content-Length connu sans calcul (len déjà en mémoire, spec §6.2)
         // — émis directement, pas de Transfer-Encoding: chunked.
-        
         Ok(Ok(bytes)) => (
             [
                 // Conversion interne sans allocation tas pour les entiers courts
                 (header::CONTENT_LENGTH, HeaderValue::from(len as u64)),
                 // Pointage direct sur la section de données statiques (.rodata) du binaire
-                (header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8")),
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/html; charset=utf-8"),
+                ),
             ],
             bytes,
-        ).into_response(),
-        
+        )
+            .into_response(),
+
         // Ok(Err(_)) : échec du pread (fd invalide, erreur disque). Err(_) :
         // la tâche spawn_blocking elle-même a paniqué. Les deux sont des
         // anomalies internes, jamais imputables à la requête du client —

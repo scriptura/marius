@@ -209,7 +209,9 @@ fn http_get_status_code(addr: &str, path: &str) -> std::io::Result<u16> {
         .nth(1)
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| {
-            std::io::Error::other(format!("ligne de statut HTTP non parseable: {status_line:?}"))
+            std::io::Error::other(format!(
+                "ligne de statut HTTP non parseable: {status_line:?}"
+            ))
         })
 }
 

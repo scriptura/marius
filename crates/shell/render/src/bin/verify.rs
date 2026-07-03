@@ -12,8 +12,8 @@
 use std::fs;
 use std::mem;
 
+use marius_projection::{PackfileStoreHeader, Projection, VarlenSlot};
 use marius_schema::{ContentCoreProjection, ContentCoreStorageRow};
-use marius_projection::{Projection, VarlenSlot, PackfileStoreHeader};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store_path = ContentCoreProjection::store_path();
@@ -27,8 +27,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if bytes.len() < header_size {
         return Err(format!(
             "fichier trop court : {}B < {}B (header)",
-            bytes.len(), header_size
-        ).into());
+            bytes.len(),
+            header_size
+        )
+        .into());
     }
 
     let header: &PackfileStoreHeader = bytemuck::from_bytes(&bytes[..header_size]);
@@ -51,46 +53,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!(
             "stride incohérent : header={} != sizeof(ContentCoreStorageRow)={}",
             header.stride, expected_stride
-        ).into());
+        )
+        .into());
     }
-    eprintln!("[verify] stride={} — conforme à sizeof(ContentCoreStorageRow)", expected_stride);
+    eprintln!(
+        "[verify] stride={} — conforme à sizeof(ContentCoreStorageRow)",
+        expected_stride
+    );
 
     // ── INV-R2 : taille fichier ───────────────────────────────────────────────
     let expected_len = (header.varlena_heap_section + header.varlena_heap_len) as usize;
     if bytes.len() != expected_len {
         return Err(format!(
             "taille fichier incohérente : {}B sur disque, {}B attendus d'après le header",
-            bytes.len(), expected_len
-        ).into());
+            bytes.len(),
+            expected_len
+        )
+        .into());
     }
     eprintln!("[verify] taille fichier OK — {}B", bytes.len());
 
     // ── Extraction des sections ───────────────────────────────────────────────
-    let row_count  = header.row_count as usize;
-    let stride     = header.stride   as usize;
-    let vf         = header.varlena_field_count as usize;
+    let row_count = header.row_count as usize;
+    let stride = header.stride as usize;
+    let vf = header.varlena_field_count as usize;
 
-    let rows_section        = header_size;
-    let id_index_section    = header.id_index_section    as usize;
+    let rows_section = header_size;
+    let id_index_section = header.id_index_section as usize;
     let varlena_toc_section = header.varlena_toc_section as usize;
-    let varlena_heap_section= header.varlena_heap_section as usize;
-    let varlena_heap_len    = header.varlena_heap_len    as usize;
+    let varlena_heap_section = header.varlena_heap_section as usize;
+    let varlena_heap_len = header.varlena_heap_len as usize;
 
     // Slice StorageRow — cast_slice sans unsafe grâce à bytemuck::Pod
-    let rows_bytes = &bytes[rows_section .. rows_section + row_count * stride];
+    let rows_bytes = &bytes[rows_section..rows_section + row_count * stride];
     let rows: &[ContentCoreStorageRow] = bytemuck::cast_slice(rows_bytes);
 
     // Slice ID Index
-    let id_bytes = &bytes[id_index_section .. id_index_section + row_count * 8];
+    let id_bytes = &bytes[id_index_section..id_index_section + row_count * 8];
     let ids: &[i64] = bytemuck::cast_slice(id_bytes);
 
     // Slice Varlena TOC
     let toc_entry_size = mem::size_of::<VarlenSlot>(); // 8B
-    let toc_bytes = &bytes[varlena_toc_section .. varlena_toc_section + row_count * vf * toc_entry_size];
+    let toc_bytes =
+        &bytes[varlena_toc_section..varlena_toc_section + row_count * vf * toc_entry_size];
     let toc: &[VarlenSlot] = bytemuck::cast_slice(toc_bytes);
 
     // Slice Varlena Heap
-    let heap = &bytes[varlena_heap_section .. varlena_heap_section + varlena_heap_len];
+    let heap = &bytes[varlena_heap_section..varlena_heap_section + varlena_heap_len];
 
     eprintln!(
         "[verify] sections — rows@{} id_index@{} varlena_toc@{} varlena_heap@{} ({}B)",
@@ -102,15 +111,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if ids[i] <= ids[i - 1] {
             return Err(format!(
                 "id_index non trié à l'indice {}: ids[{}]={} >= ids[{}]={}",
-                i, i - 1, ids[i - 1], i, ids[i]
-            ).into());
+                i,
+                i - 1,
+                ids[i - 1],
+                i,
+                ids[i]
+            )
+            .into());
         }
     }
     eprintln!("[verify] id_index trié ASC — {} entrées", ids.len());
 
     // ── INV-R5 : VarlenSlots dans les bornes ─────────────────────────────────
-    let mut null_slots   = 0usize;
-    let mut valid_slots  = 0usize;
+    let mut null_slots = 0usize;
+    let mut valid_slots = 0usize;
 
     for (slot_idx, slot) in toc.iter().enumerate() {
         if slot.offset == u32::MAX && slot.len == 0 {
@@ -119,14 +133,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         let start = slot.offset as usize;
-        let end   = start + slot.len as usize;
+        let end = start + slot.len as usize;
         if end > heap.len() {
             let record_idx = slot_idx / vf.max(1);
-            let field_idx  = slot_idx % vf.max(1);
+            let field_idx = slot_idx % vf.max(1);
             return Err(format!(
                 "VarlenSlot hors bornes : record={} field={} offset={}+len={} > heap_len={}",
-                record_idx, field_idx, slot.offset, slot.len, heap.len()
-            ).into());
+                record_idx,
+                field_idx,
+                slot.offset,
+                slot.len,
+                heap.len()
+            )
+            .into());
         }
         valid_slots += 1;
     }
@@ -137,11 +156,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Affichage des N premiers enregistrements ──────────────────────────────
     let display_count = row_count.min(5);
-    eprintln!("[verify] premiers enregistrements ({}/{}) :", display_count, row_count);
+    eprintln!(
+        "[verify] premiers enregistrements ({}/{}) :",
+        display_count, row_count
+    );
 
     for i in 0..display_count {
         let row = &rows[i];
-        let pk  = ids[i];
+        let pk = ids[i];
 
         // Reconstruction varlena depuis TOC + Heap pour vérification end-to-end
         let toc_base = i * vf;
@@ -160,8 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         eprintln!(
             "  [{}] pk={} document_id={} status={} varlena={:?}",
-            i, pk, row.document_id, row.status,
-            varlena_strings
+            i, pk, row.document_id, row.status, varlena_strings
         );
     }
 

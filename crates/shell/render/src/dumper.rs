@@ -23,8 +23,8 @@ use std::io::{BufWriter, Write};
 use bytemuck::Pod;
 use sqlx::PgPool;
 
-use marius_projection::Projection;
 use crate::packfile_builder::PackfileBuilder;
+use marius_projection::Projection;
 
 /// Taille d'un chunk de fetch. 4096 ids par aller-retour réseau.
 const CHUNK_SIZE: usize = 4096;
@@ -34,11 +34,7 @@ const CHUNK_SIZE: usize = 4096;
 ///
 /// Utilise P::fetch_from_pg() — Voie d'Extraction AOT.
 /// N'appelle jamais P::fetch_batch() (Voie d'Exécution mmap/serveur).
-pub async fn dump_table<P>(
-    pool:     &PgPool,
-    all_ids:  &[i64],
-    capacity: usize,
-) -> std::io::Result<()>
+pub async fn dump_table<P>(pool: &PgPool, all_ids: &[i64], capacity: usize) -> std::io::Result<()>
 where
     P: Projection,
     P::Record: Pod,
@@ -51,7 +47,9 @@ where
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        if batch.is_empty() { continue; }
+        if batch.is_empty() {
+            continue;
+        }
         builder.push_batch(&batch);
     }
 

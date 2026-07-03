@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Récupération des ids — SELECT id FROM table ORDER BY id ASC
     // À remplacer par la fonction d'introspection adéquate.
     let all_ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT document_id::BIGINT FROM content.core ORDER BY document_id ASC" // <-- Forçage INT8 avec ::BIGINT pour éviter le cast implicite en i32
+        "SELECT document_id::BIGINT FROM content.core ORDER BY document_id ASC", // <-- Forçage INT8 avec ::BIGINT pour éviter le cast implicite en i32
     )
     .fetch_all(&pool)
     .await?;

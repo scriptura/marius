@@ -15,20 +15,20 @@ use sqlx::Row as _; // try_get sur PgRow
 /// Produit par `meta.containment_intent`, enrichi de `meta.component_varlena_join`.
 #[derive(Debug)]
 pub struct ComponentConfig {
-    pub schema:            String,
-    pub table:             String,
+    pub schema: String,
+    pub table: String,
     /// Phase 0/1 : 0 (non validé). Phase 2 : comparé au layout calculé par validate_layout().
-    pub intent_density:    i16,
+    pub intent_density: i16,
     pub rls_guard_bitmask: Option<i32>,
     /// Phase 1 : au plus un JOIN varlena par composant (join_slot_idx = 0).
-    pub varlena_join:      Option<VarlenJoin>,
+    pub varlena_join: Option<VarlenJoin>,
 }
 
 /// Liaison varlena d'un composant — correspond à une ligne de meta.component_varlena_join.
 #[derive(Debug)]
 pub struct VarlenJoin {
     pub schema: String,
-    pub table:  String,
+    pub table: String,
     pub fk_col: String,
 }
 
@@ -53,9 +53,7 @@ impl std::error::Error for RegistryError {}
 fn parse_component_id(id: &str) -> Result<(String, String), sqlx::Error> {
     let mut it = id.splitn(2, '.');
     match (it.next(), it.next()) {
-        (Some(s), Some(t)) if !s.is_empty() && !t.is_empty() => {
-            Ok((s.to_string(), t.to_string()))
-        }
+        (Some(s), Some(t)) if !s.is_empty() && !t.is_empty() => Ok((s.to_string(), t.to_string())),
         _ => Err(sqlx::Error::Decode(Box::new(RegistryError(format!(
             "component_id invalide : «{id}» — attendu «schema.table»"
         ))))),
@@ -97,12 +95,12 @@ pub async fn fetch_component_list(
     let mut configs = Vec::with_capacity(rows.len());
 
     for row in &rows {
-        let component_id: String          = row.try_get("component_id")?;
-        let intent_density: i16           = row.try_get("intent_density_bytes")?;
+        let component_id: String = row.try_get("component_id")?;
+        let intent_density: i16 = row.try_get("intent_density_bytes")?;
         let rls_guard_bitmask: Option<i32> = row.try_get("rls_guard_bitmask")?;
-        let ref_schema: Option<String>    = row.try_get("ref_schema")?;
-        let ref_table:  Option<String>    = row.try_get("ref_table")?;
-        let fk_column:  Option<String>    = row.try_get("fk_column")?;
+        let ref_schema: Option<String> = row.try_get("ref_schema")?;
+        let ref_table: Option<String> = row.try_get("ref_table")?;
+        let fk_column: Option<String> = row.try_get("fk_column")?;
 
         let (schema, table) = parse_component_id(&component_id)?;
 
@@ -111,7 +109,7 @@ pub async fn fetch_component_list(
         let varlena_join = match (ref_schema, ref_table, fk_column) {
             (Some(s), Some(t), Some(f)) => Some(VarlenJoin {
                 schema: s,
-                table:  t,
+                table: t,
                 fk_col: f,
             }),
             (None, None, None) => None,
@@ -119,7 +117,7 @@ pub async fn fetch_component_list(
                 return Err(sqlx::Error::Decode(Box::new(RegistryError(format!(
                     "meta.component_varlena_join incohérente pour «{component_id}» \
                      — ref_schema/ref_table/fk_column partiellement NULL"
-                )))))
+                )))));
             }
         };
 

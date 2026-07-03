@@ -23,10 +23,8 @@
 
 use std::path::PathBuf;
 
-pub type BatchResult<P> = Result<
-    Vec<(<P as Projection>::Record, <P as Projection>::VarlenOwned)>,
-    sqlx::Error,
->;
+pub type BatchResult<P> =
+    Result<Vec<(<P as Projection>::Record, <P as Projection>::VarlenOwned)>, sqlx::Error>;
 
 pub trait Projection: Sized + Send + Sync + 'static {
     type Record: Sized + Send + 'static;
@@ -39,10 +37,10 @@ pub trait Projection: Sized + Send + Sync + 'static {
     // Default : retourne Err — la Forge génère l'override pour chaque Projection.
     fn fetch_from_pg(
         _pool: &sqlx::PgPool,
-        _ids:  &[i64],
+        _ids: &[i64],
     ) -> impl std::future::Future<Output = BatchResult<Self>> + Send {
         std::future::ready(Err(sqlx::Error::Configuration(
-            "[fetch_from_pg] override SQLx non généré — exécuter cargo build".into()
+            "[fetch_from_pg] override SQLx non généré — exécuter cargo build".into(),
         )))
     }
 
@@ -52,7 +50,7 @@ pub trait Projection: Sized + Send + Sync + 'static {
     // Fail-fast si store.bin absent : exécuter marius-dump d'abord.
     fn fetch_batch(
         pool: &sqlx::PgPool,
-        ids:  &[i64],
+        ids: &[i64],
     ) -> impl std::future::Future<Output = BatchResult<Self>> + Send;
 
     fn render(record: &Self::Record, varlena: &Self::VarlenOwned, buf: &mut String);
@@ -64,21 +62,24 @@ pub trait Projection: Sized + Send + Sync + 'static {
     fn store_path() -> PathBuf;
 
     #[inline(always)]
-    fn varlena_field_count() -> u16 { 0 }
+    fn varlena_field_count() -> u16 {
+        0
+    }
 
     #[inline(always)]
     fn encode_varlena(
         _varlena: &Self::VarlenOwned,
         _heap: &mut Vec<u8>,
         _toc: &mut Vec<VarlenSlot>,
-    ) {}
+    ) {
+    }
 }
 
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct VarlenSlot {
     pub offset: u32,
-    pub len:    u32,
+    pub len: u32,
 }
 
 // =============================================================================
@@ -97,16 +98,16 @@ pub struct VarlenSlot {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PackfileStoreHeader {
-    pub magic:                [u8; 8],  // b"MARIUSDB"
-    pub version:              u32,      // = 1
-    pub stride:               u32,      // sizeof(P::Record)
-    pub row_count:            u64,
-    pub varlena_field_count:  u16,
-    pub _pad:                 [u8; 6],
-    pub id_index_section:     u64,
-    pub varlena_toc_section:  u64,
+    pub magic: [u8; 8], // b"MARIUSDB"
+    pub version: u32,   // = 1
+    pub stride: u32,    // sizeof(P::Record)
+    pub row_count: u64,
+    pub varlena_field_count: u16,
+    pub _pad: [u8; 6],
+    pub id_index_section: u64,
+    pub varlena_toc_section: u64,
     pub varlena_heap_section: u64,
-    pub varlena_heap_len:     u64,
+    pub varlena_heap_len: u64,
 }
 
 const _: () = assert!(
@@ -117,7 +118,9 @@ const _: () = assert!(
 /// Arrondit `x` au prochain multiple de 8.
 /// Utilisé par Builder (écriture des sections) et Reader (validation des offsets).
 #[inline(always)]
-pub const fn align8(x: u64) -> u64 { (x + 7) & !7 }
+pub const fn align8(x: u64) -> u64 {
+    (x + 7) & !7
+}
 
 // =============================================================================
 // PackfileReader — lecteur zero-copie via memmap2
@@ -133,11 +136,11 @@ pub mod packfile_reader {
     use memmap2::Mmap;
 
     use super::{PackfileStoreHeader, Projection, VarlenSlot};
-    
+
     /// Vue sur les champs varlena d'un enregistrement.
     /// Zéro copie — lifetime lié au PackfileReader.
     pub struct VarlenRefs<'a> {
-        toc:  &'a [VarlenSlot],
+        toc: &'a [VarlenSlot],
         heap: &'a [u8],
     }
 
@@ -151,7 +154,7 @@ pub mod packfile_reader {
                 return None;
             }
             let start = slot.offset as usize;
-            let end   = start + slot.len as usize;
+            let end = start + slot.len as usize;
             std::str::from_utf8(self.heap.get(start..end)?).ok()
         }
     }
@@ -164,15 +167,15 @@ pub mod packfile_reader {
     where
         P::Record: Pod,
     {
-        mmap:                Mmap,
-        row_count:           usize,
+        mmap: Mmap,
+        row_count: usize,
         varlena_field_count: usize,
-        rows_offset:         usize,
-        id_index_offset:     usize,
-        toc_offset:          usize,
-        heap_offset:         usize,
-        heap_len:            usize,
-        _proj:               PhantomData<P>,
+        rows_offset: usize,
+        id_index_offset: usize,
+        toc_offset: usize,
+        heap_offset: usize,
+        heap_len: usize,
+        _proj: PhantomData<P>,
     }
 
     impl<P: Projection> PackfileReader<P>
@@ -199,21 +202,23 @@ pub mod packfile_reader {
             if mmap.len() < header_size {
                 return Err(std::io::Error::other(format!(
                     "[PackfileReader] fichier trop court : {}B < {}B",
-                    mmap.len(), header_size,
+                    mmap.len(),
+                    header_size,
                 )));
             }
 
-            let header: &PackfileStoreHeader =
-                bytemuck::from_bytes(&mmap[..header_size]);
+            let header: &PackfileStoreHeader = bytemuck::from_bytes(&mmap[..header_size]);
 
             if &header.magic != b"MARIUSDB" {
                 return Err(std::io::Error::other(format!(
-                    "[PackfileReader] magic invalide : {:?}", header.magic,
+                    "[PackfileReader] magic invalide : {:?}",
+                    header.magic,
                 )));
             }
             if header.version != 1 {
                 return Err(std::io::Error::other(format!(
-                    "[PackfileReader] version non supportée : {}", header.version,
+                    "[PackfileReader] version non supportée : {}",
+                    header.version,
                 )));
             }
 
@@ -225,23 +230,23 @@ pub mod packfile_reader {
                 )));
             }
 
-            let expected_len =
-                (header.varlena_heap_section + header.varlena_heap_len) as usize;
+            let expected_len = (header.varlena_heap_section + header.varlena_heap_len) as usize;
             if mmap.len() != expected_len {
                 return Err(std::io::Error::other(format!(
                     "[PackfileReader] taille incohérente : {}B != {}B (header)",
-                    mmap.len(), expected_len,
+                    mmap.len(),
+                    expected_len,
                 )));
             }
 
             Ok(Self {
-                row_count:           header.row_count           as usize,
+                row_count: header.row_count as usize,
                 varlena_field_count: header.varlena_field_count as usize,
-                rows_offset:         header_size,
-                id_index_offset:     header.id_index_section    as usize,
-                toc_offset:          header.varlena_toc_section as usize,
-                heap_offset:         header.varlena_heap_section as usize,
-                heap_len:            header.varlena_heap_len    as usize,
+                rows_offset: header_size,
+                id_index_offset: header.id_index_section as usize,
+                toc_offset: header.varlena_toc_section as usize,
+                heap_offset: header.varlena_heap_section as usize,
+                heap_len: header.varlena_heap_len as usize,
                 mmap,
                 _proj: PhantomData,
             })
@@ -261,9 +266,7 @@ pub mod packfile_reader {
 
         #[inline(always)]
         fn toc(&self) -> &[VarlenSlot] {
-            let len = self.row_count
-                * self.varlena_field_count
-                * mem::size_of::<VarlenSlot>();
+            let len = self.row_count * self.varlena_field_count * mem::size_of::<VarlenSlot>();
             bytemuck::cast_slice(&self.mmap[self.toc_offset..self.toc_offset + len])
         }
 
@@ -276,20 +279,27 @@ pub mod packfile_reader {
         /// Zéro allocation — toutes les références pointent dans le mmap.
         #[inline]
         pub fn lookup(&self, id: i64) -> Option<(&P::Record, VarlenRefs<'_>)> {
-            let pos     = self.id_index().binary_search(&id).ok()?;
-            let record  = &self.records()[pos];
+            let pos = self.id_index().binary_search(&id).ok()?;
+            let record = &self.records()[pos];
             let toc_all = self.toc();
-            let heap    = self.heap();
+            let heap = self.heap();
 
-            let toc_base  = pos * self.varlena_field_count;
-            let toc_slice =
-                &toc_all[toc_base..toc_base + self.varlena_field_count];
+            let toc_base = pos * self.varlena_field_count;
+            let toc_slice = &toc_all[toc_base..toc_base + self.varlena_field_count];
 
-            Some((record, VarlenRefs { toc: toc_slice, heap }))
+            Some((
+                record,
+                VarlenRefs {
+                    toc: toc_slice,
+                    heap,
+                },
+            ))
         }
 
         #[inline(always)]
-        pub fn row_count(&self) -> usize { self.row_count }
+        pub fn row_count(&self) -> usize {
+            self.row_count
+        }
     }
 
     #[cfg(test)]
@@ -299,22 +309,34 @@ pub mod packfile_reader {
 
         #[test]
         fn sentinel_returns_none() {
-            let slots = [VarlenSlot { offset: u32::MAX, len: 0 }];
-            let refs  = VarlenRefs { toc: &slots, heap: &[] };
+            let slots = [VarlenSlot {
+                offset: u32::MAX,
+                len: 0,
+            }];
+            let refs = VarlenRefs {
+                toc: &slots,
+                heap: &[],
+            };
             assert_eq!(refs.get(0), None);
         }
 
         #[test]
         fn valid_slot_returns_str() {
             let slots = [VarlenSlot { offset: 0, len: 5 }];
-            let refs  = VarlenRefs { toc: &slots, heap: b"hello" };
+            let refs = VarlenRefs {
+                toc: &slots,
+                heap: b"hello",
+            };
             assert_eq!(refs.get(0), Some("hello"));
         }
 
         #[test]
         fn out_of_bounds_field_returns_none() {
             let slots = [VarlenSlot { offset: 0, len: 2 }];
-            let refs  = VarlenRefs { toc: &slots, heap: b"hi" };
+            let refs = VarlenRefs {
+                toc: &slots,
+                heap: b"hi",
+            };
             assert_eq!(refs.get(1), None);
         }
     }

@@ -15,19 +15,15 @@
 use std::path::{Path, PathBuf};
 
 use marius_db_forge::{
-    PrimaryKey,
-    build_field_specs,
-    fetch_component_list,
-    fetch_columns, fetch_max_id, fetch_pk_column, fetch_varlena_cols,
-    validate_layout,
-    write_collector, write_from_impl, write_projection_stub,
-    write_row_struct, write_section_header, write_store_struct,
+    PrimaryKey, build_field_specs, fetch_columns, fetch_component_list, fetch_max_id,
+    fetch_pk_column, fetch_varlena_cols, validate_layout, write_collector, write_from_impl,
+    write_projection_stub, write_row_struct, write_section_header, write_store_struct,
     write_varlen_owned_struct,
 };
 
 use marius_fragment_forge::{
-    scan, parse_tokens, validate_ast, resolve_and_measure, generate_aot_snippet,
-    SchemaIndex, TemplateMetrics, VarlenField,
+    SchemaIndex, TemplateMetrics, VarlenField, generate_aot_snippet, parse_tokens,
+    resolve_and_measure, scan, validate_ast,
 };
 
 // En-tête statique du fichier généré — pas de couplage sur fragment-forge pour
@@ -81,10 +77,10 @@ fn push_varlen_slot(field: &Option<String>, heap: &mut Vec<u8>, toc: &mut Vec<cr
 ///                       cargo:error déjà émis ; l'appelant doit exit(1).
 fn resolve_template(
     manifest_dir: &str,
-    schema:       &str,
-    table:        &str,
-    fixed:        &[marius_fragment_forge::FieldSpec],
-    varlena:      &[VarlenField],
+    schema: &str,
+    table: &str,
+    fixed: &[marius_fragment_forge::FieldSpec],
+    varlena: &[VarlenField],
 ) -> Result<Option<(String, TemplateMetrics)>, ()> {
     let template_path: PathBuf = Path::new(manifest_dir)
         .join("templates")
@@ -104,16 +100,12 @@ fn resolve_template(
     println!("cargo:rerun-if-changed={}", template_path.display());
 
     let src = std::fs::read_to_string(&template_path).map_err(|e| {
-        println!(
-            "cargo:error=DB-Forge [{schema}.{table}] : lecture du template échouée : {e}"
-        );
+        println!("cargo:error=DB-Forge [{schema}.{table}] : lecture du template échouée : {e}");
     })?;
 
     let spans = scan(&src);
     let mut tokens = parse_tokens(spans).map_err(|e| {
-        println!(
-            "cargo:error=DB-Forge [{schema}.{table}] : erreur de parsing template : {e:?}"
-        );
+        println!("cargo:error=DB-Forge [{schema}.{table}] : erreur de parsing template : {e:?}");
     })?;
 
     validate_ast(&tokens).map_err(|errors| {
@@ -153,21 +145,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("DB-Forge : CARGO_MANIFEST_DIR non définie (toujours fournie par Cargo).");
 
-    let database_url = std::env::var("DATABASE_URL")
-        .expect("DB-Forge : DATABASE_URL non définie.");
+    let database_url = std::env::var("DATABASE_URL").expect("DB-Forge : DATABASE_URL non définie.");
     let pool = sqlx::PgPool::connect(&database_url).await?;
 
     // ── Phase 1 : registry driver ─────────────────────────────────────────────
     let components = fetch_component_list(&pool).await?;
 
-    let out_dir  = PathBuf::from(std::env::var("OUT_DIR")?);
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
     let out_path = out_dir.join("generated_schema.rs");
 
     let mut output = String::from(GENERATED_HEADER);
 
     for comp in &components {
         let columns = fetch_columns(&pool, &comp.schema, &comp.table).await?;
-        let pk      = fetch_pk_column(&pool, &comp.schema, &comp.table).await?;
+        let pk = fetch_pk_column(&pool, &comp.schema, &comp.table).await?;
 
         let max_id: Option<usize> = match &pk {
             PrimaryKey::Single(col) => {
@@ -178,18 +169,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let varlena = match &comp.varlena_join {
             Some(j) => fetch_varlena_cols(&pool, &j.schema, &j.table).await?,
-            None    => vec![],
+            None => vec![],
         };
 
         // ── Phase 2 : validation layout ───────────────────────────────────────
         if comp.intent_density != 0
-            && let Err(msg) = validate_layout(&columns, comp.intent_density) {
-                println!(
-                    "cargo:error=DB-Forge [{}.{}] : {}",
-                    comp.schema, comp.table, msg
-                );
-                std::process::exit(1);
-            }
+            && let Err(msg) = validate_layout(&columns, comp.intent_density)
+        {
+            println!(
+                "cargo:error=DB-Forge [{}.{}] : {}",
+                comp.schema, comp.table, msg
+            );
+            std::process::exit(1);
+        }
 
         // ── Voie B : pipeline template .marius ────────────────────────────────
         // Toute l'I/O disque (lecture du template) vit ici. db-forge ne touche
@@ -224,10 +216,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &columns,
             &pk,
             &varlena,
-            comp.varlena_join.as_ref().map(|j| {
-                (j.schema.as_str(), j.table.as_str(), j.fk_col.as_str())
-            }),
-            render.as_ref().map(|(body, metrics)| (body.as_str(), metrics)),
+            comp.varlena_join
+                .as_ref()
+                .map(|j| (j.schema.as_str(), j.table.as_str(), j.fk_col.as_str())),
+            render
+                .as_ref()
+                .map(|(body, metrics)| (body.as_str(), metrics)),
         );
     }
 

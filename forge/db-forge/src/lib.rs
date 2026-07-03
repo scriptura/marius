@@ -25,7 +25,7 @@ pub mod registry;
 pub mod validate;
 
 // ── Mapping de types ──────────────────────────────────────────────────────────
-pub use mapping::{map_type, Column, PrimaryKey, TypeMapping};
+pub use mapping::{Column, PrimaryKey, TypeMapping, map_type};
 
 // ── Nommage ───────────────────────────────────────────────────────────────────
 pub use naming::{to_pascal, to_screaming};
@@ -41,13 +41,8 @@ pub use validate::validate_layout;
 
 // ── Génération des artefacts ──────────────────────────────────────────────────
 pub use codegen::{
-    write_collector,
-    write_from_impl,
-    write_projection_stub,
-    write_row_struct,
-    write_section_header,
-    write_store_struct,
-    write_varlen_owned_struct,
+    write_collector, write_from_impl, write_projection_stub, write_row_struct,
+    write_section_header, write_store_struct, write_varlen_owned_struct,
 };
 
 // ── Résolution de schéma partagée (Voie B — templates .marius) ───────────────
@@ -67,11 +62,12 @@ use marius_fragment_forge::{FieldKind, FieldSpec};
 /// un type fixed sans FieldKind correspondant (cas théorique, tous les types
 /// fixed de mapping.rs ont un FieldKind) serait silencieusement exclu.
 pub fn build_field_specs(columns: &[Column]) -> Vec<FieldSpec> {
-    columns.iter()
+    columns
+        .iter()
         .filter(|c| map_type(&c.sql_type).is_fixed)
         .filter_map(|c| {
             FieldKind::from_sql_type(&c.sql_type).map(|kind| FieldSpec {
-                name:   c.name.clone(),
+                name: c.name.clone(),
                 kind,
                 attnum: c.attnum,
             })
