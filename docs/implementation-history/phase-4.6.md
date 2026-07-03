@@ -1,27 +1,4 @@
-Maintenant le test 4.5 :Cela confirme exactement les 3 tests attendus. Ajoutons le module de tests Phase 4.6 :Maintenant, compilons et testons.Compile proprement. Lançons les tests complets.45/45 tests verts (42 précédents + 3 nouveaux). Vérifions `fmt` et `clippy`.Le nombre de diffs `cargo fmt` (103) est identique avant et après mon diff, aux mêmes emplacements (décalés uniformément de +35 lignes, l'ampleur exacte de mon insertion). **Aucun nouveau diff fmt n'est introduit par la Phase 4.6** — le style non-fmt (alignement manuel des `:`) est une convention préexistante des phases 1 à 3, hors périmètre. Vérifions clippy.Tout est vert. Générons le diff Git complet et copions le fichier final vers les outputs.Le diff est propre et bien scopé. Livrons les fichiers.## Confirmation
-
-**`cargo test`** — ✅ VERT : 45/45 tests (42 préexistants + 3 nouveaux, aucune régression).
-
-**`cargo clippy --all-targets`** — ✅ VERT (0 erreur). 1 warning `needless_lifetimes` subsiste, ligne 1740 (`generate_aot_snippet`, Phase 2.2) — préexistant, confirmé identique sur le baseline avant mon diff, hors périmètre 4.6.
-
-**`cargo fmt --check`** — ⚠️ à nuancer : 103 diffs, mais **strictement identiques, au même contenu et au même nombre, avant et après mon diff** (décalés uniformément des ~35 lignes que j'ai insérées). Le code des phases 1–3 utilise un style d'alignement manuel des `:` non conforme à rustfmt — une convention déjà établie du projet, jamais touchée ici. Mon diff propre (structure `ParsedPageTemplate`, `PageBlockOutcome`, corps de `parse_page_tokens`/`parse_page_block`, tests 4.6) est lui-même fmt-clean. Je n'ai pas reformaté le reste du fichier : cela aurait violé la contrainte de périmètre strict.
-
-**Périmètre Phase 4.6** — respecté : une seule fonction étendue (`parse_page_block`), une déclaration de type ajoutée (`ParsedPageTemplate`), un type de retour changé (nécessaire, documenté) et les tests 4.3/4.4/4.5 adaptés en conséquence (accès `.tokens`, sans changement des assertions de fond). Aucun `todo!`/`unimplemented!`. Le catch-all `Unsupported` (4.7) n'a pas été anticipé.
-
-## Livrables
-
-- `lib.rs` — fichier complet post-4.6
-- `phase_4_6.diff` — diff Git complet (549 lignes)
-
-**Tests ajoutés (3, roadmap §4.6) :**
-
-- `extends_at_head_is_captured_and_absent_from_tokens`
-- `extends_after_a_static_token_fails_with_extends_not_first`
-- `absent_extends_on_parent_file_succeeds_with_none`
-
-_(+ 1 test 4.3 corrigé — `composition_keyword_out_of_scope_fails_explicitly` utilisait `extends` comme exemple de mot-clé hors scope ; devenu faux depuis 4.6, remplacé par `for` pour préserver l'invariant testé.)_
-
-Je rédige maintenant le rapport de fin de phase.# Rapport de fin de phase — Phase 4.6
+# Rapport de fin de phase — Phase 4.6
 
 ## 1. Livrables
 

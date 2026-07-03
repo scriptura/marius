@@ -4,7 +4,7 @@ En te basant exclusivement sur l'implémentation réalisée aujourd'hui, réalis
 
 **1. Livrables**
 
-- lister les tests ajoutés ;
+- lister les tests ajoutés.
 
 **2. Analyse architecturale de la phase**
 
