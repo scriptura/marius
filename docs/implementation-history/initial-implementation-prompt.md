@@ -5,11 +5,11 @@ Nous suivons strictement la roadmap.
 
 **Mission**
 
-Implémenter exclusivement la **Phase 4.5**.
+Implémenter exclusivement la **Phase 4.6**.
 
 **Contraintes**
 
-- ne modifier aucune fonctionnalité en dehors du périmètre de la Phase 4.5 ;
+- ne modifier aucune fonctionnalité en dehors du périmètre de la Phase 4.6 ;
 - ne préparer aucun comportement relevant des phases ultérieures ;
 - n'introduire aucun `todo!`, `unimplemented!` ou code spéculatif ;
 - respecter les invariants définis par les documents d'architecture ;
@@ -21,7 +21,7 @@ Implémenter exclusivement la **Phase 4.5**.
 
 - le diff Git complet ;
 - confirmation au VERT de `cargo fmt`, `cargo test` et `cargo clippy` ;
-- la confirmation que le périmètre de la Phase 4.5 a été strictement respecté ;
+- la confirmation que le périmètre de la Phase 4.6 a été strictement respecté ;
 - le rapport de fin de phase suivant le modèle convenu.
 
 ---

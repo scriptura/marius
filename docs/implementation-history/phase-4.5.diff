@@ -1,0 +1,231 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 7535718..942aca5 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2137,17 +2137,18 @@ pub enum PageComposeParseError {
+     /// mot-clé par ailleurs traité comme grammaticalement significatif à ce
+     /// stade. Symétrique de `PageParseError::InvalidBlockSequence`.
+     ///
+-    /// Portée Phase 4.4 : cette variante couvre aussi, temporairement, tout
++    /// Portée Phase 4.5 : cette variante couvre aussi, temporairement, tout
+     /// mot-clé de bloc encore non représentable par `PageSourceToken` à ce
+-    /// stade du classifieur (`static`, `extends`, et tout mot-clé hors
+-    /// grammaire runtime) — Document 1 §3 autorise explicitement l'échec de
+-    /// ces fichiers avant la clôture du classifieur (Phase 4.7). `block` et
++    /// stade du classifieur (`extends`, et tout mot-clé hors grammaire
++    /// runtime) — Document 1 §3 autorise explicitement l'échec de ces
++    /// fichiers avant la clôture du classifieur (Phase 4.7). `block` et
+     /// `endblock` en sont sortis en Phase 4.4 (branche `Block` dédiée) ;
+-    /// `static` et `extends` migreront à leur tour (`Static` en 4.5,
+-    /// `extends` en 4.6, `Unsupported` en 4.7) sans que cette variante
+-    /// d'erreur ne soit retirée : elle reste le domaine des erreurs de
+-    /// grammaire structurelle des mots-clés déjà reconnus (`if`/`endif`/
+-    /// `block`/`endblock`) — par exemple un `{% if %}` sans point dans
++    /// `static` en est sorti en Phase 4.5 (branche `Static` dédiée) ;
++    /// `extends` migrera à son tour (4.6), puis le catch-all `Unsupported`
++    /// clôturera la grammaire (4.7) — sans que cette variante d'erreur ne
++    /// soit retirée : elle reste le domaine des erreurs de grammaire
++    /// structurelle des mots-clés déjà reconnus (`if`/`endif`/`block`/
++    /// `endblock`/`static`) — par exemple un `{% if %}` sans point dans
+     /// l'identifiant, cf. `split_dotted_page`.
+     InvalidBlockSequence,
+ }
+@@ -2252,7 +2253,9 @@ pub struct StaticPartialRef<'src> {
+     /// Chemin tel qu'écrit dans le template, avant résolution manifeste.
+     /// Miroir de `StaticInclude::original_path` — même convention, même
+     /// lifetime, pour que la session de câblage puisse réutiliser
+-    /// `relative_path_for_include_str` sans adaptation.
++    /// `relative_path_for_include_str` sans adaptation. Non quoté (Phase
++    /// 4.5, cf. doc `PageSourceToken::Static`) : slice brute issue du
++    /// scanner, identique en forme au `path` d'`{% include %}`.
+     pub original_path: &'src str,
+ }
+ 
+@@ -2406,7 +2409,20 @@ pub enum PageSourceToken<'src> {
+     /// Opérateur de composition : `{% block %}` / `{% endblock %}`.
+     Block(PageBlockToken<'src>),
+ 
+-    /// Opérateur de composition : `{% static "path" %}`.
++    /// Opérateur de composition : `{% static path %}`.
++    ///
++    /// Forme lexicale actée en Phase 4.5 : `path` est un `Ident` de bloc nu,
++    /// sans guillemets — symétrique de `{% include path %}` (Mode Fragment,
++    /// gelé, cf. `parse_block`), pas de la notation à guillemets utilisée à
++    /// titre illustratif dans Document 1 §2.1/§6. Le scanner (`InBlock`,
++    /// Phase 1.2, gelé) n'a aucune notion de littéral de chaîne : il n'existe
++    /// pas de `SpanKind` dédié aux guillemets, qui seraient sinon capturés
++    /// tels quels dans la slice. Introduire un tel support serait une
++    /// extension du scanner gelé, hors périmètre de cette phase (§3
++    /// roadmap : « aucune dépendance à `std::fs` introduite », pas
++    /// d'extension de grammaire lexicale). `original_path` est donc
++    /// directement la slice brute retournée par le scanner, sans étape de
++    /// dépouillement.
+     Static(StaticPartialRef<'src>),
+ 
+     /// Mot-clé de bloc reconnu syntaxiquement mais non supporté par la
+@@ -2660,18 +2676,19 @@ mod tests_phase_4_2_detect_extends {
+ //   - Ne touche pas `parse_tokens` (gelé) : aucune fonction existante
+ //     modifiée, aucun automate partagé — deux implémentations disjointes,
+ //     conformément à la frontière de domaine d'erreur actée Document 1 §0.
+-//   - N'implémente pas encore `extends` (4.6), `{% static %}` (4.5), ni le
+-//     catch-all `Unsupported` (4.7) : tout mot-clé de bloc autre que
+-//     `if`/`endif`/`block`/`endblock` — y compris `extends`, `static`,
+-//     `include` (absent de la grammaire Mode Page par construction du type
+-//     `PageSourceToken::Runtime`, cf. Phase 4.1) — échoue avec
+-//     `PageComposeParseError::InvalidBlockSequence` à ce stade.
+-//     Explicitement hors scope de ce diff (roadmap §4.3) : ce comportement
+-//     n'anticipe aucune décision des phases suivantes, il migre mot-clé par
+-//     mot-clé lorsque chacune sera implémentée.
+-//   - `{% block %}` / `{% endblock %}` : voir section Phase 4.4 ci-dessous,
+-//     qui étend `parse_page_block` (seule fonction modifiée) sans toucher à
+-//     ce dispatch de tête.
++//   - N'implémentait pas, à la clôture de 4.3, `block`/`endblock`, `static`,
++//     `extends`, ni le catch-all `Unsupported` : tout mot-clé de bloc autre
++//     que `if`/`endif` — y compris `include` (absent de la grammaire Mode
++//     Page par construction du type `PageSourceToken::Runtime`, cf. Phase
++//     4.1) — échouait avec `PageComposeParseError::InvalidBlockSequence`.
++//     Depuis, `block`/`endblock` (Phase 4.4) et `static` (Phase 4.5) sont
++//     sortis de ce catch-all — voir sections dédiées ci-dessous. `extends`
++//     (4.6) et le reste (4.7) migreront à leur tour, mot-clé par mot-clé,
++//     sans anticipation.
++//   - `{% block %}` / `{% endblock %}` (Phase 4.4) et `{% static %}` (Phase
++//     4.5) : voir sections dédiées ci-dessous, qui étendent
++//     `parse_page_block` (seule fonction modifiée à chaque fois) sans
++//     toucher à ce dispatch de tête.
+ 
+ /// Construit l'AST `Vec<PageSourceToken<'src>>` d'un unique fichier, limité
+ /// au sous-ensemble `Runtime` de la grammaire Mode Page (Phase 4.3).
+@@ -2766,10 +2783,11 @@ pub fn parse_page_tokens<'src>(
+ // conséquence (propagation directe du `PageSourceToken` déjà enveloppé),
+ // sans ajout de nouvelle branche de `match` sur `SpanKind` — `BlockOpen`
+ // reste l'unique point d'entrée vers `parse_page_block`, comme en 4.3.
+-// `{% static %}` (4.5), `extends` (4.6) et le catch-all `Unsupported` (4.7)
+-// restent hors périmètre : ils continuent d'échouer via
+-// `PageComposeParseError::InvalidBlockSequence`, comportement inchangé par
+-// ce diff.
++// `extends` (4.6) et le catch-all `Unsupported` (4.7) restent hors
++// périmètre de ce diff 4.4 : ils continuaient, à l'époque, d'échouer via
++// `PageComposeParseError::InvalidBlockSequence`. `{% static %}` est sorti de
++// ce même catch-all en Phase 4.5 (section dédiée plus bas) — seul `extends`
++// y échoue encore à ce stade.
+ 
+ // ─── Parseurs de sous-séquences (domaine `PageComposeParseError`) ────────────
+ //
+@@ -2797,25 +2815,38 @@ where
+ /// correspondant. Précondition : `BlockOpen` vient d'être consommé par
+ /// `parse_page_tokens`.
+ ///
+-/// Portée Phase 4.4 : reconnaît `if`/`endif` (Phase 4.3, logique inchangée)
+-/// et `block`/`endblock` (introduits ici). Tout autre mot-clé (`extends`,
+-/// `static`, `include`, ou inconnu) retourne toujours
+-/// `InvalidBlockSequence` — comportement temporaire, qui migrera mot-clé
+-/// par mot-clé dans les phases suivantes (4.5 `static`, 4.6 `extends`,
+-/// 4.7 catch-all `Unsupported`).
++/// Portée Phase 4.5 : reconnaît `if`/`endif` (Phase 4.3, logique inchangée),
++/// `block`/`endblock` (Phase 4.4, logique inchangée) et `static` (introduit
++/// ici). Tout autre mot-clé (`extends`, `include`, ou inconnu) retourne
++/// toujours `InvalidBlockSequence` — comportement temporaire, qui migrera
++/// mot-clé par mot-clé dans les phases suivantes (4.6 `extends`, 4.7
++/// catch-all `Unsupported`).
+ ///
+ /// ─── Pourquoi le type de retour change : `PageSourceToken`, plus
+ ///     `FlatPageToken` ──────────────────────────────────────────────────────
+ ///
+ /// `block`/`endblock` n'ont pas d'équivalent dans `FlatPageToken` (grammaire
+ /// runtime, Document 1 §2.1) : ils s'enveloppent directement sous
+-/// `PageSourceToken::Block`, jamais sous `Runtime`. `if`/`endif`, eux,
+-/// restent enveloppés sous `Runtime`, exactement comme en Phase 4.3. Cette
+-/// fonction devient donc le site d'enveloppe unique pour tout mot-clé de
+-/// bloc reconnu : `parse_page_tokens` (dispatch de tête) n'a plus à choisir
+-/// l'enveloppe lui-même, il propage tel quel ce qui est retourné ici — un
+-/// seul endroit décide de la variante `PageSourceToken`, cohérent avec la
+-/// règle « le Parser ne décide qu'une fois de la forme d'un token ».
++/// `PageSourceToken::Block`, jamais sous `Runtime`. `static` non plus : il
++/// s'enveloppe sous `PageSourceToken::Static(StaticPartialRef)` (Phase 4.5),
++/// par le même raisonnement — aucune variante `FlatPageToken` équivalente,
++/// cf. doc `StaticPartialRef` (distincte de `StaticInclude` par construction
++/// de type). `if`/`endif`, eux, restent enveloppés sous `Runtime`,
++/// exactement comme en Phase 4.3. Cette fonction devient donc le site
++/// d'enveloppe unique pour tout mot-clé de bloc reconnu : `parse_page_tokens`
++/// (dispatch de tête) n'a plus à choisir l'enveloppe lui-même, il propage
++/// tel quel ce qui est retourné ici — un seul endroit décide de la variante
++/// `PageSourceToken`, cohérent avec la règle « le Parser ne décide qu'une
++/// fois de la forme d'un token ».
++///
++/// ─── Invariant introduit en Phase 4.5 : zéro E/S sur `static` ────────────
++///
++/// La branche `static` capture `original_path` tel quel — aucun appel
++/// `std::fs`, aucune vérification d'existence, aucune résolution de chemin
++/// relatif. Un chemin syntaxiquement bien formé mais inexistant sur disque
++/// produit un `Ok` identique à un chemin existant : l'existence est une
++/// propriété du Linker (`PageLinkError::StaticFileNotFound`, Document 2),
++/// pas du Parser (Document 1 §5/§6). Cf. `static_path_parses_without_touching_filesystem`.
+ ///
+ /// ─── Permissivité délibérée sur l'imbrication (Document 1 §4, §6) ─────────
+ ///
+@@ -2831,7 +2862,7 @@ fn parse_page_block<'src, I>(iter: &mut I) -> Result<PageSourceToken<'src>, Page
+ where
+     I: Iterator<Item = RawSpan<'src>>,
+ {
+-    let keyword = expect_ident_page(iter, "keyword (if | endif | block | endblock)")?;
++    let keyword = expect_ident_page(iter, "keyword (if | endif | block | endblock | static)")?;
+ 
+     match keyword {
+         "if" => {
+@@ -2856,6 +2887,17 @@ where
+             expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+             Ok(PageSourceToken::Block(PageBlockToken::BlockEnd))
+         }
++        // `{% static path %}` (Phase 4.5) : capture brute, zéro E/S. `path`
++        // est l'`Ident` de bloc nu retourné par le scanner — pas de
++        // dépouillement de guillemets (cf. doc `PageSourceToken::Static`).
++        // Aucune vérification d'existence : c'est le rôle du Linker
++        // (`PageLinkError::StaticFileNotFound`, Document 2), pas celui de
++        // cette fonction.
++        "static" => {
++            let original_path = expect_ident_page(iter, "Ident(path)")?;
++            expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
++            Ok(PageSourceToken::Static(StaticPartialRef { original_path }))
++        }
+         _ => Err(PageComposeParseError::InvalidBlockSequence),
+     }
+ }
+@@ -3041,3 +3083,38 @@ mod tests_phase_4_4_block_endblock {
+         );
+     }
+ }
++
++// =============================================================================
++// Tests — Phase 4.5
++// =============================================================================
++
++#[cfg(test)]
++mod tests_phase_4_5_static {
++    use super::{parse_page_tokens, scan, FlatPageToken, PageSourceToken, StaticPartialRef};
++
++    /// Jalon Vert (roadmap §4.5) — un chemin syntaxiquement valide mais
++    /// absent du disque est accepté : cette fonction ne fait aucune E/S,
++    /// donc l'existence réelle du fichier n'a aucune incidence sur le
++    /// résultat. Aucune fixture sur disque n'est créée pour ce test — la
++    /// chaîne de chemin est arbitraire, exactement comme le prescrit la
++    /// roadmap ; c'est la preuve positive de l'absence d'E/S, pas seulement
++    /// une absence de panique.
++    #[test]
++    fn static_path_parses_without_touching_filesystem() {
++        let src = "before{% static this/path/does/not/exist.html %}after";
++
++        let actual = parse_page_tokens(scan(src))
++            .expect("parse_page_tokens doit réussir sans vérifier l'existence du fichier");
++
++        assert_eq!(
++            actual,
++            vec![
++                PageSourceToken::Runtime(FlatPageToken::Static("before")),
++                PageSourceToken::Static(StaticPartialRef {
++                    original_path: "this/path/does/not/exist.html",
++                }),
++                PageSourceToken::Runtime(FlatPageToken::Static("after")),
++            ]
++        );
++    }
++}
