@@ -5,11 +5,11 @@ Nous suivons strictement la roadmap.
 
 **Mission**
 
-Implémenter exclusivement la **Phase 4.6**.
+Implémenter exclusivement la **Phase 5.1**.
 
 **Contraintes**
 
-- ne modifier aucune fonctionnalité en dehors du périmètre de la Phase 4.6 ;
+- ne modifier aucune fonctionnalité en dehors du périmètre de la Phase 5.1 ;
 - ne préparer aucun comportement relevant des phases ultérieures ;
 - n'introduire aucun `todo!`, `unimplemented!` ou code spéculatif ;
 - respecter les invariants définis par les documents d'architecture ;
@@ -21,7 +21,7 @@ Implémenter exclusivement la **Phase 4.6**.
 
 - le diff Git complet ;
 - confirmation au VERT de `cargo fmt`, `cargo test` et `cargo clippy` ;
-- la confirmation que le périmètre de la Phase 4.6 a été strictement respecté ;
+- la confirmation que le périmètre de la Phase 5.1 a été strictement respecté ;
 - le rapport de fin de phase suivant le modèle convenu.
 
 ---
@@ -41,3 +41,15 @@ Phase 6.x => architecture + roadmap + doc3 + rapport end phase + lib.rs
 - `doc3-orchestration-build-rs.md`
 - `end-of-phase report.md`
 - `/forge/fragment-forge/src/lib.rs`
+
+## Progression de la roadmap :
+
+| Session     | Phases              | Pourquoi                                                                                                       |
+| ----------- | ------------------- | -------------------------------------------------------------------------------------------------------------- |
+| ✅ Terminée | 4.1 → 4.5           | Mise en place du langage du Parser (types + reconnaissance des principaux mots-clés).                          |
+| ✅ Terminée | **4.6 + 4.7**       | On termine entièrement le Parser : `extends` puis `Unsupported`. À la sortie, le Parser est complet.           |
+| 3           | **5.1 + 5.2 + 5.3** | Début du Linker : découverte des blocs, collecte et validation structurelle. Ces trois phases forment un tout. |
+| 4           | **5.4 + 5.5 + 5.6** | Correspondance des blocs, substitutions, préparation du lowering.                                              |
+| 5           | **5.7 + 5.8 + 5.9** | Lowering complet jusqu'à `Vec<FlatPageToken>`. À la sortie, l'IR canonique existe.                             |
+| 6           | **6.1 + 6.2 + 6.3** | Orchestration dans `build.rs` : détection, aiguillage, intégration du nouveau pipeline.                        |
+| 7           | **6.4 + 6.5 + 6.6** | Validation finale, nettoyage et preuve du diff nul sur les fonctions gelées.                                   |
