@@ -1,0 +1,144 @@
+diff --git a/build.rs b/build.rs
+index 31d7080..794acb4 100644
+--- a/build.rs
++++ b/build.rs
+@@ -22,8 +22,9 @@ use marius_db_forge::{
+ };
+ 
+ use marius_fragment_forge::{
+-    SchemaIndex, TemplateMetrics, VarlenField, detect_extends, generate_aot_snippet, parse_tokens,
+-    resolve_and_measure, scan, validate_ast,
++    SchemaIndex, TemplateMetrics, VarlenField, detect_extends, generate_aot_snippet,
++    parse_page_tokens, parse_tokens, relative_path_for_include_str, resolve_and_measure, scan,
++    validate_ast,
+ };
+ 
+ // En-tête statique du fichier généré — pas de couplage sur fragment-forge pour
+@@ -82,6 +83,67 @@ fn read_template_file(path: &Path) -> Result<String, ()> {
+     })
+ }
+ 
++/// Sous-orchestration Mode Page — E/S parent + garde single-level.
++///
++/// Signature gelée à sa forme finale (Document 3 §4) : les paramètres
++/// `_fixed`/`_varlena`/`_child_src` ne sont pas encore consommés par cette
++/// phase (câblage arène/collecte de blocs/linker/lowering : Phases 6.4 à
++/// 6.6), d'où le préfixe `_`. Aucune logique de ces phases n'est anticipée
++/// ici — toute garde passée retourne un refus explicite, pas un résultat
++/// construit.
++///
++/// Retourne :
++///   `Err(())` : parent illisible (E/S), parent syntaxiquement invalide, ou
++///               parent déclarant lui-même `extends` (garde single-level).
++///               Trois messages `cargo:error` distincts.
++///   `Err(())` (garde passée) : câblage aval non encore implémenté — ce
++///               n'est pas une erreur du template, seulement l'état actuel
++///               du pipeline. Distingué des trois précédents par son propre
++///               message.
++fn resolve_page_template<'src>(
++    manifest_dir: &str,
++    schema: &str,
++    table: &str,
++    _fixed: &[marius_fragment_forge::FieldSpec],
++    _varlena: &[VarlenField],
++    _child_src: &'src str,
++    child_extends: &'src str,
++) -> Result<(String, TemplateMetrics), ()> {
++    let parent_path = PathBuf::from(relative_path_for_include_str(manifest_dir, child_extends));
++
++    // Invalidation de cache : un parent modifié doit invalider le build, au
++    // même titre que l'enfant (déjà couvert par resolve_template).
++    println!("cargo:rerun-if-changed={}", parent_path.display());
++
++    let parent_src = read_template_file(&parent_path)?;
++
++    let parent_ast = parse_page_tokens(scan(&parent_src)).map_err(|e| {
++        println!(
++            "cargo:error=DB-Forge [{schema}.{table}] : parent Mode Page invalide ({}) : {e:?}",
++            parent_path.display()
++        );
++    })?;
++
++    // Garde single-level (Document 2 §6.1, tranchée par Document 3 §5) :
++    // l'héritage multi-niveaux n'est pas couvert par ce contrat.
++    if parent_ast.extends.is_some() {
++        println!(
++            "cargo:error=DB-Forge [{schema}.{table}] : héritage multi-niveaux non supporté \
++             ({} déclare lui-même extends)",
++            parent_path.display()
++        );
++        return Err(());
++    }
++
++    // Garde passée : câblage aval (arène, collecte de blocs, linker,
++    // lowering) hors périmètre de la Phase 6.3.
++    println!(
++        "cargo:error=DB-Forge [{schema}.{table}] : Mode Page — garde single-level passée, \
++         câblage aval non encore implémenté (Phase 6.3)"
++    );
++    Err(())
++}
++
+ /// Tente de résoudre le template `.marius` d'une table via le pipeline complet
+ /// Fragment-Forge : scan → parse_tokens → validate_ast → resolve_and_measure →
+ /// generate_aot_snippet.
+@@ -90,11 +152,15 @@ fn read_template_file(path: &Path) -> Result<String, ()> {
+ ///
+ /// Retourne :
+ ///   `Ok(None)`        : fichier absent — cargo:warning émis, fallback stub.
+-///   `Ok(Some((body, metrics)))` : template résolu avec succès.
+-///   `Err(())`         : toute erreur de parsing/validation/résolution, ou
+-///                       template déclarant `{% extends %}` (Mode Page non
+-///                       câblé — invariant Phase 6.2 : `detect_extends` est
+-///                       le point de décision de mode unique de ce fichier).
++///   `Ok(Some((body, metrics)))` : template résolu avec succès (Mode
++///                       Fragment, ou Mode Page une fois le pipeline complet
++///                       câblé — hors portée avant Phase 6.6).
++///   `Err(())`         : toute erreur de parsing/validation/résolution
++///                       (Mode Fragment), ou tout échec de
++///                       `resolve_page_template` (Mode Page — Phase 6.2 :
++///                       `detect_extends` est le point de décision de mode
++///                       unique de ce fichier ; Phase 6.3 : E/S parent,
++///                       garde single-level, refus explicite au-delà).
+ ///                       cargo:error déjà émis ; l'appelant doit exit(1).
+ fn resolve_template(
+     manifest_dir: &str,
+@@ -123,11 +189,34 @@ fn resolve_template(
+     let src = read_template_file(&template_path)?;
+ 
+     // Point de branchement de mode — unique dans tout le fichier (Document 3
+-    // §1). Câblage aval (Mode Page) hors périmètre de cette phase : la seule
+-    // action ici est de refuser explicitement, pas de traiter.
++    // §1). Le parse enfant ci-dessous est le « appel minimal à
++    // parse_page_tokens » : il ne sert qu'à extraire le chemin déclaré par
++    // extends, aucun appel à collect_blocks/link/lower en aval (hors
++    // périmètre Phase 6.3).
+     if detect_extends(&src) {
+-        println!("cargo:error=DB-Forge [{schema}.{table}] : Mode Page non câblé");
+-        return Err(());
++        let child_ast = parse_page_tokens(scan(&src)).map_err(|e| {
++            println!(
++                "cargo:error=DB-Forge [{schema}.{table}] : enfant Mode Page invalide : {e:?}"
++            );
++        })?;
++
++        // Invariant : detect_extends == true garantit qu'un parse réussi
++        // porte extends.is_some() — la déclaration de tête est ce que
++        // detect_extends vient de constater (Document 1 §2.2).
++        let child_extends = child_ast
++            .extends
++            .expect("detect_extends garantit extends.is_some() après parse réussi");
++
++        let (body, metrics) = resolve_page_template(
++            manifest_dir,
++            schema,
++            table,
++            fixed,
++            varlena,
++            &src,
++            child_extends,
++        )?;
++        return Ok(Some((body, metrics)));
+     }
+ 
+     let spans = scan(&src);

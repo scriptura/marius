@@ -1,0 +1,40 @@
+diff --git a/build.rs b/build.rs
+index 0af5015..31d7080 100644
+--- a/build.rs
++++ b/build.rs
+@@ -22,7 +22,7 @@ use marius_db_forge::{
+ };
+ 
+ use marius_fragment_forge::{
+-    SchemaIndex, TemplateMetrics, VarlenField, generate_aot_snippet, parse_tokens,
++    SchemaIndex, TemplateMetrics, VarlenField, detect_extends, generate_aot_snippet, parse_tokens,
+     resolve_and_measure, scan, validate_ast,
+ };
+ 
+@@ -91,7 +91,10 @@ fn read_template_file(path: &Path) -> Result<String, ()> {
+ /// Retourne :
+ ///   `Ok(None)`        : fichier absent — cargo:warning émis, fallback stub.
+ ///   `Ok(Some((body, metrics)))` : template résolu avec succès.
+-///   `Err(())`         : toute erreur de parsing/validation/résolution.
++///   `Err(())`         : toute erreur de parsing/validation/résolution, ou
++///                       template déclarant `{% extends %}` (Mode Page non
++///                       câblé — invariant Phase 6.2 : `detect_extends` est
++///                       le point de décision de mode unique de ce fichier).
+ ///                       cargo:error déjà émis ; l'appelant doit exit(1).
+ fn resolve_template(
+     manifest_dir: &str,
+@@ -119,6 +122,14 @@ fn resolve_template(
+ 
+     let src = read_template_file(&template_path)?;
+ 
++    // Point de branchement de mode — unique dans tout le fichier (Document 3
++    // §1). Câblage aval (Mode Page) hors périmètre de cette phase : la seule
++    // action ici est de refuser explicitement, pas de traiter.
++    if detect_extends(&src) {
++        println!("cargo:error=DB-Forge [{schema}.{table}] : Mode Page non câblé");
++        return Err(());
++    }
++
+     let spans = scan(&src);
+     let mut tokens = parse_tokens(spans).map_err(|e| {
+         println!("cargo:error=DB-Forge [{schema}.{table}] : erreur de parsing template : {e:?}");
