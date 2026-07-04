@@ -5,11 +5,11 @@ Nous suivons strictement la roadmap.
 
 **Mission**
 
-Implémenter exclusivement la **Phase 5.1**.
+Implémenter exclusivement la **Phase 5.3**.
 
 **Contraintes**
 
-- ne modifier aucune fonctionnalité en dehors du périmètre de la Phase 5.1 ;
+- ne modifier aucune fonctionnalité en dehors du périmètre de la Phase 5.3 ;
 - ne préparer aucun comportement relevant des phases ultérieures ;
 - n'introduire aucun `todo!`, `unimplemented!` ou code spéculatif ;
 - respecter les invariants définis par les documents d'architecture ;
@@ -17,12 +17,15 @@ Implémenter exclusivement la **Phase 5.1**.
 - ajouter uniquement les tests prévus par la roadmap pour cette phase ;
 - vérifier `cargo fmt`, `cargo test` et `cargo clippy`.
 
+**À la fin de la session, confirmer :**
+
+- confirmation au VERT de `cargo fmt`, `cargo test` et `cargo clippy` ;
+- la confirmation que le périmètre de la Phase 5.3 a été strictement respecté.
+
 **À la fin de la session, fournir :**
 
-- le diff Git complet ;
-- confirmation au VERT de `cargo fmt`, `cargo test` et `cargo clippy` ;
-- la confirmation que le périmètre de la Phase 5.1 a été strictement respecté ;
-- le rapport de fin de phase suivant le modèle en pièce jointe.
+- le diff Git complet (pattern : `phase-X.X.diff`) ;
+- le rapport de fin de phase suivant le modèle en pièce jointe (pattern : `phase-X.X.md`).
 
 Liste des documents en pièce jointe :
 
