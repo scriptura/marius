@@ -1,0 +1,223 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 66b0c95..c62d924 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -4129,3 +4129,218 @@ mod tests_phase_5_4_unsupported_mapping {
+         );
+     }
+ }
++
++// =============================================================================
++// PHASE 5.5 — `link` : appariement sans E/S (Document 2 §4)
++// =============================================================================
++// Responsabilité (roadmap §5.5) : répondre à des questions de correspondance
++// *par référence*, sans muter aucune structure — pour chaque plage du
++// parent, quelle est la substitution retenue (plage enfant si redéfinition
++// de même nom, plage parent sinon) ? Toute plage enfant sans correspondance
++// côté parent est un bloc orphelin. Fonction pure : aucune E/S dans ce diff
++// (cf. point ouvert ci-dessous sur `static_refs`/`file_exists`).
++//
++// ─── Décision de signature (roadmap §5.5, point explicitement laissé ouvert) ─
++//
++//   La roadmap propose deux options : signature réduite à
++//   `(parent_blocks, child_blocks)` avec re-signature en 5.6, ou signature
++//   complète dès 5.5 avec `static_refs`/`file_exists` présents mais non
++//   utilisés. La roadmap recommande explicitement la seconde (« pour ne pas
++//   re-signer la fonction en 5.6 ») — retenue ici. Ce n'est pas une
++//   anticipation du comportement de 5.6 : la vérification `static` elle-même
++//   (boucle sur `static_refs`, appel à `file_exists`, émission de
++//   `StaticFileNotFound`) n'est pas écrite — seuls les paramètres existent,
++//   préfixés `_` pour documenter noir sur blanc qu'ils sont reçus mais non
++//   consultés à ce stade, plutôt que masqués par un `#[allow(unused)]`
++//   générique qui banaliserait l'absence de branchement.
++//
++// ─── Règle de construction du plan ──────────────────────────────────────────
++//
++//   Pour chaque plage du parent (ordre de parcours = ordre du parent) : la
++//   substitution retenue est celle de l'enfant si un nom identique existe
++//   côté enfant, sinon celle du parent lui-même (comportement par défaut —
++//   Document 2 §4). Conséquence directe : `substitutions.len() ==
++//   parent_blocks.len()` est un invariant de complétude, vérifié par
++//   construction (une itération, une poussée, jamais de `continue` qui
++//   sauterait une plage parent) — pas seulement par les tests.
++//
++//   Toute plage de l'enfant qui ne correspond à aucun nom du parent est un
++//   `PageLinkError::OrphanBlock` — jamais silencieusement ignorée. Boucle
++//   séparée de la construction du plan (deux responsabilités disjointes du
++//   même contrat : « quelle substitution » vs. « quel enfant est
++//   orphelin »), fail-slow comme `collect_blocks` : les deux boucles vont
++//   jusqu'au bout, `substitutions` est entièrement construit même si
++//   `errors` est non vide, mais seul l'un des deux est retourné.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct BlockSubstitution<'src> {
++    /// Nom du bloc, identique à `NamedBlockRange::name` du parent
++    /// correspondant. Dupliqué depuis `source` pour que le Lowering
++    /// (Phase 5.8+) puisse itérer sur `substitutions` sans redériver le nom
++    /// depuis une plage dont l'origine (enfant ou parent) varie.
++    pub name: &'src str,
++    /// Plage de contenu retenue : plage enfant si override, plage parent
++    /// sinon. Porte son propre `TemplateId` (`NamedBlockRange::template`) —
++    /// c'est ce champ, pas `name`, qui indique dans quel AST le Lowering
++    /// devra lire le contenu substitué.
++    pub source: NamedBlockRange<'src>,
++}
++
++/// Plan de fusion produit par `link` : une substitution par bloc du parent,
++/// dans l'ordre du parent. Type de données pur — aucune méthode de fusion
++/// ici, c'est le rôle du Lowering (Document 2 §5, Phase 5.8+).
++///
++/// `substitutions.len() == parent_blocks.len()` est un invariant de ce type
++/// produit par `link` (voir doc de tête ci-dessus) — pas revérifié à la
++/// construction (pas de constructeur dédié : le champ est public, produit
++/// uniquement par `link` dans ce module à ce stade).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct LinkPlan<'src> {
++    pub substitutions: Vec<BlockSubstitution<'src>>,
++}
++
++/// Calcule le plan de fusion entre les blocs d'un parent et ceux d'un
++/// enfant, par correspondance de nom uniquement — aucune E/S, aucune
++/// mutation des tranches reçues. Voir doc de tête (Phase 5.5) pour la règle
++/// de construction et la décision de signature.
++///
++/// `_static_refs`/`_file_exists` : reçus mais non consultés à ce stade
++/// (Phase 5.6 branchera la vérification d'existence de fichier). Préfixe
++/// `_` volontaire — un futur branchement effectif fera disparaître ce
++/// préfixe dans le même diff qui ajoutera la boucle de vérification,
++/// jamais avant.
++pub fn link<'src>(
++    parent_blocks: &[NamedBlockRange<'src>],
++    child_blocks: &[NamedBlockRange<'src>],
++    _static_refs: &[StaticPartialRef<'src>],
++    _file_exists: impl Fn(&str) -> bool,
++) -> Result<LinkPlan<'src>, Vec<PageLinkError<'src>>> {
++    let mut substitutions = Vec::with_capacity(parent_blocks.len());
++    for parent_range in parent_blocks {
++        let source = child_blocks
++            .iter()
++            .find(|child_range| child_range.name == parent_range.name)
++            .copied()
++            .unwrap_or(*parent_range);
++        substitutions.push(BlockSubstitution {
++            name: parent_range.name,
++            source,
++        });
++    }
++
++    let mut errors = Vec::new();
++    for child_range in child_blocks {
++        let has_matching_parent = parent_blocks
++            .iter()
++            .any(|parent_range| parent_range.name == child_range.name);
++        if !has_matching_parent {
++            errors.push(PageLinkError::OrphanBlock {
++                name: child_range.name,
++            });
++        }
++    }
++
++    if errors.is_empty() {
++        Ok(LinkPlan { substitutions })
++    } else {
++        Err(errors)
++    }
++}
++
++// =============================================================================
++// Tests — Phase 5.5
++// =============================================================================
++
++#[cfg(test)]
++mod tests_phase_5_5_link {
++    use super::{link, LinkPlan, NamedBlockRange, PageLinkError, TemplateId};
++
++    fn range(name: &str, template: TemplateId, start: usize, end: usize) -> NamedBlockRange<'_> {
++        NamedBlockRange {
++            name,
++            template,
++            start,
++            end,
++        }
++    }
++
++    /// Jalon Vert (roadmap §5.5) — un bloc enfant de même nom qu'un bloc
++    /// parent est retenu comme substitution (override), la plage source
++    /// pointant vers l'enfant, pas vers le parent.
++    #[test]
++    fn child_override_replaces_parent_range() {
++        let parent_template = TemplateId(0);
++        let child_template = TemplateId(1);
++        let parent_blocks = vec![range("title", parent_template, 0, 3)];
++        let child_blocks = vec![range("title", child_template, 10, 20)];
++
++        let plan = link(&parent_blocks, &child_blocks, &[], |_| true).expect("pas d'orphelin");
++
++        assert_eq!(
++            plan,
++            LinkPlan {
++                substitutions: vec![super::BlockSubstitution {
++                    name: "title",
++                    source: range("title", child_template, 10, 20),
++                }],
++            }
++        );
++    }
++
++    /// Jalon Vert (roadmap §5.5) — un bloc parent sans redéfinition côté
++    /// enfant conserve son propre contenu (fallback par défaut, Document 2
++    /// §4).
++    #[test]
++    fn parent_range_kept_when_no_override() {
++        let parent_template = TemplateId(0);
++        let parent_blocks = vec![range("footer", parent_template, 5, 8)];
++        let child_blocks: Vec<NamedBlockRange<'_>> = Vec::new();
++
++        let plan = link(&parent_blocks, &child_blocks, &[], |_| true).expect("pas d'orphelin");
++
++        assert_eq!(
++            plan,
++            LinkPlan {
++                substitutions: vec![super::BlockSubstitution {
++                    name: "footer",
++                    source: range("footer", parent_template, 5, 8),
++                }],
++            }
++        );
++    }
++
++    /// Jalon Vert (roadmap §5.5) — un bloc enfant sans correspondance côté
++    /// parent produit `OrphanBlock`, jamais une substitution silencieuse.
++    #[test]
++    fn child_block_without_parent_match_is_orphan() {
++        let parent_template = TemplateId(0);
++        let child_template = TemplateId(1);
++        let parent_blocks = vec![range("title", parent_template, 0, 3)];
++        let child_blocks = vec![range("sidebar", child_template, 0, 3)];
++
++        let result = link(&parent_blocks, &child_blocks, &[], |_| true);
++
++        assert_eq!(
++            result,
++            Err(vec![PageLinkError::OrphanBlock { name: "sidebar" }])
++        );
++    }
++
++    /// Jalon Vert (roadmap §5.5) — invariant de complétude : une entrée de
++    /// plan par bloc parent, jamais moins, quel que soit le nombre de blocs
++    /// enfant (redéfinis ou non).
++    #[test]
++    fn substitutions_len_always_equals_parent_blocks_len() {
++        let parent_template = TemplateId(0);
++        let child_template = TemplateId(1);
++        let parent_blocks = vec![
++            range("a", parent_template, 0, 1),
++            range("b", parent_template, 2, 3),
++            range("c", parent_template, 4, 5),
++        ];
++        let child_blocks = vec![range("b", child_template, 10, 11)];
++
++        let plan = link(&parent_blocks, &child_blocks, &[], |_| true).expect("pas d'orphelin");
++
++        assert_eq!(plan.substitutions.len(), parent_blocks.len());
++    }
++}

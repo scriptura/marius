@@ -1,0 +1,113 @@
+--- a/lib.rs
++++ b/lib.rs
+@@ -4460,3 +4460,110 @@
+         );
+     }
+ }
++
++// =============================================================================
++// PHASE 5.7 — `collect_static_refs` (Document 2 §4, alimentation de `link`)
++// =============================================================================
++// Responsabilité (roadmap §5.7) : extraire, sans omission, toutes les
++// références `{% static %}` d'un flux `PageSourceToken` — fonction séparée,
++// une seule responsabilité, pour alimenter le paramètre `static_refs` de
++// `link` (Phase 5.6, déjà clos). Le câblage réel (quel flux — enfant, parent,
++// ou les deux — est passé à `link` par l'orchestrateur) est hors périmètre
++// de cette phase : Document 3.
++//
++// ─── Pourquoi une fonction séparée, pas une extension de `collect_blocks` ──
++//
++//   `collect_blocks` (Phase 5.2-5.4, Document 2 §3) a une seule
++//   responsabilité déjà remplie : position des blocs et validation de forme
++//   sans second fichier. Y ajouter la collecte `static` mélangerait deux
++//   catégories de concept distinctes dans une même fonction (§0 : une
++//   fonction, une catégorie de concept éliminée) — ici, « où sont les
++//   blocs » et « où sont les références static » n'ont aucune donnée ni
++//   aucun invariant en commun (pas de pile, pas d'appariement, pas d'erreur
++//   de forme). Contrairement à la fusion actée pour `collect_blocks`
++//   lui-même (construction de plage + validation de forme : même flux, même
++//   ordre, même pile), aucune économie de parcours ne justifierait ici de
++//   coupler les deux : un filtre `Static` et un appariement `BlockOpen`/
++//   `BlockEnd` restent deux boucles indépendantes même fusionnées en une
++//   seule passe physique, sans partage d'état — la séparation en deux
++//   fonctions ne coûte donc aucune localité de cache supplémentaire.
++//
++// ─── Pas de déduplication (Document 2 §6.2, point ouvert non tranché ici) ──
++//
++//   Chaque occurrence de `{% static %}` dans le flux produit une entrée,
++//   y compris si `original_path` est identique à une entrée déjà retournée.
++//   Comportement identique à `{% include %}` en Mode Fragment (gelé) :
++//   compter les occurrences réelles, pas les chemins distincts. La
++//   déduplication cross-page évoquée par le scaffolding de `StaticPartialRef`
++//   (partager un unique `static_partials::{IDENT}` entre plusieurs pages)
++//   resterait hors de portée même avec une déduplication *intra*-flux ici —
++//   c'est un problème d'orchestrateur sur plusieurs fichiers, pas un problème
++//   de cette fonction sur un seul flux. Introduire un filtre de doublons
++//   maintenant serait un comportement spéculatif non demandé par cette phase.
++//
++// ─── Complexité et mémoire ──────────────────────────────────────────────────
++//
++//   Une seule boucle sur `tokens`, `O(n)`. Aucun étage de recherche
++//   (`HashSet`, tri) : la fonction ne compare jamais deux entrées entre
++//   elles, elle projette uniquement. `Vec<StaticPartialRef<'src>>` alloué au
++//   premier `push`, croissance linéaire — pas de capacité pré-allouée sur la
++//   taille de `tokens` (le nombre de `Static` est généralement une faible
++//   fraction du flux ; `Vec::with_capacity(tokens.len())` sur-allouerait dans
++//   le cas courant sans bénéfice mesuré). `StaticPartialRef` est `Copy`,
++//   copié depuis la slice sans indirection nouvelle.
++
++/// Extrait, dans l'ordre du flux et sans déduplication, toutes les
++/// références `{% static %}` de `tokens`. Filtre pur : ne consulte ni
++/// `PageArena`, ni `LinkPlan`, ne fait aucune E/S. Voir doc de tête
++/// (Phase 5.7) pour la justification de la séparation d'avec
++/// `collect_blocks` et l'absence de déduplication.
++pub fn collect_static_refs<'src>(tokens: &[PageSourceToken<'src>]) -> Vec<StaticPartialRef<'src>> {
++    let mut refs = Vec::new();
++    for token in tokens {
++        if let PageSourceToken::Static(static_ref) = token {
++            refs.push(*static_ref);
++        }
++    }
++    refs
++}
++
++// =============================================================================
++// Tests — Phase 5.7
++// =============================================================================
++
++#[cfg(test)]
++mod tests_phase_5_7_collect_static_refs {
++    use super::{collect_static_refs, FlatPageToken, PageSourceToken, StaticPartialRef};
++
++    /// Jalon Vert (roadmap §5.7) — un flux portant 2 `Static`, dont 1 chemin
++    /// dupliqué (`nav.html` apparaît deux fois), produit 2 entrées : la
++    /// fonction compte les occurrences réelles, elle ne déduplique pas par
++    /// valeur de `original_path` (Document 2 §6.2, comportement dégradé
++    /// retenu comme contrat v1).
++    #[test]
++    fn duplicated_static_path_yields_two_entries_not_one() {
++        let tokens = vec![
++            PageSourceToken::Static(StaticPartialRef {
++                original_path: "nav.html",
++            }),
++            PageSourceToken::Runtime(FlatPageToken::Static("between")),
++            PageSourceToken::Static(StaticPartialRef {
++                original_path: "nav.html",
++            }),
++        ];
++
++        let refs = collect_static_refs(&tokens);
++
++        assert_eq!(
++            refs,
++            vec![
++                StaticPartialRef {
++                    original_path: "nav.html"
++                },
++                StaticPartialRef {
++                    original_path: "nav.html"
++                },
++            ]
++        );
++    }
++}

@@ -1,0 +1,166 @@
+--- a/lib.rs
++++ b/lib.rs
+@@ -4567,3 +4567,163 @@
+         );
+     }
+ }
++
++// =============================================================================
++// PHASE 5.8 — `lower` : projection sans substitution (Document 2 §5)
++// =============================================================================
++// Responsabilité (roadmap §5.8) : poser la signature finale du Lowering —
++// `(&[PageSourceToken], &LinkPlan, &PageArena) -> Vec<FlatPageToken>` — et en
++// implémenter le sous-ensemble exercé sans aucun bloc en entrée : projection
++// `Runtime` → identité, `Static` → `StaticInclude` provisoire. La splice des
++// plages substituées (`PageSourceToken::Block`, via `LinkPlan`/`PageArena`)
++// est explicitement hors périmètre de cette phase — couverte en 5.9.
++//
++// ─── Pourquoi la signature complète dès maintenant ─────────────────────────
++//
++//   Même arbitrage que pour `link` en 5.5/5.6 (roadmap §5.5, doc de tête
++//   ci-dessus) : la roadmap demande explicitement de poser `plan` et `arena`
++//   dans la signature dès 5.8 pour que 5.9 étende le corps sans re-signer la
++//   fonction. `plan`/`arena` ne sont pas encore lus par cette phase — voir
++//   ci-dessous pour la raison pour laquelle ceci n'est pas un paramètre
++//   spéculatif au sens interdit par la contrainte de phase : la signature
++//   est un engagement de contrat déjà acté par Document 2 §5 et la roadmap,
++//   pas une anticipation de logique non spécifiée.
++//
++// ─── Chemin heureux uniquement : `Block` hors périmètre, documenté ─────────
++//
++//   Cette phase ne reçoit, par contrat de test (roadmap §5.8 : « testée
++//   uniquement sur un LinkPlan vide »), aucun `PageSourceToken::Block` en
++//   entrée. Suivant le précédent déjà établi en 5.2 (`collect_blocks`,
++//   `BlockEnd` sans `BlockOpen` correspondant : panique documentée plutôt que
++//   `todo!` silencieux ou comportement inventé), le cas `Block` panique ici
++//   avec un message explicite renvoyant à la Phase 5.9 : ni `todo!` ni
++//   `unimplemented!` littéral, mais une invariante non couverte nommée sans
++//   ambiguïté, plutôt qu'un branchement de substitution deviné par avance.
++//
++//   `PageSourceToken::Unsupported` ne peut pas non plus atteindre cette
++//   fonction — précondition déjà actée par Document 2 §5 : ce cas est rejeté
++//   en amont par `collect_blocks` (Phase 5.4, clos). Une occurrence ici
++//   serait un bug de la phase amont, pas un cas à absorber dans le Lowering
++//   (citation directe du contrat : « le Lowering suppose une entrée déjà
++//   validée »). Panique documentée, même style que ci-dessus.
++//
++// ─── Projection `Static` → `StaticInclude` (provisoire) ───────────────────
++//
++//   `len = 0` et `rel_from_manifest = original_path` : exactement le même
++//   couple de valeurs provisoires que le pattern `include` du Mode Fragment
++//   (gelé, `parse_block`, ligne ~1033) — `len` sera résolu par le Resolver
++//   (Document 2 §5, symétrie explicitement actée par le contrat), et
++//   `rel_from_manifest` par l'orchestrateur (Document 3, hors périmètre).
++//   Aucune divergence de convention entre les deux modes sur ce point.
++//
++// ─── Mémoire : capacité exacte pour ce sous-ensemble ───────────────────────
++//
++//   `Vec::with_capacity(parent_tokens.len())` est une borne exacte, pas une
++//   estimation, tant qu'aucun `Block` n'est présent : chaque `Runtime` et
++//   chaque `Static` produit exactement un `FlatPageToken` en sortie, la
++//   correspondance est 1:1. Cette égalité cesse d'être vraie dès que la
++//   Phase 5.9 introduira la splice de plages (les délimiteurs `BlockOpen`/
++//   `BlockEnd` disparaissent, le contenu spliced peut différer en longueur
++//   du contenu parent d'origine) — capacité à réévaluer à ce moment, pas
++//   anticipée ici.
++pub fn lower<'src>(
++    parent_tokens: &[PageSourceToken<'src>],
++    plan: &LinkPlan<'src>,
++    arena: &PageArena<'src>,
++) -> Vec<FlatPageToken<'src>> {
++    // Non lus à ce stade (voir doc de tête, Phase 5.8) : la signature est
++    // posée en 5.8, exercée en 5.9.
++    let _ = plan;
++    let _ = arena;
++
++    let mut out = Vec::with_capacity(parent_tokens.len());
++    for token in parent_tokens {
++        match token {
++            PageSourceToken::Runtime(flat) => out.push(*flat),
++            PageSourceToken::Static(StaticPartialRef { original_path }) => {
++                out.push(FlatPageToken::StaticInclude {
++                    original_path,
++                    rel_from_manifest: original_path,
++                    len: 0,
++                });
++            }
++            PageSourceToken::Block(_) => unreachable!(
++                "lower (Phase 5.8) : PageSourceToken::Block rencontré — la \
++                 splice de plages substituées via LinkPlan/PageArena n'est \
++                 pas implémentée à ce stade (couvert par la Phase 5.9). \
++                 Cas hors périmètre du chemin heureux de cette phase, non \
++                 exercé par ses tests (LinkPlan vide, aucun Block en entrée)."
++            ),
++            PageSourceToken::Unsupported { .. } => unreachable!(
++                "lower (Phase 5.8) : PageSourceToken::Unsupported rencontré \
++                 — précondition violée (Document 2 §5) : ce cas doit être \
++                 rejeté en amont par collect_blocks (Phase 5.4), jamais \
++                 atteindre le Lowering. Bug de la phase amont, pas un cas \
++                 géré ici."
++            ),
++        }
++    }
++    out
++}
++
++// =============================================================================
++// Tests — Phase 5.8
++// =============================================================================
++
++#[cfg(test)]
++mod tests_phase_5_8_lower_no_substitution {
++    use super::{lower, FlatPageToken, LinkPlan, PageArena, PageSourceToken, StaticPartialRef};
++
++    /// Jalon Vert (roadmap §5.8) — template sans blocs (`LinkPlan` vide,
++    /// aucun `PageSourceToken::Block` en entrée) : le `Static` unique produit
++    /// exactement un `FlatPageToken::StaticInclude { len: 0, .. }`, et
++    /// chaque `Runtime` traverse inchangé (égalité valeur à valeur, testée
++    /// sur plusieurs variantes de `FlatPageToken` pour couvrir la
++    /// projection identité au-delà du seul cas `Static`).
++    #[test]
++    fn runtime_tokens_pass_through_and_static_becomes_static_include_with_len_zero() {
++        let plan = LinkPlan {
++            substitutions: Vec::new(),
++        };
++        let arena = PageArena::default();
++
++        let tokens = vec![
++            PageSourceToken::Runtime(FlatPageToken::Static("before")),
++            PageSourceToken::Runtime(FlatPageToken::Field {
++                entity: "user",
++                field: "name",
++            }),
++            PageSourceToken::Static(StaticPartialRef {
++                original_path: "nav.html",
++            }),
++            PageSourceToken::Runtime(FlatPageToken::IfBool {
++                entity: "user",
++                field: "active",
++            }),
++            PageSourceToken::Runtime(FlatPageToken::EndIf),
++        ];
++
++        let result = lower(&tokens, &plan, &arena);
++
++        assert_eq!(
++            result,
++            vec![
++                FlatPageToken::Static("before"),
++                FlatPageToken::Field {
++                    entity: "user",
++                    field: "name",
++                },
++                FlatPageToken::StaticInclude {
++                    original_path: "nav.html",
++                    rel_from_manifest: "nav.html",
++                    len: 0,
++                },
++                FlatPageToken::IfBool {
++                    entity: "user",
++                    field: "active",
++                },
++                FlatPageToken::EndIf,
++            ]
++        );
++    }
++}

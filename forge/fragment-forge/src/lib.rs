@@ -3769,29 +3769,23 @@ mod tests_phase_5_1_page_arena {
 // =============================================================================
 // Responsabilité (roadmap §5.2) : apparier, par pile, les `BlockOpen`/
 // `BlockEnd` d'**un** fichier déjà admis en arène, et produire les
-// `NamedBlockRange` correspondantes. Seul le chemin heureux est couvert par
-// ce diff — la détection nommée des cas invalides (`NestedBlock`,
-// `ForLoopDetected`, `RelationalKeyword`) est différée aux Phases 5.3/5.4
-// (roadmap), jamais anticipée ici.
+// `NamedBlockRange` correspondantes.
 //
-// ─── Choix explicite sur les deux catégories de cas hors périmètre ────────
+// ─── Choix explicite sur les catégories de cas hors périmètre 5.2 ─────────
 // (roadmap §5.2 : « à choisir explicitement, pas laisser un todo! silencieux »)
 //
 //   1. `PageSourceToken::Unsupported` (mots-clés `for`/`join`/`where`/…) :
-//      traité comme du contenu opaque par la branche `_` — ignoré par la
-//      boucle d'appariement, ne produit aucune erreur. Retour `Ok`
-//      systématique tant qu'aucun bloc n'est mal apparié : c'est la
-//      variante « retour Ok uniquement pour l'instant » explicitement
+//      à ce stade (5.2/5.3), traité comme du contenu opaque par la branche
+//      `_` — ignoré par la boucle d'appariement, ne produit aucune erreur.
+//      Retour `Ok` systématique tant qu'aucun bloc n'est mal apparié : c'est
+//      la variante « retour Ok uniquement pour l'instant » explicitement
 //      choisie parmi les deux proposées par la roadmap. La Phase 5.4
-//      ajoutera la branche qui traduit cette variante en
+//      ci-dessous remplace cette branche par le mapping nommé vers
 //      `PageValidationError::ForLoopDetected`/`RelationalKeyword`.
 //
-//   2. Profondeur d'imbrication > 1 (un `BlockOpen` alors qu'un autre est
-//      déjà empilé) : PAS détectée à ce stade — la pile LIFO apparie
-//      correctement n'importe quelle profondeur sans la rejeter (elle
-//      referme d'abord le bloc le plus profond, puis les suivants). La
-//      Phase 5.3 ajoutera la condition qui transforme ce cas, aujourd'hui
-//      silencieusement accepté, en `PageValidationError::NestedBlock`.
+//   2. Profondeur d'imbrication > 1 : couverte depuis la Phase 5.3
+//      ci-dessous (`NestedBlock`) — plus un point hors périmètre depuis ce
+//      diff.
 //
 // ─── Point ouvert, non tranché par ce diff ─────────────────────────────────
 //
@@ -3808,20 +3802,98 @@ mod tests_phase_5_1_page_arena {
 //   — sur une entrée que les fixtures testées à ce stade ne produisent
 //   jamais. À trancher explicitement dans une session ultérieure, au même
 //   titre que le point ouvert déjà signalé au Document 2 §6.1.
+//
+// =============================================================================
+// PHASE 5.3 — `collect_blocks` : détection `NestedBlock` (Document 2 §3)
+// =============================================================================
+// Extension de 5.2 (roadmap §5.3) : une seule condition ajoutée dans la
+// boucle existante, aucune restructuration de la pile. Invariant introduit :
+// l'imbrication est rejetée nommément, jamais acceptée comme plage valide.
+//
+// ─── Mécanisme ──────────────────────────────────────────────────────────
+//
+//   La pile LIFO appariait déjà correctement n'importe quelle profondeur
+//   (propriété algorithmique de 5.2, documentée dans son commentaire de
+//   tête). Cette phase n'ajoute donc aucune capacité d'appariement — elle
+//   ajoute une *interdiction* : si `open_stack` est déjà non-vide au moment
+//   d'empiler un nouveau `BlockOpen`, ce `BlockOpen` est en position
+//   imbriquée, ce qui produit `PageValidationError::NestedBlock { name }`
+//   (`name` du bloc imbriqué fautif, pas du bloc englobant — c'est
+//   l'occurrence la plus profonde qui viole la contrainte de platitude).
+//
+// ─── Fail-slow, pas fail-fast ────────────────────────────────────────────
+//
+//   L'empilement continue malgré l'erreur détectée (`open_stack.push`
+//   n'est jamais court-circuité) : la boucle va jusqu'au bout du flux,
+//   accumulant une erreur par `BlockOpen` en position imbriquée. Ce choix
+//   anticipe la vérification fail-slow prescrite en Phase 5.4 (« 2 erreurs
+//   simultanées → `Vec` de longueur 2 ») sans l'implémenter par avance :
+//   c'est une conséquence directe et minimale de « ne jamais interrompre la
+//   boucle sur une erreur nommée », pas un branchement additionnel préparé
+//   pour 5.4.
+//
+// ─── Pas de sortie mixte succès/erreur ───────────────────────────────────
+//
+//   `ranges` continue d'être peuplé même en présence d'erreurs (nécessaire
+//   pour que chaque `BlockEnd` trouve un `start` à dépiler), mais n'est
+//   jamais retourné si `errors` est non vide : la fonction retourne
+//   `Err(errors)` ou `Ok(ranges)`, jamais les deux à la fois. Les plages
+//   calculées en présence d'imbrication sont donc délibérément jetées, pas
+//   exposées comme un résultat partiellement fiable.
+//
+// =============================================================================
+// PHASE 5.4 — `collect_blocks` : `ForLoopDetected` / `RelationalKeyword` (Document 2 §3)
+// =============================================================================
+// Extension de 5.2/5.3 (roadmap §5.4) : une seule branche de `match` ajoutée,
+// aucune logique de pile touchée. Invariant introduit : mapping total et
+// nommé entre mot-clé `Unsupported` et erreur de validation — plus aucun
+// mot-clé `Unsupported` ne peut traverser `collect_blocks` sans produire une
+// erreur nommée (le point 1 de la doc de tête, ci-dessus, est donc clos).
+//
+// ─── Règle du mapping ──────────────────────────────────────────────────────
+//
+//   `PageSourceToken::Unsupported { keyword, .. }` :
+//     - `keyword == "for"`      → `PageValidationError::ForLoopDetected`
+//     - tout autre `keyword`    → `PageValidationError::RelationalKeyword { keyword }`
+//
+//   Ce n'est pas une énumération explicite des mots-clés relationnels connus
+//   (`join`/`where`/`filter`/`group`) suivie d'un troisième cas silencieux :
+//   c'est un mapping *total* sur le seul axe qui compte ici — `for` est
+//   distingué parce que `PageValidationError` lui réserve une variante sans
+//   charge utile, tout le reste (relationnel connu ou mot-clé futur non
+//   encore nommé par la grammaire, cf. le catch-all Phase 4.7 déjà total sur
+//   `keyword: &str` arbitraire) tombe dans `RelationalKeyword`, qui porte le
+//   `keyword` reçu tel quel. Aucun `keyword` ne peut donc rester non
+//   catégorisé — propriété vérifiée par construction (deux branches
+//   exhaustives sur un `bool`), pas par une liste à maintenir.
+//
+// ─── Fail-slow, orthogonal à `NestedBlock` ─────────────────────────────────
+//
+//   Cette branche ne fait pas partie de la pile d'appariement (`open_stack`
+//   n'est ni lu ni modifié) : un mot-clé `Unsupported` peut coexister avec un
+//   bloc imbriqué dans le même flux, chacun poussant sa propre erreur dans
+//   `errors` sans interférence — même politique fail-slow que 5.3, sur un axe
+//   de validation indépendant.
 pub fn collect_blocks<'src>(
     template: TemplateId,
     tokens: &[PageSourceToken<'src>],
 ) -> Result<Vec<NamedBlockRange<'src>>, Vec<PageValidationError<'src>>> {
     let mut open_stack: Vec<(&'src str, usize)> = Vec::new();
     let mut ranges = Vec::new();
+    let mut errors = Vec::new();
 
     for (index, token) in tokens.iter().enumerate() {
         match token {
             // Ouverture : empile `(name, start)`. `start` pointe juste après
             // le marqueur `BlockOpen` lui-même — la plage couvre le contenu
             // du bloc, jamais ses délimiteurs (convention actée par la doc
-            // de `NamedBlockRange`).
+            // de `NamedBlockRange`). Une pile déjà non-vide à cet instant
+            // signale une imbrication (Phase 5.3) : erreur accumulée,
+            // empilement néanmoins poursuivi (fail-slow, cf. doc de tête).
             PageSourceToken::Block(PageBlockToken::BlockOpen { name }) => {
+                if !open_stack.is_empty() {
+                    errors.push(PageValidationError::NestedBlock { name });
+                }
                 open_stack.push((name, index + 1));
             }
             // Fermeture : dépile et matérialise la plage `[start, index)`,
@@ -3842,9 +3914,20 @@ pub fn collect_blocks<'src>(
                     end: index,
                 });
             }
-            // Tout le reste (`Runtime`, `Static`, `Unsupported`) est du
-            // contenu opaque du point de vue de l'appariement de blocs — ni
-            // poussé ni dépilé. Cf. doc de tête, point 1.
+            // Mot-clé de grammaire non supporté (Phase 5.4, cf. doc de tête) :
+            // mapping total vers l'erreur de validation nommée
+            // correspondante. N'interagit pas avec `open_stack` — orthogonal
+            // à l'appariement de blocs, fail-slow au même titre que
+            // `NestedBlock` ci-dessus.
+            PageSourceToken::Unsupported { keyword, .. } => {
+                if *keyword == "for" {
+                    errors.push(PageValidationError::ForLoopDetected);
+                } else {
+                    errors.push(PageValidationError::RelationalKeyword { keyword });
+                }
+            }
+            // Tout le reste (`Runtime`, `Static`) est du contenu opaque du
+            // point de vue de l'appariement de blocs — ni poussé ni dépilé.
             _ => {}
         }
     }
@@ -3857,7 +3940,11 @@ pub fn collect_blocks<'src>(
         open_stack.len()
     );
 
-    Ok(ranges)
+    if errors.is_empty() {
+        Ok(ranges)
+    } else {
+        Err(errors)
+    }
 }
 
 // =============================================================================
@@ -3903,6 +3990,739 @@ mod tests_phase_5_2_collect_blocks {
                     start: 4,
                     end: 5,
                 },
+            ]
+        );
+    }
+}
+
+// =============================================================================
+// Tests — Phase 5.3
+// =============================================================================
+
+#[cfg(test)]
+mod tests_phase_5_3_nested_block_detection {
+    use super::{
+        FlatPageToken, PageBlockToken, PageSourceToken, PageValidationError, TemplateId,
+        collect_blocks,
+    };
+
+    /// Jalon Vert (roadmap §5.3) — un bloc imbriqué produit
+    /// `Err(vec![NestedBlock { name: "inner" }])` : le nom rapporté est celui
+    /// du bloc fautif (le plus profond), pas du bloc englobant. Le typage en
+    /// `Result` exclut par construction toute sortie mixte : ce test
+    /// documente cette absence de mélange succès/erreur en assertant
+    /// directement sur la variante `Err`, sans exposer de plage à côté.
+    #[test]
+    fn nested_block_produces_named_error() {
+        let template = TemplateId(0);
+        let tokens = vec![
+            PageSourceToken::Block(PageBlockToken::BlockOpen { name: "outer" }),
+            PageSourceToken::Block(PageBlockToken::BlockOpen { name: "inner" }),
+            PageSourceToken::Runtime(FlatPageToken::Static("x")),
+            PageSourceToken::Block(PageBlockToken::BlockEnd),
+            PageSourceToken::Block(PageBlockToken::BlockEnd),
+        ];
+
+        let result = collect_blocks(template, &tokens);
+
+        assert_eq!(
+            result,
+            Err(vec![PageValidationError::NestedBlock { name: "inner" }])
+        );
+    }
+}
+
+// =============================================================================
+// Tests — Phase 5.4
+// =============================================================================
+
+#[cfg(test)]
+mod tests_phase_5_4_unsupported_mapping {
+    use super::{PageSourceToken, PageValidationError, TemplateId, collect_blocks};
+
+    /// Jalon Vert (roadmap §5.4) — `for` produit nommément `ForLoopDetected`,
+    /// jamais `RelationalKeyword`. Cas distingué du reste par construction
+    /// (cf. doc de tête de `collect_blocks`, section Phase 5.4).
+    #[test]
+    fn for_keyword_produces_for_loop_detected() {
+        let template = TemplateId(0);
+        let tokens = vec![PageSourceToken::Unsupported {
+            keyword: "for",
+            tail: " item in items",
+        }];
+
+        let result = collect_blocks(template, &tokens);
+
+        assert_eq!(result, Err(vec![PageValidationError::ForLoopDetected]));
+    }
+
+    /// Jalon Vert (roadmap §5.4) — chacun des mots-clés relationnels connus
+    /// (`join`/`where`/`filter`/`group`) produit nommément
+    /// `RelationalKeyword { keyword }`, avec le `keyword` reçu tel quel.
+    /// Paramétré, comme le catch-all Parser (Phase 4.7) dont cette
+    /// validation est le pendant côté `collect_blocks`.
+    #[test]
+    fn relational_keywords_produce_relational_keyword_error() {
+        let template = TemplateId(0);
+
+        for keyword in ["join", "where", "filter", "group"] {
+            let tokens = vec![PageSourceToken::Unsupported { keyword, tail: "" }];
+
+            let result = collect_blocks(template, &tokens);
+
+            assert_eq!(
+                result,
+                Err(vec![PageValidationError::RelationalKeyword { keyword }]),
+                "mot-clé {keyword:?} : erreur RelationalKeyword attendue"
+            );
+        }
+    }
+
+    /// Jalon Vert (roadmap §5.4) — le mapping est *total*, pas une liste
+    /// fermée sur les quatre mots-clés relationnels connus : un mot-clé
+    /// arbitraire non listé (mais déjà capturé par le catch-all Phase 4.7,
+    /// cf. `unsupported_catch_all_captures_arbitrary_keywords`) tombe aussi
+    /// dans `RelationalKeyword`, jamais silencieusement ignoré.
+    #[test]
+    fn arbitrary_unsupported_keyword_also_produces_relational_keyword_error() {
+        let template = TemplateId(0);
+        let tokens = vec![PageSourceToken::Unsupported {
+            keyword: "frobnicate",
+            tail: " arg",
+        }];
+
+        let result = collect_blocks(template, &tokens);
+
+        assert_eq!(
+            result,
+            Err(vec![PageValidationError::RelationalKeyword {
+                keyword: "frobnicate"
+            }])
+        );
+    }
+
+    /// Jalon Vert (roadmap §5.4) — fail-slow vérifié : deux mots-clés
+    /// `Unsupported` dans le même flux produisent un `Vec` de longueur 2,
+    /// pas une sortie fail-fast qui s'arrêterait à la première erreur.
+    #[test]
+    fn two_unsupported_keywords_in_same_stream_accumulate_both_errors() {
+        let template = TemplateId(0);
+        let tokens = vec![
+            PageSourceToken::Unsupported {
+                keyword: "for",
+                tail: "",
+            },
+            PageSourceToken::Unsupported {
+                keyword: "where",
+                tail: "",
+            },
+        ];
+
+        let result = collect_blocks(template, &tokens);
+
+        assert_eq!(
+            result,
+            Err(vec![
+                PageValidationError::ForLoopDetected,
+                PageValidationError::RelationalKeyword { keyword: "where" },
+            ])
+        );
+    }
+}
+
+// =============================================================================
+// PHASE 5.5 — `link` : appariement sans E/S (Document 2 §4)
+// =============================================================================
+// Responsabilité (roadmap §5.5) : répondre à des questions de correspondance
+// *par référence*, sans muter aucune structure — pour chaque plage du
+// parent, quelle est la substitution retenue (plage enfant si redéfinition
+// de même nom, plage parent sinon) ? Toute plage enfant sans correspondance
+// côté parent est un bloc orphelin. Fonction pure modulo E/S injectée (la
+// vérification `static`, ci-dessous, Phase 5.6, ne branche que la fonction
+// `file_exists` reçue — aucun `std::fs` direct dans ce module).
+//
+// ─── Décision de signature (roadmap §5.5, point explicitement laissé ouvert) ─
+//
+//   La roadmap propose deux options : signature réduite à
+//   `(parent_blocks, child_blocks)` avec re-signature en 5.6, ou signature
+//   complète dès 5.5 avec `static_refs`/`file_exists` présents mais non
+//   utilisés. La roadmap recommande explicitement la seconde (« pour ne pas
+//   re-signer la fonction en 5.6 ») — retenue en 5.5. Confirmé par 5.6
+//   ci-dessous : la signature n'a pas bougé, seul le corps a gagné une
+//   boucle.
+//
+// ─── Règle de construction du plan ──────────────────────────────────────────
+//
+//   Pour chaque plage du parent (ordre de parcours = ordre du parent) : la
+//   substitution retenue est celle de l'enfant si un nom identique existe
+//   côté enfant, sinon celle du parent lui-même (comportement par défaut —
+//   Document 2 §4). Conséquence directe : `substitutions.len() ==
+//   parent_blocks.len()` est un invariant de complétude, vérifié par
+//   construction (une itération, une poussée, jamais de `continue` qui
+//   sauterait une plage parent) — pas seulement par les tests.
+//
+//   Toute plage de l'enfant qui ne correspond à aucun nom du parent est un
+//   `PageLinkError::OrphanBlock` — jamais silencieusement ignorée. Boucle
+//   séparée de la construction du plan (deux responsabilités disjointes du
+//   même contrat : « quelle substitution » vs. « quel enfant est
+//   orphelin »), fail-slow comme `collect_blocks` : les deux boucles vont
+//   jusqu'au bout, `substitutions` est entièrement construit même si
+//   `errors` est non vide, mais seul l'un des deux est retourné.
+// =============================================================================
+// PHASE 5.6 — `link` : vérification `static` (Document 2 §4)
+// =============================================================================
+// Extension de 5.5 (roadmap §5.6) : une boucle ajoutée, aucune modification
+// de la logique de blocs (construction du plan, détection `OrphanBlock`
+// inchangées ligne à ligne). Invariant introduit : existence de fichier
+// vérifiée via E/S injectée (`file_exists: impl Fn(&str) -> bool`), jamais
+// via `std::fs` direct — la fonction reste testable sans FS réel, seule la
+// fermeture passée par l'appelant décide de ce qu'« exister » signifie.
+//
+// ─── Mécanisme ──────────────────────────────────────────────────────────
+//
+//   Une troisième boucle, sur `static_refs` : pour chaque
+//   `StaticPartialRef { original_path }`, `file_exists(original_path)` est
+//   interrogé. `false` → `PageLinkError::StaticFileNotFound { path:
+//   original_path }` poussée dans le même `errors` que `OrphanBlock` — un
+//   seul `Vec` d'erreurs pour les deux axes de validation du Linker, fidèle
+//   au fail-slow déjà en place : aucune des trois boucles (substitution,
+//   orphelin, static) n'interrompt les autres.
+//
+// ─── Duplication d'E/S assumée (Document 2 §4) ─────────────────────────────
+//
+//   `file_exists` ici est distinct de la lecture de taille que fera plus
+//   tard le Resolver (Document 3 §3, `get_file_size`) : deux fonctions
+//   injectées, deux contextes de phase, pas de mutualisation prématurée —
+//   décision déjà actée par le document d'architecture, appliquée sans
+//   écart.
+//
+// ─── `link` clos (Document 2 §4 terminé) ───────────────────────────────────
+//
+//   Les trois erreurs de `PageLinkError` (`ExtendsNotFound`, `OrphanBlock`,
+//   `StaticFileNotFound`) ont chacune leur point d'émission : `OrphanBlock`
+//   et `StaticFileNotFound` dans `link` (ce module), `ExtendsNotFound` dans
+//   l'orchestrateur (Document 3, hors périmètre — résolution du chemin
+//   `extends` lui-même, pas une correspondance de blocs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockSubstitution<'src> {
+    /// Nom du bloc, identique à `NamedBlockRange::name` du parent
+    /// correspondant. Dupliqué depuis `source` pour que le Lowering
+    /// (Phase 5.8+) puisse itérer sur `substitutions` sans redériver le nom
+    /// depuis une plage dont l'origine (enfant ou parent) varie.
+    pub name: &'src str,
+    /// Plage de contenu retenue : plage enfant si override, plage parent
+    /// sinon. Porte son propre `TemplateId` (`NamedBlockRange::template`) —
+    /// c'est ce champ, pas `name`, qui indique dans quel AST le Lowering
+    /// devra lire le contenu substitué.
+    pub source: NamedBlockRange<'src>,
+}
+
+/// Plan de fusion produit par `link` : une substitution par bloc du parent,
+/// dans l'ordre du parent. Type de données pur — aucune méthode de fusion
+/// ici, c'est le rôle du Lowering (Document 2 §5, Phase 5.8+).
+///
+/// `substitutions.len() == parent_blocks.len()` est un invariant de ce type
+/// produit par `link` (voir doc de tête ci-dessus) — pas revérifié à la
+/// construction (pas de constructeur dédié : le champ est public, produit
+/// uniquement par `link` dans ce module à ce stade).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPlan<'src> {
+    pub substitutions: Vec<BlockSubstitution<'src>>,
+}
+
+/// Calcule le plan de fusion entre les blocs d'un parent et ceux d'un
+/// enfant (correspondance par nom), et vérifie l'existence de chaque
+/// fichier `{% static %}` référencé via `file_exists` — aucune E/S directe
+/// dans cette fonction, aucune mutation des tranches reçues. Voir doc de
+/// tête (Phases 5.5/5.6) pour la règle de construction du plan et le
+/// mécanisme de vérification `static`.
+pub fn link<'src>(
+    parent_blocks: &[NamedBlockRange<'src>],
+    child_blocks: &[NamedBlockRange<'src>],
+    static_refs: &[StaticPartialRef<'src>],
+    file_exists: impl Fn(&str) -> bool,
+) -> Result<LinkPlan<'src>, Vec<PageLinkError<'src>>> {
+    let mut substitutions = Vec::with_capacity(parent_blocks.len());
+    for parent_range in parent_blocks {
+        let source = child_blocks
+            .iter()
+            .find(|child_range| child_range.name == parent_range.name)
+            .copied()
+            .unwrap_or(*parent_range);
+        substitutions.push(BlockSubstitution {
+            name: parent_range.name,
+            source,
+        });
+    }
+
+    let mut errors = Vec::new();
+    for child_range in child_blocks {
+        let has_matching_parent = parent_blocks
+            .iter()
+            .any(|parent_range| parent_range.name == child_range.name);
+        if !has_matching_parent {
+            errors.push(PageLinkError::OrphanBlock {
+                name: child_range.name,
+            });
+        }
+    }
+
+    for static_ref in static_refs {
+        if !file_exists(static_ref.original_path) {
+            errors.push(PageLinkError::StaticFileNotFound {
+                path: static_ref.original_path,
+            });
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(LinkPlan { substitutions })
+    } else {
+        Err(errors)
+    }
+}
+
+// =============================================================================
+// Tests — Phase 5.5
+// =============================================================================
+
+#[cfg(test)]
+mod tests_phase_5_5_link {
+    use super::{LinkPlan, NamedBlockRange, PageLinkError, TemplateId, link};
+
+    fn range(name: &str, template: TemplateId, start: usize, end: usize) -> NamedBlockRange<'_> {
+        NamedBlockRange {
+            name,
+            template,
+            start,
+            end,
+        }
+    }
+
+    /// Jalon Vert (roadmap §5.5) — un bloc enfant de même nom qu'un bloc
+    /// parent est retenu comme substitution (override), la plage source
+    /// pointant vers l'enfant, pas vers le parent.
+    #[test]
+    fn child_override_replaces_parent_range() {
+        let parent_template = TemplateId(0);
+        let child_template = TemplateId(1);
+        let parent_blocks = vec![range("title", parent_template, 0, 3)];
+        let child_blocks = vec![range("title", child_template, 10, 20)];
+
+        let plan = link(&parent_blocks, &child_blocks, &[], |_| true).expect("pas d'orphelin");
+
+        assert_eq!(
+            plan,
+            LinkPlan {
+                substitutions: vec![super::BlockSubstitution {
+                    name: "title",
+                    source: range("title", child_template, 10, 20),
+                }],
+            }
+        );
+    }
+
+    /// Jalon Vert (roadmap §5.5) — un bloc parent sans redéfinition côté
+    /// enfant conserve son propre contenu (fallback par défaut, Document 2
+    /// §4).
+    #[test]
+    fn parent_range_kept_when_no_override() {
+        let parent_template = TemplateId(0);
+        let parent_blocks = vec![range("footer", parent_template, 5, 8)];
+        let child_blocks: Vec<NamedBlockRange<'_>> = Vec::new();
+
+        let plan = link(&parent_blocks, &child_blocks, &[], |_| true).expect("pas d'orphelin");
+
+        assert_eq!(
+            plan,
+            LinkPlan {
+                substitutions: vec![super::BlockSubstitution {
+                    name: "footer",
+                    source: range("footer", parent_template, 5, 8),
+                }],
+            }
+        );
+    }
+
+    /// Jalon Vert (roadmap §5.5) — un bloc enfant sans correspondance côté
+    /// parent produit `OrphanBlock`, jamais une substitution silencieuse.
+    #[test]
+    fn child_block_without_parent_match_is_orphan() {
+        let parent_template = TemplateId(0);
+        let child_template = TemplateId(1);
+        let parent_blocks = vec![range("title", parent_template, 0, 3)];
+        let child_blocks = vec![range("sidebar", child_template, 0, 3)];
+
+        let result = link(&parent_blocks, &child_blocks, &[], |_| true);
+
+        assert_eq!(
+            result,
+            Err(vec![PageLinkError::OrphanBlock { name: "sidebar" }])
+        );
+    }
+
+    /// Jalon Vert (roadmap §5.5) — invariant de complétude : une entrée de
+    /// plan par bloc parent, jamais moins, quel que soit le nombre de blocs
+    /// enfant (redéfinis ou non).
+    #[test]
+    fn substitutions_len_always_equals_parent_blocks_len() {
+        let parent_template = TemplateId(0);
+        let child_template = TemplateId(1);
+        let parent_blocks = vec![
+            range("a", parent_template, 0, 1),
+            range("b", parent_template, 2, 3),
+            range("c", parent_template, 4, 5),
+        ];
+        let child_blocks = vec![range("b", child_template, 10, 11)];
+
+        let plan = link(&parent_blocks, &child_blocks, &[], |_| true).expect("pas d'orphelin");
+
+        assert_eq!(plan.substitutions.len(), parent_blocks.len());
+    }
+}
+
+// =============================================================================
+// Tests — Phase 5.6
+// =============================================================================
+
+#[cfg(test)]
+mod tests_phase_5_6_link_static_check {
+    use super::{NamedBlockRange, PageLinkError, StaticPartialRef, TemplateId, link};
+
+    fn range(name: &str, template: TemplateId, start: usize, end: usize) -> NamedBlockRange<'_> {
+        NamedBlockRange {
+            name,
+            template,
+            start,
+            end,
+        }
+    }
+
+    /// Jalon Vert (roadmap §5.6) — `file_exists` renvoyant `false` produit
+    /// `StaticFileNotFound`, le chemin porté étant celui reçu tel quel
+    /// (aucune normalisation dans `link`).
+    #[test]
+    fn missing_static_file_produces_static_file_not_found() {
+        let parent_blocks: Vec<NamedBlockRange<'_>> = Vec::new();
+        let child_blocks: Vec<NamedBlockRange<'_>> = Vec::new();
+        let static_refs = vec![StaticPartialRef {
+            original_path: "nav.html",
+        }];
+
+        let result = link(&parent_blocks, &child_blocks, &static_refs, |_| false);
+
+        assert_eq!(
+            result,
+            Err(vec![PageLinkError::StaticFileNotFound { path: "nav.html" }])
+        );
+    }
+
+    /// Jalon Vert (roadmap §5.6) — `file_exists` renvoyant `true` ne
+    /// produit aucune erreur : le plan est calculé normalement.
+    #[test]
+    fn existing_static_file_produces_no_error() {
+        let parent_blocks: Vec<NamedBlockRange<'_>> = Vec::new();
+        let child_blocks: Vec<NamedBlockRange<'_>> = Vec::new();
+        let static_refs = vec![StaticPartialRef {
+            original_path: "nav.html",
+        }];
+
+        let result = link(&parent_blocks, &child_blocks, &static_refs, |_| true);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().substitutions.is_empty());
+    }
+
+    /// Jalon Vert (roadmap §5.6) — fail-slow croisé sur les deux axes du
+    /// Linker : un bloc enfant orphelin ET un fichier `static` manquant
+    /// dans le même appel produisent un `Vec` de 2 erreurs, jamais une
+    /// seule (pas d'interruption au premier axe en défaut).
+    #[test]
+    fn orphan_block_and_missing_static_file_accumulate_both_errors() {
+        let parent_template = TemplateId(0);
+        let child_template = TemplateId(1);
+        let parent_blocks = vec![range("title", parent_template, 0, 3)];
+        let child_blocks = vec![range("sidebar", child_template, 0, 3)];
+        let static_refs = vec![StaticPartialRef {
+            original_path: "missing.css",
+        }];
+
+        let result = link(&parent_blocks, &child_blocks, &static_refs, |_| false);
+
+        assert_eq!(
+            result,
+            Err(vec![
+                PageLinkError::OrphanBlock { name: "sidebar" },
+                PageLinkError::StaticFileNotFound {
+                    path: "missing.css"
+                },
+            ])
+        );
+    }
+}
+
+// =============================================================================
+// PHASE 5.7 — `collect_static_refs` (Document 2 §4, alimentation de `link`)
+// =============================================================================
+// Responsabilité (roadmap §5.7) : extraire, sans omission, toutes les
+// références `{% static %}` d'un flux `PageSourceToken` — fonction séparée,
+// une seule responsabilité, pour alimenter le paramètre `static_refs` de
+// `link` (Phase 5.6, déjà clos). Le câblage réel (quel flux — enfant, parent,
+// ou les deux — est passé à `link` par l'orchestrateur) est hors périmètre
+// de cette phase : Document 3.
+//
+// ─── Pourquoi une fonction séparée, pas une extension de `collect_blocks` ──
+//
+//   `collect_blocks` (Phase 5.2-5.4, Document 2 §3) a une seule
+//   responsabilité déjà remplie : position des blocs et validation de forme
+//   sans second fichier. Y ajouter la collecte `static` mélangerait deux
+//   catégories de concept distinctes dans une même fonction (§0 : une
+//   fonction, une catégorie de concept éliminée) — ici, « où sont les
+//   blocs » et « où sont les références static » n'ont aucune donnée ni
+//   aucun invariant en commun (pas de pile, pas d'appariement, pas d'erreur
+//   de forme). Contrairement à la fusion actée pour `collect_blocks`
+//   lui-même (construction de plage + validation de forme : même flux, même
+//   ordre, même pile), aucune économie de parcours ne justifierait ici de
+//   coupler les deux : un filtre `Static` et un appariement `BlockOpen`/
+//   `BlockEnd` restent deux boucles indépendantes même fusionnées en une
+//   seule passe physique, sans partage d'état — la séparation en deux
+//   fonctions ne coûte donc aucune localité de cache supplémentaire.
+//
+// ─── Pas de déduplication (Document 2 §6.2, point ouvert non tranché ici) ──
+//
+//   Chaque occurrence de `{% static %}` dans le flux produit une entrée,
+//   y compris si `original_path` est identique à une entrée déjà retournée.
+//   Comportement identique à `{% include %}` en Mode Fragment (gelé) :
+//   compter les occurrences réelles, pas les chemins distincts. La
+//   déduplication cross-page évoquée par le scaffolding de `StaticPartialRef`
+//   (partager un unique `static_partials::{IDENT}` entre plusieurs pages)
+//   resterait hors de portée même avec une déduplication *intra*-flux ici —
+//   c'est un problème d'orchestrateur sur plusieurs fichiers, pas un problème
+//   de cette fonction sur un seul flux. Introduire un filtre de doublons
+//   maintenant serait un comportement spéculatif non demandé par cette phase.
+//
+// ─── Complexité et mémoire ──────────────────────────────────────────────────
+//
+//   Une seule boucle sur `tokens`, `O(n)`. Aucun étage de recherche
+//   (`HashSet`, tri) : la fonction ne compare jamais deux entrées entre
+//   elles, elle projette uniquement. `Vec<StaticPartialRef<'src>>` alloué au
+//   premier `push`, croissance linéaire — pas de capacité pré-allouée sur la
+//   taille de `tokens` (le nombre de `Static` est généralement une faible
+//   fraction du flux ; `Vec::with_capacity(tokens.len())` sur-allouerait dans
+//   le cas courant sans bénéfice mesuré). `StaticPartialRef` est `Copy`,
+//   copié depuis la slice sans indirection nouvelle.
+
+/// Extrait, dans l'ordre du flux et sans déduplication, toutes les
+/// références `{% static %}` de `tokens`. Filtre pur : ne consulte ni
+/// `PageArena`, ni `LinkPlan`, ne fait aucune E/S. Voir doc de tête
+/// (Phase 5.7) pour la justification de la séparation d'avec
+/// `collect_blocks` et l'absence de déduplication.
+pub fn collect_static_refs<'src>(tokens: &[PageSourceToken<'src>]) -> Vec<StaticPartialRef<'src>> {
+    let mut refs = Vec::new();
+    for token in tokens {
+        if let PageSourceToken::Static(static_ref) = token {
+            refs.push(*static_ref);
+        }
+    }
+    refs
+}
+
+// =============================================================================
+// Tests — Phase 5.7
+// =============================================================================
+
+#[cfg(test)]
+mod tests_phase_5_7_collect_static_refs {
+    use super::{FlatPageToken, PageSourceToken, StaticPartialRef, collect_static_refs};
+
+    /// Jalon Vert (roadmap §5.7) — un flux portant 2 `Static`, dont 1 chemin
+    /// dupliqué (`nav.html` apparaît deux fois), produit 2 entrées : la
+    /// fonction compte les occurrences réelles, elle ne déduplique pas par
+    /// valeur de `original_path` (Document 2 §6.2, comportement dégradé
+    /// retenu comme contrat v1).
+    #[test]
+    fn duplicated_static_path_yields_two_entries_not_one() {
+        let tokens = vec![
+            PageSourceToken::Static(StaticPartialRef {
+                original_path: "nav.html",
+            }),
+            PageSourceToken::Runtime(FlatPageToken::Static("between")),
+            PageSourceToken::Static(StaticPartialRef {
+                original_path: "nav.html",
+            }),
+        ];
+
+        let refs = collect_static_refs(&tokens);
+
+        assert_eq!(
+            refs,
+            vec![
+                StaticPartialRef {
+                    original_path: "nav.html"
+                },
+                StaticPartialRef {
+                    original_path: "nav.html"
+                },
+            ]
+        );
+    }
+}
+
+// =============================================================================
+// PHASE 5.8 — `lower` : projection sans substitution (Document 2 §5)
+// =============================================================================
+// Responsabilité (roadmap §5.8) : poser la signature finale du Lowering —
+// `(&[PageSourceToken], &LinkPlan, &PageArena) -> Vec<FlatPageToken>` — et en
+// implémenter le sous-ensemble exercé sans aucun bloc en entrée : projection
+// `Runtime` → identité, `Static` → `StaticInclude` provisoire. La splice des
+// plages substituées (`PageSourceToken::Block`, via `LinkPlan`/`PageArena`)
+// est explicitement hors périmètre de cette phase — couverte en 5.9.
+//
+// ─── Pourquoi la signature complète dès maintenant ─────────────────────────
+//
+//   Même arbitrage que pour `link` en 5.5/5.6 (roadmap §5.5, doc de tête
+//   ci-dessus) : la roadmap demande explicitement de poser `plan` et `arena`
+//   dans la signature dès 5.8 pour que 5.9 étende le corps sans re-signer la
+//   fonction. `plan`/`arena` ne sont pas encore lus par cette phase — voir
+//   ci-dessous pour la raison pour laquelle ceci n'est pas un paramètre
+//   spéculatif au sens interdit par la contrainte de phase : la signature
+//   est un engagement de contrat déjà acté par Document 2 §5 et la roadmap,
+//   pas une anticipation de logique non spécifiée.
+//
+// ─── Chemin heureux uniquement : `Block` hors périmètre, documenté ─────────
+//
+//   Cette phase ne reçoit, par contrat de test (roadmap §5.8 : « testée
+//   uniquement sur un LinkPlan vide »), aucun `PageSourceToken::Block` en
+//   entrée. Suivant le précédent déjà établi en 5.2 (`collect_blocks`,
+//   `BlockEnd` sans `BlockOpen` correspondant : panique documentée plutôt que
+//   `todo!` silencieux ou comportement inventé), le cas `Block` panique ici
+//   avec un message explicite renvoyant à la Phase 5.9 : ni `todo!` ni
+//   `unimplemented!` littéral, mais une invariante non couverte nommée sans
+//   ambiguïté, plutôt qu'un branchement de substitution deviné par avance.
+//
+//   `PageSourceToken::Unsupported` ne peut pas non plus atteindre cette
+//   fonction — précondition déjà actée par Document 2 §5 : ce cas est rejeté
+//   en amont par `collect_blocks` (Phase 5.4, clos). Une occurrence ici
+//   serait un bug de la phase amont, pas un cas à absorber dans le Lowering
+//   (citation directe du contrat : « le Lowering suppose une entrée déjà
+//   validée »). Panique documentée, même style que ci-dessus.
+//
+// ─── Projection `Static` → `StaticInclude` (provisoire) ───────────────────
+//
+//   `len = 0` et `rel_from_manifest = original_path` : exactement le même
+//   couple de valeurs provisoires que le pattern `include` du Mode Fragment
+//   (gelé, `parse_block`, ligne ~1033) — `len` sera résolu par le Resolver
+//   (Document 2 §5, symétrie explicitement actée par le contrat), et
+//   `rel_from_manifest` par l'orchestrateur (Document 3, hors périmètre).
+//   Aucune divergence de convention entre les deux modes sur ce point.
+//
+// ─── Mémoire : capacité exacte pour ce sous-ensemble ───────────────────────
+//
+//   `Vec::with_capacity(parent_tokens.len())` est une borne exacte, pas une
+//   estimation, tant qu'aucun `Block` n'est présent : chaque `Runtime` et
+//   chaque `Static` produit exactement un `FlatPageToken` en sortie, la
+//   correspondance est 1:1. Cette égalité cesse d'être vraie dès que la
+//   Phase 5.9 introduira la splice de plages (les délimiteurs `BlockOpen`/
+//   `BlockEnd` disparaissent, le contenu spliced peut différer en longueur
+//   du contenu parent d'origine) — capacité à réévaluer à ce moment, pas
+//   anticipée ici.
+pub fn lower<'src>(
+    parent_tokens: &[PageSourceToken<'src>],
+    plan: &LinkPlan<'src>,
+    arena: &PageArena<'src>,
+) -> Vec<FlatPageToken<'src>> {
+    // Non lus à ce stade (voir doc de tête, Phase 5.8) : la signature est
+    // posée en 5.8, exercée en 5.9.
+    let _ = plan;
+    let _ = arena;
+
+    let mut out = Vec::with_capacity(parent_tokens.len());
+    for token in parent_tokens {
+        match token {
+            PageSourceToken::Runtime(flat) => out.push(*flat),
+            PageSourceToken::Static(StaticPartialRef { original_path }) => {
+                out.push(FlatPageToken::StaticInclude {
+                    original_path,
+                    rel_from_manifest: original_path,
+                    len: 0,
+                });
+            }
+            PageSourceToken::Block(_) => unreachable!(
+                "lower (Phase 5.8) : PageSourceToken::Block rencontré — la \
+                 splice de plages substituées via LinkPlan/PageArena n'est \
+                 pas implémentée à ce stade (couvert par la Phase 5.9). \
+                 Cas hors périmètre du chemin heureux de cette phase, non \
+                 exercé par ses tests (LinkPlan vide, aucun Block en entrée)."
+            ),
+            PageSourceToken::Unsupported { .. } => unreachable!(
+                "lower (Phase 5.8) : PageSourceToken::Unsupported rencontré \
+                 — précondition violée (Document 2 §5) : ce cas doit être \
+                 rejeté en amont par collect_blocks (Phase 5.4), jamais \
+                 atteindre le Lowering. Bug de la phase amont, pas un cas \
+                 géré ici."
+            ),
+        }
+    }
+    out
+}
+
+// =============================================================================
+// Tests — Phase 5.8
+// =============================================================================
+
+#[cfg(test)]
+mod tests_phase_5_8_lower_no_substitution {
+    use super::{FlatPageToken, LinkPlan, PageArena, PageSourceToken, StaticPartialRef, lower};
+
+    /// Jalon Vert (roadmap §5.8) — template sans blocs (`LinkPlan` vide,
+    /// aucun `PageSourceToken::Block` en entrée) : le `Static` unique produit
+    /// exactement un `FlatPageToken::StaticInclude { len: 0, .. }`, et
+    /// chaque `Runtime` traverse inchangé (égalité valeur à valeur, testée
+    /// sur plusieurs variantes de `FlatPageToken` pour couvrir la
+    /// projection identité au-delà du seul cas `Static`).
+    #[test]
+    fn runtime_tokens_pass_through_and_static_becomes_static_include_with_len_zero() {
+        let plan = LinkPlan {
+            substitutions: Vec::new(),
+        };
+        let arena = PageArena::default();
+
+        let tokens = vec![
+            PageSourceToken::Runtime(FlatPageToken::Static("before")),
+            PageSourceToken::Runtime(FlatPageToken::Field {
+                entity: "user",
+                field: "name",
+            }),
+            PageSourceToken::Static(StaticPartialRef {
+                original_path: "nav.html",
+            }),
+            PageSourceToken::Runtime(FlatPageToken::IfBool {
+                entity: "user",
+                field: "active",
+            }),
+            PageSourceToken::Runtime(FlatPageToken::EndIf),
+        ];
+
+        let result = lower(&tokens, &plan, &arena);
+
+        assert_eq!(
+            result,
+            vec![
+                FlatPageToken::Static("before"),
+                FlatPageToken::Field {
+                    entity: "user",
+                    field: "name",
+                },
+                FlatPageToken::StaticInclude {
+                    original_path: "nav.html",
+                    rel_from_manifest: "nav.html",
+                    len: 0,
+                },
+                FlatPageToken::IfBool {
+                    entity: "user",
+                    field: "active",
+                },
+                FlatPageToken::EndIf,
             ]
         );
     }
