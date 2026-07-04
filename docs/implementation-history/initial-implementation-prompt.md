@@ -22,15 +22,23 @@ Implémenter exclusivement la **Phase 5.1**.
 - le diff Git complet ;
 - confirmation au VERT de `cargo fmt`, `cargo test` et `cargo clippy` ;
 - la confirmation que le périmètre de la Phase 5.1 a été strictement respecté ;
-- le rapport de fin de phase suivant le modèle convenu.
+- le rapport de fin de phase suivant le modèle en pièce jointe.
+
+Liste des documents en pièce jointe :
+
+- `architecture-pipeline-mode-page.md`
+- `roadmap-mode-page-implementation.md`
+- `doc2-linker-lowering.md`
+- `end-of-phase report.md`
+- `/forge/fragment-forge/src/lib.rs`
 
 ---
 
 ## Phase => Liste des documents à passer en pièce jointe :
 
-Phase 4.x => architecture + roadmap + doc1 + rapport end phase + lib.rs
-Phase 5.x => architecture + roadmap + doc2 + rapport end phase + lib.rs
-Phase 6.x => architecture + roadmap + doc3 + rapport end phase + lib.rs
+✅ Phase 4.x => architecture + roadmap + doc1 + lib.rs + rapport end
+Phase 5.x => architecture + roadmap + doc2 + lib.rs + rapport end
+Phase 6.x => architecture + roadmap + doc3 + lib.rs + rapport end
 
 ## Stem exact des fichiers :
 
