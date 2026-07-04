@@ -1,0 +1,152 @@
+diff --git a/lib.rs b/lib.rs
+index 98a1e3a..cef184d 100644
+--- a/lib.rs
++++ b/lib.rs
+@@ -3763,3 +3763,147 @@ mod tests_phase_5_1_page_arena {
+         );
+     }
+ }
++
++// =============================================================================
++// PHASE 5.2 — `collect_blocks` : cas non imbriqué (Document 2 §3)
++// =============================================================================
++// Responsabilité (roadmap §5.2) : apparier, par pile, les `BlockOpen`/
++// `BlockEnd` d'**un** fichier déjà admis en arène, et produire les
++// `NamedBlockRange` correspondantes. Seul le chemin heureux est couvert par
++// ce diff — la détection nommée des cas invalides (`NestedBlock`,
++// `ForLoopDetected`, `RelationalKeyword`) est différée aux Phases 5.3/5.4
++// (roadmap), jamais anticipée ici.
++//
++// ─── Choix explicite sur les deux catégories de cas hors périmètre ────────
++// (roadmap §5.2 : « à choisir explicitement, pas laisser un todo! silencieux »)
++//
++//   1. `PageSourceToken::Unsupported` (mots-clés `for`/`join`/`where`/…) :
++//      traité comme du contenu opaque par la branche `_` — ignoré par la
++//      boucle d'appariement, ne produit aucune erreur. Retour `Ok`
++//      systématique tant qu'aucun bloc n'est mal apparié : c'est la
++//      variante « retour Ok uniquement pour l'instant » explicitement
++//      choisie parmi les deux proposées par la roadmap. La Phase 5.4
++//      ajoutera la branche qui traduit cette variante en
++//      `PageValidationError::ForLoopDetected`/`RelationalKeyword`.
++//
++//   2. Profondeur d'imbrication > 1 (un `BlockOpen` alors qu'un autre est
++//      déjà empilé) : PAS détectée à ce stade — la pile LIFO apparie
++//      correctement n'importe quelle profondeur sans la rejeter (elle
++//      referme d'abord le bloc le plus profond, puis les suivants). La
++//      Phase 5.3 ajoutera la condition qui transforme ce cas, aujourd'hui
++//      silencieusement accepté, en `PageValidationError::NestedBlock`.
++//
++// ─── Point ouvert, non tranché par ce diff ─────────────────────────────────
++//
++//   Un flux structurellement mal formé au sens de l'appariement lui-même —
++//   `BlockEnd` sans `BlockOpen` correspondant, ou `BlockOpen` non refermé en
++//   fin de flux — n'est PAS un cas couvert par le chemin heureux testé ici,
++//   et n'est représenté par aucune variante existante de
++//   `PageValidationError` (`NonBoolIfCondition`, `ForLoopDetected`,
++//   `RelationalKeyword`, `NestedBlock` : aucune ne nomme un déséquilibre
++//   structurel). Introduire une nouvelle variante pour ce cas dépasserait le
++//   périmètre de cette phase (« ne préparer aucun comportement relevant des
++//   phases ultérieures »). Choix retenu : un `panic!` documenté, nommé,
++//   assorti d'un message explicite — jamais un `todo!`/`unimplemented!` muet
++//   — sur une entrée que les fixtures testées à ce stade ne produisent
++//   jamais. À trancher explicitement dans une session ultérieure, au même
++//   titre que le point ouvert déjà signalé au Document 2 §6.1.
++pub fn collect_blocks<'src>(
++    template: TemplateId,
++    tokens: &[PageSourceToken<'src>],
++) -> Result<Vec<NamedBlockRange<'src>>, Vec<PageValidationError<'src>>> {
++    let mut open_stack: Vec<(&'src str, usize)> = Vec::new();
++    let mut ranges = Vec::new();
++
++    for (index, token) in tokens.iter().enumerate() {
++        match token {
++            // Ouverture : empile `(name, start)`. `start` pointe juste après
++            // le marqueur `BlockOpen` lui-même — la plage couvre le contenu
++            // du bloc, jamais ses délimiteurs (convention actée par la doc
++            // de `NamedBlockRange`).
++            PageSourceToken::Block(PageBlockToken::BlockOpen { name }) => {
++                open_stack.push((name, index + 1));
++            }
++            // Fermeture : dépile et matérialise la plage `[start, index)`,
++            // `index` (position du `BlockEnd`) exclusif — même convention.
++            PageSourceToken::Block(PageBlockToken::BlockEnd) => {
++                let (name, start) = open_stack.pop().unwrap_or_else(|| {
++                    panic!(
++                        "collect_blocks (Phase 5.2) : BlockEnd sans BlockOpen \
++                         correspondant à l'index {index} — cas mal formé hors \
++                         périmètre du chemin heureux, non représenté par \
++                         PageValidationError à ce stade (voir doc de tête)"
++                    )
++                });
++                ranges.push(NamedBlockRange {
++                    name,
++                    template,
++                    start,
++                    end: index,
++                });
++            }
++            // Tout le reste (`Runtime`, `Static`, `Unsupported`) est du
++            // contenu opaque du point de vue de l'appariement de blocs — ni
++            // poussé ni dépilé. Cf. doc de tête, point 1.
++            _ => {}
++        }
++    }
++
++    assert!(
++        open_stack.is_empty(),
++        "collect_blocks (Phase 5.2) : {} bloc(s) BlockOpen non refermé(s) en \
++         fin de flux — cas mal formé hors périmètre du chemin heureux, non \
++         représenté par PageValidationError à ce stade (voir doc de tête)",
++        open_stack.len()
++    );
++
++    Ok(ranges)
++}
++
++// =============================================================================
++// Tests — Phase 5.2
++// =============================================================================
++
++#[cfg(test)]
++mod tests_phase_5_2_collect_blocks {
++    use super::{
++        collect_blocks, FlatPageToken, NamedBlockRange, PageBlockToken, PageSourceToken, TemplateId,
++    };
++
++    /// Jalon Vert (roadmap §5.2) — deux blocs top-level (non imbriqués)
++    /// produisent exactement deux `NamedBlockRange`, aux indices exacts de
++    /// contenu (bornes `[start, end)` excluant les marqueurs `BlockOpen`/
++    /// `BlockEnd` eux-mêmes, pas seulement au nombre de plages retournées).
++    #[test]
++    fn two_top_level_blocks_produce_exact_ranges() {
++        let template = TemplateId(0);
++        let tokens = vec![
++            PageSourceToken::Block(PageBlockToken::BlockOpen { name: "a" }),
++            PageSourceToken::Runtime(FlatPageToken::Static("x")),
++            PageSourceToken::Block(PageBlockToken::BlockEnd),
++            PageSourceToken::Block(PageBlockToken::BlockOpen { name: "b" }),
++            PageSourceToken::Runtime(FlatPageToken::Static("y")),
++            PageSourceToken::Block(PageBlockToken::BlockEnd),
++        ];
++
++        let ranges = collect_blocks(template, &tokens).expect("chemin heureux attendu");
++
++        assert_eq!(
++            ranges,
++            vec![
++                NamedBlockRange {
++                    name: "a",
++                    template,
++                    start: 1,
++                    end: 2,
++                },
++                NamedBlockRange {
++                    name: "b",
++                    template,
++                    start: 4,
++                    end: 5,
++                },
++            ]
++        );
++    }
++}
