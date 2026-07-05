@@ -1,0 +1,201 @@
+diff --git old/build.rs new/build.rs
+index f227429..6f776de 100644
+--- a/crates/core/schema/build.rs
++++ b/crates/core/schema/build.rs
+@@ -22,7 +22,7 @@ use marius_db_forge::{
+ };
+ 
+ use marius_fragment_forge::{
+-    SchemaIndex, TemplateMetrics, VarlenField, detect_extends, generate_aot_snippet,
++    PageArena, SchemaIndex, TemplateMetrics, VarlenField, detect_extends, generate_aot_snippet,
+     parse_page_tokens, parse_tokens, relative_path_for_include_str, resolve_and_measure, scan,
+     validate_ast,
+ };
+@@ -83,30 +83,38 @@ fn read_template_file(path: &Path) -> Result<String, ()> {
+     })
+ }
+ 
+-/// Sous-orchestration Mode Page — E/S parent + garde single-level.
++/// Sous-orchestration Mode Page — E/S parent, garde single-level, admission
++/// en arène (Phase 6.4).
+ ///
+ /// Signature gelée à sa forme finale (Document 3 §4) : les paramètres
+-/// `_fixed`/`_varlena`/`_child_src` ne sont pas encore consommés par cette
+-/// phase (câblage arène/collecte de blocs/linker/lowering : Phases 6.4 à
+-/// 6.6), d'où le préfixe `_`. Aucune logique de ces phases n'est anticipée
+-/// ici — toute garde passée retourne un refus explicite, pas un résultat
+-/// construit.
++/// `_fixed`/`_varlena` ne sont toujours pas consommés par cette phase
++/// (câblage collecte de blocs/linker/lowering : Phases 6.5 à 6.6), d'où le
++/// préfixe `_`. `child_src`, en revanche, est désormais consommé : cette
++/// phase ré-analyse l'enfant pour l'admettre en arène. Double parse assumé
++/// à ce stade (nota bene de cadrage Phase 6.4) — `child_ast`, déjà produit
++/// par `resolve_template` pour extraire `child_extends`, n'est pas transmis
++/// ici, la signature de cette fonction restant gelée telle que scaffoldée
++/// en Phase 6.3 ; aucune optimisation de réutilisation n'est anticipée.
++/// Aucune logique des Phases 6.5/6.6 n'est anticipée ici — garde et
++/// admission passées, la fonction retourne un refus explicite, pas un
++/// résultat construit.
+ ///
+ /// Retourne :
+-///   `Err(())` : parent illisible (E/S), parent syntaxiquement invalide, ou
+-///               parent déclarant lui-même `extends` (garde single-level).
+-///               Trois messages `cargo:error` distincts.
+-///   `Err(())` (garde passée) : câblage aval non encore implémenté — ce
+-///               n'est pas une erreur du template, seulement l'état actuel
+-///               du pipeline. Distingué des trois précédents par son propre
+-///               message.
++///   `Err(())` : parent illisible (E/S), parent syntaxiquement invalide,
++///               parent déclarant lui-même `extends` (garde single-level),
++///               ou enfant syntaxiquement invalide à la ré-analyse
++///               d'admission. Quatre messages `cargo:error` distincts.
++///   `Err(())` (garde + admission passées) : câblage aval (collecte de
++///               blocs, linker, lowering) non encore implémenté — ce n'est
++///               pas une erreur du template, seulement l'état actuel du
++///               pipeline. Distingué des précédents par son propre message.
+ fn resolve_page_template<'src>(
+     manifest_dir: &str,
+     schema: &str,
+     table: &str,
+     _fixed: &[marius_fragment_forge::FieldSpec],
+     _varlena: &[VarlenField],
+-    _child_src: &'src str,
++    child_src: &'src str,
+     child_extends: &'src str,
+ ) -> Result<(String, TemplateMetrics), ()> {
+     let parent_path = PathBuf::from(relative_path_for_include_str(manifest_dir, child_extends));
+@@ -135,11 +143,29 @@ fn resolve_page_template<'src>(
+         return Err(());
+     }
+ 
+-    // Garde passée : câblage aval (arène, collecte de blocs, linker,
+-    // lowering) hors périmètre de la Phase 6.3.
++    // Admission en arène (Phase 6.4, Documents 1+2 §2) : enfant et parent
++    // obtiennent chacun un TemplateId distinct dans le contexte réel du
++    // build. Ré-analyse de l'enfant : `parse_page_tokens` a déjà validé ce
++    // même contenu dans `resolve_template` (extraction de `child_extends`)
++    // ; un échec ici serait donc un bug du pipeline, pas un cas de template
++    // réellement invalide — message distinct pour le distinguer à la lecture
++    // des logs `cargo:error`.
++    let child_ast = parse_page_tokens(scan(child_src)).map_err(|e| {
++        println!(
++            "cargo:error=DB-Forge [{schema}.{table}] : enfant Mode Page invalide \
++             (ré-analyse pour admission en arène) : {e:?}"
++        );
++    })?;
++
++    let mut arena = PageArena::default();
++    let _child_id = arena.admit(child_ast);
++    let _parent_id = arena.admit(parent_ast);
++
++    // Garde et admission passées : câblage aval (collecte de blocs, linker,
++    // lowering) hors périmètre de la Phase 6.4.
+     println!(
+-        "cargo:error=DB-Forge [{schema}.{table}] : Mode Page — garde single-level passée, \
+-         câblage aval non encore implémenté (Phase 6.3)"
++        "cargo:error=DB-Forge [{schema}.{table}] : Mode Page — admission en arène effectuée, \
++         câblage aval non encore implémenté (Phase 6.4)"
+     );
+     Err(())
+ }
+@@ -160,7 +186,8 @@ fn resolve_page_template<'src>(
+ ///                       `resolve_page_template` (Mode Page — Phase 6.2 :
+ ///                       `detect_extends` est le point de décision de mode
+ ///                       unique de ce fichier ; Phase 6.3 : E/S parent,
+-///                       garde single-level, refus explicite au-delà).
++///                       garde single-level ; Phase 6.4 : admission en
++///                       arène, refus explicite au-delà).
+ ///                       cargo:error déjà émis ; l'appelant doit exit(1).
+ fn resolve_template(
+     manifest_dir: &str,
+@@ -250,6 +277,90 @@ fn resolve_template(
+     Ok(Some((body, metrics)))
+ }
+ 
++// =============================================================================
++// Tests — Phase 6.4
++// =============================================================================
++//
++// NB (transparence de cadrage, pas un invariant du produit) : un build script
++// (`build.rs`) n'est pas un cible testée par `cargo test` dans Cargo standard
++// — il n'existe pas de harness qui exécute ce module automatiquement. Il est
++// néanmoins écrit ici, contre les fonctions réelles de ce fichier et de
++// `marius-fragment-forge`, pour vérification manuelle (`rustc --edition 2024
++// --test build.rs` une fois les crates de dépendance résolues) et pour
++// documenter précisément le jalon vert attendu par la roadmap. Migrer ce test
++// vers une cible `tests/` intégrée à `crates/core/schema` — ce qui rendrait
++// son exécution automatique sous `cargo test` — est un choix d'outillage
++// hors périmètre de la Phase 6.4 (aucune restructuration de crate n'est
++// prévue par cette phase).
++#[cfg(test)]
++mod tests_phase_6_4_arena_admission {
++    use super::read_template_file;
++    use marius_fragment_forge::{PageArena, parse_page_tokens, scan};
++    use std::io::Write;
++    use std::path::PathBuf;
++
++    /// Jalon Vert (roadmap §6.4) — fixtures réelles sur disque (pas de
++    /// construction en mémoire comme en Phase 5.1) : lecture, ré-analyse,
++    /// puis admission en arène de l'enfant et du parent. Vérifie que
++    /// `arena.get(child_id).tokens.len()` et
++    /// `arena.get(parent_id).tokens.len()` correspondent exactement au
++    /// contenu attendu de chaque fixture — pas seulement que l'admission ne
++    /// panique pas.
++    ///
++    /// Portée du test : reproduit la séquence I/O + parse + admission de
++    /// `resolve_page_template` (lecture, `parse_page_tokens(scan(..))`,
++    /// `PageArena::admit` ×2) sans passer par le pipeline complet de
++    /// `build.rs` (connexion PostgreSQL, `main()`) — `resolve_page_template`
++    /// n'est pas `pub`, ce test exerce donc les mêmes briques constitutives
++    /// qu'elle, dans le même ordre, exactement comme le prescrit la
++    /// roadmap (« test d'intégration avec fixtures réelles sur disque »).
++    #[test]
++    fn admitting_child_and_parent_fixtures_yields_expected_token_counts() {
++        let dir = std::env::temp_dir().join(format!(
++            "marius-phase-6-4-arena-admission-{}",
++            std::process::id()
++        ));
++        std::fs::create_dir_all(&dir).expect("création du répertoire de fixture");
++
++        let parent_path: PathBuf = dir.join("parent.marius");
++        let child_path: PathBuf = dir.join("child.marius");
++
++        // Parent : un unique bloc top-level → 3 tokens (BlockOpen, Static,
++        // BlockEnd), extends absent.
++        std::fs::File::create(&parent_path)
++            .and_then(|mut f| f.write_all(b"{% block header %}Default{% endblock %}"))
++            .expect("écriture de la fixture parent");
++
++        // Enfant : extends capturé hors de `tokens` + un bloc top-level → 3
++        // tokens (BlockOpen, Static, BlockEnd).
++        std::fs::File::create(&child_path)
++            .and_then(|mut f| {
++                f.write_all(b"{% extends parent.marius %}{% block header %}Child{% endblock %}")
++            })
++            .expect("écriture de la fixture enfant");
++
++        let parent_src = read_template_file(&parent_path).expect("lecture du parent");
++        let child_src = read_template_file(&child_path).expect("lecture de l'enfant");
++
++        let parent_ast =
++            parse_page_tokens(scan(&parent_src)).expect("parent syntaxiquement valide");
++        let child_ast =
++            parse_page_tokens(scan(&child_src)).expect("enfant syntaxiquement valide");
++
++        assert_eq!(parent_ast.extends, None);
++        assert_eq!(child_ast.extends, Some("parent.marius"));
++
++        let mut arena = PageArena::default();
++        let child_id = arena.admit(child_ast);
++        let parent_id = arena.admit(parent_ast);
++
++        assert_eq!(arena.get(child_id).tokens.len(), 3);
++        assert_eq!(arena.get(parent_id).tokens.len(), 3);
++
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++}
++
+ #[tokio::main]
+ async fn main() -> Result<(), Box<dyn std::error::Error>> {
+     // Invalider le cache Cargo si DATABASE_URL ou ce fichier changent.

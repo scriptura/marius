@@ -22,9 +22,9 @@ use marius_db_forge::{
 };
 
 use marius_fragment_forge::{
-    SchemaIndex, TemplateMetrics, VarlenField, detect_extends, generate_aot_snippet,
-    parse_page_tokens, parse_tokens, relative_path_for_include_str, resolve_and_measure, scan,
-    validate_ast,
+    PageArena, SchemaIndex, TemplateMetrics, VarlenField, collect_blocks, collect_static_refs,
+    detect_extends, generate_aot_snippet, link, parse_page_tokens, parse_tokens,
+    relative_path_for_include_str, resolve_and_measure, scan, validate_ast,
 };
 
 // En-tête statique du fichier généré — pas de couplage sur fragment-forge pour
@@ -83,30 +83,38 @@ fn read_template_file(path: &Path) -> Result<String, ()> {
     })
 }
 
-/// Sous-orchestration Mode Page — E/S parent + garde single-level.
+/// Sous-orchestration Mode Page — E/S parent, garde single-level, admission
+/// en arène, calcul du `LinkPlan` (Phase 6.5).
 ///
 /// Signature gelée à sa forme finale (Document 3 §4) : les paramètres
-/// `_fixed`/`_varlena`/`_child_src` ne sont pas encore consommés par cette
-/// phase (câblage arène/collecte de blocs/linker/lowering : Phases 6.4 à
-/// 6.6), d'où le préfixe `_`. Aucune logique de ces phases n'est anticipée
-/// ici — toute garde passée retourne un refus explicite, pas un résultat
-/// construit.
+/// `_fixed`/`_varlena` restent non consommés (câblage du Lowering et
+/// jonction avec le pipeline gelé : Phase 6.6), d'où le préfixe `_`.
+/// `child_src` reste consommé pour la ré-analyse d'admission (Phase 6.4,
+/// double parse accepté, inchangé ici). Aucune logique de la Phase 6.6
+/// n'est anticipée ici — `LinkPlan` obtenu, la fonction retourne un refus
+/// explicite, pas un résultat construit ni un appel à `lower`.
 ///
 /// Retourne :
-///   `Err(())` : parent illisible (E/S), parent syntaxiquement invalide, ou
-///               parent déclarant lui-même `extends` (garde single-level).
-///               Trois messages `cargo:error` distincts.
-///   `Err(())` (garde passée) : câblage aval non encore implémenté — ce
-///               n'est pas une erreur du template, seulement l'état actuel
-///               du pipeline. Distingué des trois précédents par son propre
-///               message.
+///   `Err(())` : parent illisible (E/S), parent syntaxiquement invalide,
+///               parent déclarant lui-même `extends` (garde single-level),
+///               enfant syntaxiquement invalide à la ré-analyse
+///               d'admission, blocs enfant ou parent syntaxiquement mal
+///               formés (`collect_blocks` — imbrication, `for`, mot-clé
+///               relationnel), ou linking échoué (`link` — bloc orphelin,
+///               fichier `static` introuvable). Sept messages `cargo:error`
+///               distincts au total.
+///   `Err(())` (`LinkPlan` obtenu) : câblage aval (Lowering, jonction avec
+///               `validate_ast`/`resolve_and_measure`/`generate_aot_snippet`)
+///               non encore implémenté — ce n'est pas une erreur du
+///               template, seulement l'état actuel du pipeline. Distingué
+///               des précédents par son propre message.
 fn resolve_page_template<'src>(
     manifest_dir: &str,
     schema: &str,
     table: &str,
     _fixed: &[marius_fragment_forge::FieldSpec],
     _varlena: &[VarlenField],
-    _child_src: &'src str,
+    child_src: &'src str,
     child_extends: &'src str,
 ) -> Result<(String, TemplateMetrics), ()> {
     let parent_path = PathBuf::from(relative_path_for_include_str(manifest_dir, child_extends));
@@ -135,11 +143,63 @@ fn resolve_page_template<'src>(
         return Err(());
     }
 
-    // Garde passée : câblage aval (arène, collecte de blocs, linker,
-    // lowering) hors périmètre de la Phase 6.3.
+    // Admission en arène (Phase 6.4, Documents 1+2 §2) : enfant et parent
+    // obtiennent chacun un TemplateId distinct dans le contexte réel du
+    // build. Ré-analyse de l'enfant : `parse_page_tokens` a déjà validé ce
+    // même contenu dans `resolve_template` (extraction de `child_extends`)
+    // ; un échec ici serait donc un bug du pipeline, pas un cas de template
+    // réellement invalide — message distinct pour le distinguer à la lecture
+    // des logs `cargo:error`.
+    let child_ast = parse_page_tokens(scan(child_src)).map_err(|e| {
+        println!(
+            "cargo:error=DB-Forge [{schema}.{table}] : enfant Mode Page invalide \
+             (ré-analyse pour admission en arène) : {e:?}"
+        );
+    })?;
+
+    let mut arena = PageArena::default();
+    let child_id = arena.admit(child_ast);
+    let parent_id = arena.admit(parent_ast);
+
+    // Collecte de blocs — schéma-libre (Document 2 §3, Phase 5.2-5.4),
+    // câblée ici sur les AST réels de l'arène. Erreurs distinctes
+    // enfant/parent : une plage mal formée du mauvais fichier ne doit pas
+    // se confondre dans un message unique.
+    let child_blocks = collect_blocks(child_id, &arena.get(child_id).tokens).map_err(|errors| {
+        println!("cargo:error=DB-Forge [{schema}.{table}] : blocs enfant mal formés : {errors:?}");
+    })?;
+    let parent_blocks =
+        collect_blocks(parent_id, &arena.get(parent_id).tokens).map_err(|errors| {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : blocs parent mal formés : {errors:?}"
+            );
+        })?;
+
+    // Extraction des références `{% static %}` des deux fichiers (Document 2
+    // §5.7, déjà scaffoldée dans fragment-forge) — aucune déduplication à ce
+    // stade (Document 2 §6.2, hors périmètre).
+    let mut static_refs = collect_static_refs(&arena.get(child_id).tokens);
+    static_refs.extend(collect_static_refs(&arena.get(parent_id).tokens));
+
+    // Vérification d'existence des fichiers `static`, injectée au Linker
+    // sous forme de closure pure modulo E/S (Document 2 §4) — résolution
+    // relative au manifeste, même fonction que pour le chemin `extends`.
+    let file_exists = |path: &str| -> bool {
+        Path::new(&relative_path_for_include_str(manifest_dir, path)).exists()
+    };
+
+    let _plan =
+        link(&parent_blocks, &child_blocks, &static_refs, file_exists).map_err(|errors| {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : linking Mode Page échoué : {errors:?}"
+            );
+        })?;
+
+    // LinkPlan obtenu : câblage aval (Lowering, jonction avec le pipeline
+    // gelé) hors périmètre de la Phase 6.5.
     println!(
-        "cargo:error=DB-Forge [{schema}.{table}] : Mode Page — garde single-level passée, \
-         câblage aval non encore implémenté (Phase 6.3)"
+        "cargo:error=DB-Forge [{schema}.{table}] : Mode Page — LinkPlan calculé, \
+         câblage aval (lowering) non encore implémenté (Phase 6.5)"
     );
     Err(())
 }
@@ -160,7 +220,10 @@ fn resolve_page_template<'src>(
 ///                       `resolve_page_template` (Mode Page — Phase 6.2 :
 ///                       `detect_extends` est le point de décision de mode
 ///                       unique de ce fichier ; Phase 6.3 : E/S parent,
-///                       garde single-level, refus explicite au-delà).
+///                       garde single-level ; Phase 6.4 : admission en
+///                       arène ; Phase 6.5 : collecte de blocs, extraction
+///                       `static`, calcul du `LinkPlan`, refus explicite
+///                       au-delà).
 ///                       cargo:error déjà émis ; l'appelant doit exit(1).
 fn resolve_template(
     manifest_dir: &str,
@@ -248,6 +311,202 @@ fn resolve_template(
     let body = generate_aot_snippet(&tokens, &schema_index);
 
     Ok(Some((body, metrics)))
+}
+
+// =============================================================================
+// Tests — Phase 6.4
+// =============================================================================
+//
+// NB (transparence de cadrage, pas un invariant du produit) : un build script
+// (`build.rs`) n'est pas un cible testée par `cargo test` dans Cargo standard
+// — il n'existe pas de harness qui exécute ce module automatiquement. Il est
+// néanmoins écrit ici, contre les fonctions réelles de ce fichier et de
+// `marius-fragment-forge`, pour vérification manuelle (`rustc --edition 2024
+// --test build.rs` une fois les crates de dépendance résolues) et pour
+// documenter précisément le jalon vert attendu par la roadmap. Migrer ce test
+// vers une cible `tests/` intégrée à `crates/core/schema` — ce qui rendrait
+// son exécution automatique sous `cargo test` — est un choix d'outillage
+// hors périmètre de la Phase 6.4 (aucune restructuration de crate n'est
+// prévue par cette phase).
+#[cfg(test)]
+mod tests_phase_6_4_arena_admission {
+    use super::read_template_file;
+    use marius_fragment_forge::{PageArena, parse_page_tokens, scan};
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    /// Jalon Vert (roadmap §6.4) — fixtures réelles sur disque (pas de
+    /// construction en mémoire comme en Phase 5.1) : lecture, ré-analyse,
+    /// puis admission en arène de l'enfant et du parent. Vérifie que
+    /// `arena.get(child_id).tokens.len()` et
+    /// `arena.get(parent_id).tokens.len()` correspondent exactement au
+    /// contenu attendu de chaque fixture — pas seulement que l'admission ne
+    /// panique pas.
+    ///
+    /// Portée du test : reproduit la séquence I/O + parse + admission de
+    /// `resolve_page_template` (lecture, `parse_page_tokens(scan(..))`,
+    /// `PageArena::admit` ×2) sans passer par le pipeline complet de
+    /// `build.rs` (connexion PostgreSQL, `main()`) — `resolve_page_template`
+    /// n'est pas `pub`, ce test exerce donc les mêmes briques constitutives
+    /// qu'elle, dans le même ordre, exactement comme le prescrit la
+    /// roadmap (« test d'intégration avec fixtures réelles sur disque »).
+    #[test]
+    fn admitting_child_and_parent_fixtures_yields_expected_token_counts() {
+        let dir = std::env::temp_dir().join(format!(
+            "marius-phase-6-4-arena-admission-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("création du répertoire de fixture");
+
+        let parent_path: PathBuf = dir.join("parent.marius");
+        let child_path: PathBuf = dir.join("child.marius");
+
+        // Parent : un unique bloc top-level → 3 tokens (BlockOpen, Static,
+        // BlockEnd), extends absent.
+        std::fs::File::create(&parent_path)
+            .and_then(|mut f| f.write_all(b"{% block header %}Default{% endblock %}"))
+            .expect("écriture de la fixture parent");
+
+        // Enfant : extends capturé hors de `tokens` + un bloc top-level → 3
+        // tokens (BlockOpen, Static, BlockEnd).
+        std::fs::File::create(&child_path)
+            .and_then(|mut f| {
+                f.write_all(b"{% extends parent.marius %}{% block header %}Child{% endblock %}")
+            })
+            .expect("écriture de la fixture enfant");
+
+        let parent_src = read_template_file(&parent_path).expect("lecture du parent");
+        let child_src = read_template_file(&child_path).expect("lecture de l'enfant");
+
+        let parent_ast =
+            parse_page_tokens(scan(&parent_src)).expect("parent syntaxiquement valide");
+        let child_ast = parse_page_tokens(scan(&child_src)).expect("enfant syntaxiquement valide");
+
+        assert_eq!(parent_ast.extends, None);
+        assert_eq!(child_ast.extends, Some("parent.marius"));
+
+        let mut arena = PageArena::default();
+        let child_id = arena.admit(child_ast);
+        let parent_id = arena.admit(parent_ast);
+
+        assert_eq!(arena.get(child_id).tokens.len(), 3);
+        assert_eq!(arena.get(parent_id).tokens.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// =============================================================================
+// Tests — Phase 6.5
+// =============================================================================
+//
+// Même réserve qu'en Phase 6.4 (cf. NB ci-dessus) : ce module n'est pas
+// exécuté automatiquement par `cargo test` puisque `build.rs` n'est pas une
+// cible de test Cargo standard — écrit pour vérification manuelle et
+// migration future vers `tests/`.
+#[cfg(test)]
+mod tests_phase_6_5_collect_and_link {
+    use super::read_template_file;
+    use marius_fragment_forge::{PageArena, collect_blocks, link, parse_page_tokens, scan};
+    use std::path::PathBuf;
+
+    /// Écrit `parent.marius`/`child.marius` sur disque dans un répertoire de
+    /// fixture dédié (nommé par `dir_suffix`, pour éviter toute collision
+    /// entre les deux tests de ce module) et retourne leurs chemins.
+    fn write_fixtures(dir_suffix: &str, parent_src: &[u8], child_src: &[u8]) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "marius-phase-6-5-link-{dir_suffix}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("création du répertoire de fixture");
+
+        let parent_path = dir.join("parent.marius");
+        let child_path = dir.join("child.marius");
+        std::fs::write(&parent_path, parent_src).expect("écriture de la fixture parent");
+        std::fs::write(&child_path, child_src).expect("écriture de la fixture enfant");
+
+        (parent_path, child_path)
+    }
+
+    /// Jalon Vert (roadmap §6.5, cas « override ») — l'enfant redéfinit le
+    /// bloc `title` du parent : le `LinkPlan` retient la plage de l'enfant
+    /// (`source.template == child_id`), pas celle du parent, vérifié par
+    /// introspection directe du plan (pas d'exécution de `lower`, hors
+    /// périmètre de cette phase). Séquence identique à
+    /// `resolve_page_template` : lecture disque, ré-analyse, admission en
+    /// arène, `collect_blocks` ×2, `link`.
+    #[test]
+    fn override_case_plan_retains_child_block() {
+        let (parent_path, child_path) = write_fixtures(
+            "override",
+            b"{% block title %}ParentTitle{% endblock %}",
+            b"{% extends parent.marius %}{% block title %}ChildTitle{% endblock %}",
+        );
+
+        let parent_src = read_template_file(&parent_path).expect("lecture du parent");
+        let child_src = read_template_file(&child_path).expect("lecture de l'enfant");
+
+        let parent_ast =
+            parse_page_tokens(scan(&parent_src)).expect("parent syntaxiquement valide");
+        let child_ast = parse_page_tokens(scan(&child_src)).expect("enfant syntaxiquement valide");
+
+        let mut arena = PageArena::default();
+        let child_id = arena.admit(child_ast);
+        let parent_id = arena.admit(parent_ast);
+
+        let child_blocks = collect_blocks(child_id, &arena.get(child_id).tokens)
+            .expect("blocs enfant bien formés");
+        let parent_blocks = collect_blocks(parent_id, &arena.get(parent_id).tokens)
+            .expect("blocs parent bien formés");
+
+        let plan = link(&parent_blocks, &child_blocks, &[], |_| true)
+            .expect("linking doit réussir : bloc correspondant, aucune référence static");
+
+        assert_eq!(plan.substitutions.len(), 1);
+        assert_eq!(plan.substitutions[0].name, "title");
+        assert_eq!(plan.substitutions[0].source.template, child_id);
+
+        let _ = std::fs::remove_dir_all(parent_path.parent().unwrap());
+    }
+
+    /// Jalon Vert (roadmap §6.5, cas « fallback parent ») — l'enfant ne
+    /// redéfinit pas le bloc `footer` du parent : le `LinkPlan` retient la
+    /// plage du parent lui-même (`source.template == parent_id`),
+    /// comportement par défaut acté au Document 2 §4. Même séquence que le
+    /// cas « override » ci-dessus.
+    #[test]
+    fn fallback_case_plan_retains_parent_block_when_not_overridden() {
+        let (parent_path, child_path) = write_fixtures(
+            "fallback",
+            b"{% block footer %}ParentFooter{% endblock %}",
+            b"{% extends parent.marius %}",
+        );
+
+        let parent_src = read_template_file(&parent_path).expect("lecture du parent");
+        let child_src = read_template_file(&child_path).expect("lecture de l'enfant");
+
+        let parent_ast =
+            parse_page_tokens(scan(&parent_src)).expect("parent syntaxiquement valide");
+        let child_ast = parse_page_tokens(scan(&child_src)).expect("enfant syntaxiquement valide");
+
+        let mut arena = PageArena::default();
+        let child_id = arena.admit(child_ast);
+        let parent_id = arena.admit(parent_ast);
+
+        let child_blocks = collect_blocks(child_id, &arena.get(child_id).tokens)
+            .expect("blocs enfant bien formés (aucun bloc)");
+        let parent_blocks = collect_blocks(parent_id, &arena.get(parent_id).tokens)
+            .expect("blocs parent bien formés");
+
+        let plan = link(&parent_blocks, &child_blocks, &[], |_| true)
+            .expect("linking doit réussir : aucun bloc enfant, aucune référence static");
+
+        assert_eq!(plan.substitutions.len(), 1);
+        assert_eq!(plan.substitutions[0].name, "footer");
+        assert_eq!(plan.substitutions[0].source.template, parent_id);
+
+        let _ = std::fs::remove_dir_all(parent_path.parent().unwrap());
+    }
 }
 
 #[tokio::main]

@@ -5,11 +5,11 @@ Nous suivons strictement la roadmap.
 
 **Mission**
 
-Implémenter exclusivement la **Phase 6.4**.
+Implémenter exclusivement la **Phase 6.6**.
 
 **Contraintes**
 
-- ne modifier aucune fonctionnalité en dehors du périmètre de la Phase 6.4 ;
+- ne modifier aucune fonctionnalité en dehors du périmètre de la Phase 6.6 ;
 - ne préparer aucun comportement relevant des phases ultérieures ;
 - n'introduire aucun `todo!`, `unimplemented!` ou code spéculatif ;
 - respecter les invariants définis par les documents d'architecture ;
@@ -22,9 +22,9 @@ Implémenter exclusivement la **Phase 6.4**.
 **À la fin de l'implémentation :**
 
 - exécuter `cargo fmt --check`, `cargo test` et `cargo clippy --all-targets` ; si l'un d'eux échoue à cause d'un problème préexistant hors périmètre, l'identifier explicitement et confirmer qu'aucune régression n'a été introduite dans le diff de cette phase ;
-- confirmer que le périmètre de la Phase 6.4 a été strictement respecté ;
-- fournir le diff Git complet (pattern : `phase-X.X.diff`) ;
-- fournir le rapport de fin de phase suivant le modèle en pièce jointe (pattern : `phase-X.X.md`) ;
+- confirmer que le périmètre de la Phase 6.6 a été strictement respecté ;
+- fournir le diff Git complet (pattern : `phase-6.6.diff`) ;
+- fournir le rapport de fin de phase suivant le modèle en pièce jointe (pattern : `phase-6.6.md`) ;
 - retourner le fichier `build.rs` en artefact autonome complet.
 
 ---
@@ -43,7 +43,7 @@ Liste des documents en pièce jointe :
 
 - ✅ Phase 4.x => architecture + roadmap + doc1 + lib.rs + rapport end
 - ✅ Phase 5.x => architecture + roadmap + doc2 + lib.rs + rapport end
-- Phase 6.x => architecture + roadmap + doc2 + doc3 + lib.rs + build.rs + rapport end
+- Phase 6.x => architecture + roadmap + doc1 + doc2 + doc3 + lib.rs + build.rs + rapport end
 
 ## Stem exact des fichiers :
 
