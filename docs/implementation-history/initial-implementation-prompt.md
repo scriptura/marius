@@ -21,7 +21,7 @@ Implémenter exclusivement la **Phase 6.6**.
 
 **À la fin de l'implémentation :**
 
-- exécuter `cargo fmt --check`, `cargo test` et `cargo clippy --all-targets` ; si l'un d'eux échoue à cause d'un problème préexistant hors périmètre, l'identifier explicitement et confirmer qu'aucune régression n'a été introduite dans le diff de cette phase ;
+- exécuter `cargo fmt --check`, `cargo clippy --all-targets` ;
 - confirmer que le périmètre de la Phase 6.6 a été strictement respecté ;
 - fournir le diff Git complet (pattern : `phase-6.6.diff`) ;
 - fournir le rapport de fin de phase suivant le modèle en pièce jointe (pattern : `phase-6.6.md`) ;

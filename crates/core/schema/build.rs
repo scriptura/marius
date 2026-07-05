@@ -23,7 +23,7 @@ use marius_db_forge::{
 
 use marius_fragment_forge::{
     PageArena, SchemaIndex, TemplateMetrics, VarlenField, collect_blocks, collect_static_refs,
-    detect_extends, generate_aot_snippet, link, parse_page_tokens, parse_tokens,
+    detect_extends, generate_aot_snippet, link, lower, parse_page_tokens, parse_tokens,
     relative_path_for_include_str, resolve_and_measure, scan, validate_ast,
 };
 
@@ -83,37 +83,40 @@ fn read_template_file(path: &Path) -> Result<String, ()> {
     })
 }
 
-/// Sous-orchestration Mode Page — E/S parent, garde single-level, admission
-/// en arène, calcul du `LinkPlan` (Phase 6.5).
+/// Sous-orchestration Mode Page — pipeline complet : E/S parent, garde
+/// single-level, admission en arène, `LinkPlan`, Lowering, jonction avec le
+/// pipeline gelé (`validate_ast` → `resolve_and_measure` →
+/// `generate_aot_snippet`). Dernière phase de la roadmap (6.6).
 ///
-/// Signature gelée à sa forme finale (Document 3 §4) : les paramètres
-/// `_fixed`/`_varlena` restent non consommés (câblage du Lowering et
-/// jonction avec le pipeline gelé : Phase 6.6), d'où le préfixe `_`.
-/// `child_src` reste consommé pour la ré-analyse d'admission (Phase 6.4,
-/// double parse accepté, inchangé ici). Aucune logique de la Phase 6.6
-/// n'est anticipée ici — `LinkPlan` obtenu, la fonction retourne un refus
-/// explicite, pas un résultat construit ni un appel à `lower`.
+/// Signature gelée à sa forme finale (Document 3 §4), désormais entièrement
+/// consommée : `fixed`/`varlena` alimentent le `SchemaIndex` du point de
+/// jonction, au même titre que dans le chemin Mode Fragment de
+/// `resolve_template`. Plus aucun paramètre `_`-préfixé.
+///
+/// Point de convergence (Document 3 §2) : à partir de `lower`, cette
+/// fonction appelle exactement les trois fonctions gelées, sans
+/// modification de signature ni de corps, dans le même ordre que le chemin
+/// Mode Fragment — aucun branchement de mode ne survit à ce point.
 ///
 /// Retourne :
 ///   `Err(())` : parent illisible (E/S), parent syntaxiquement invalide,
 ///               parent déclarant lui-même `extends` (garde single-level),
 ///               enfant syntaxiquement invalide à la ré-analyse
 ///               d'admission, blocs enfant ou parent syntaxiquement mal
-///               formés (`collect_blocks` — imbrication, `for`, mot-clé
-///               relationnel), ou linking échoué (`link` — bloc orphelin,
-///               fichier `static` introuvable). Sept messages `cargo:error`
-///               distincts au total.
-///   `Err(())` (`LinkPlan` obtenu) : câblage aval (Lowering, jonction avec
-///               `validate_ast`/`resolve_and_measure`/`generate_aot_snippet`)
-///               non encore implémenté — ce n'est pas une erreur du
-///               template, seulement l'état actuel du pipeline. Distingué
-///               des précédents par son propre message.
+///               formés, linking échoué (bloc orphelin, fichier `static`
+///               introuvable), template Mode Page sémantiquement invalide
+///               (`validate_ast`), ou résolution de capacité échouée
+///               (`resolve_and_measure` — fichier `include`/`static`
+///               illisible). Neuf messages `cargo:error` distincts.
+///   `Ok((body, metrics))` : template Mode Page résolu avec succès —
+///               structurellement indiscernable, à ce point, d'un résultat
+///               Mode Fragment (Document 2 §5, postcondition finale).
 fn resolve_page_template<'src>(
     manifest_dir: &str,
     schema: &str,
     table: &str,
-    _fixed: &[marius_fragment_forge::FieldSpec],
-    _varlena: &[VarlenField],
+    fixed: &[marius_fragment_forge::FieldSpec],
+    varlena: &[VarlenField],
     child_src: &'src str,
     child_extends: &'src str,
 ) -> Result<(String, TemplateMetrics), ()> {
@@ -188,33 +191,63 @@ fn resolve_page_template<'src>(
         Path::new(&relative_path_for_include_str(manifest_dir, path)).exists()
     };
 
-    let _plan =
+    let plan =
         link(&parent_blocks, &child_blocks, &static_refs, file_exists).map_err(|errors| {
             println!(
                 "cargo:error=DB-Forge [{schema}.{table}] : linking Mode Page échoué : {errors:?}"
             );
         })?;
 
-    // LinkPlan obtenu : câblage aval (Lowering, jonction avec le pipeline
-    // gelé) hors périmètre de la Phase 6.5.
-    println!(
-        "cargo:error=DB-Forge [{schema}.{table}] : Mode Page — LinkPlan calculé, \
-         câblage aval (lowering) non encore implémenté (Phase 6.5)"
-    );
-    Err(())
+    // Lowering (Document 2 §5, dernière étape du domaine composition) :
+    // fusion irréversible parent+enfant selon `plan`, projection vers
+    // `FlatPageToken` — Block/TemplateId/Static(StaticPartialRef) cessent
+    // d'exister à partir d'ici. Fonction totale (pas de `Result`) : par
+    // construction, `plan` provient d'un `link` réussi, donc toute
+    // référence de composition est déjà résolue.
+    let mut tokens = lower(&arena.get(parent_id).tokens, &plan, &arena);
+
+    // Point de jonction unique (Document 3 §2) : à partir d'ici, identique
+    // au chemin Mode Fragment de `resolve_template` — mêmes fonctions,
+    // mêmes signatures, aucun paramètre de mode.
+    validate_ast(&tokens).map_err(|errors| {
+        println!(
+            "cargo:error=DB-Forge [{schema}.{table}] : Mode Page sémantiquement invalide : {errors:?}"
+        );
+    })?;
+
+    let schema_index = SchemaIndex { fixed, varlena };
+
+    let manifest_dir_owned = manifest_dir.to_string();
+    let get_file_size = move |rel_path: &str| -> Result<usize, String> {
+        std::fs::metadata(Path::new(&manifest_dir_owned).join(rel_path))
+            .map(|m| m.len() as usize)
+            .map_err(|e| e.to_string())
+    };
+
+    let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size).map_err(|errors| {
+        println!(
+            "cargo:error=DB-Forge [{schema}.{table}] : résolution du template Mode Page échouée : {errors:?}"
+        );
+    })?;
+
+    let body = generate_aot_snippet(&tokens, &schema_index);
+
+    Ok((body, metrics))
 }
 
-/// Tente de résoudre le template `.marius` d'une table via le pipeline complet
-/// Fragment-Forge : scan → parse_tokens → validate_ast → resolve_and_measure →
-/// generate_aot_snippet.
+/// Tente de résoudre le template `.marius` d'une table via le pipeline
+/// Fragment-Forge complet : scan → (parse_tokens | Mode Page : parse_page_tokens
+/// → arène → link → lower) → validate_ast → resolve_and_measure →
+/// generate_aot_snippet — convergence sur `Vec<FlatPageToken<'src>>` avant le
+/// point de jonction (Document 3 §2).
 ///
 /// Chemin attendu : `{manifest_dir}/templates/{schema}/{table}.marius`.
 ///
 /// Retourne :
 ///   `Ok(None)`        : fichier absent — cargo:warning émis, fallback stub.
-///   `Ok(Some((body, metrics)))` : template résolu avec succès (Mode
-///                       Fragment, ou Mode Page une fois le pipeline complet
-///                       câblé — hors portée avant Phase 6.6).
+///   `Ok(Some((body, metrics)))` : template résolu avec succès, Mode
+///                       Fragment ou Mode Page indifféremment — même
+///                       structure de retour, aucun marqueur de mode.
 ///   `Err(())`         : toute erreur de parsing/validation/résolution
 ///                       (Mode Fragment), ou tout échec de
 ///                       `resolve_page_template` (Mode Page — Phase 6.2 :
@@ -222,8 +255,8 @@ fn resolve_page_template<'src>(
 ///                       unique de ce fichier ; Phase 6.3 : E/S parent,
 ///                       garde single-level ; Phase 6.4 : admission en
 ///                       arène ; Phase 6.5 : collecte de blocs, extraction
-///                       `static`, calcul du `LinkPlan`, refus explicite
-///                       au-delà).
+///                       `static`, calcul du `LinkPlan` ; Phase 6.6 :
+///                       Lowering, jonction avec le pipeline gelé).
 ///                       cargo:error déjà émis ; l'appelant doit exit(1).
 fn resolve_template(
     manifest_dir: &str,
@@ -506,6 +539,308 @@ mod tests_phase_6_5_collect_and_link {
         assert_eq!(plan.substitutions[0].source.template, parent_id);
 
         let _ = std::fs::remove_dir_all(parent_path.parent().unwrap());
+    }
+}
+
+// =============================================================================
+// Tests — Phase 6.6
+// =============================================================================
+//
+// Même réserve qu'en Phases 6.4/6.5 (cf. NB plus haut) : module non exécuté
+// automatiquement par `cargo test` (build.rs n'est pas une cible de test
+// Cargo standard) — écrit pour vérification manuelle et migration future
+// vers `tests/`.
+#[cfg(test)]
+mod tests_phase_6_6_full_pipeline {
+    use super::read_template_file;
+    use marius_fragment_forge::{
+        PageArena, SchemaIndex, collect_blocks, generate_aot_snippet, link, lower,
+        parse_page_tokens, resolve_and_measure, scan, validate_ast,
+    };
+    use std::path::PathBuf;
+
+    fn write_fixtures(dir_suffix: &str, parent_src: &[u8], child_src: &[u8]) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "marius-phase-6-6-pipeline-{dir_suffix}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("création du répertoire de fixture");
+
+        let parent_path = dir.join("parent.marius");
+        let child_path = dir.join("child.marius");
+        std::fs::write(&parent_path, parent_src).expect("écriture de la fixture parent");
+        std::fs::write(&child_path, child_src).expect("écriture de la fixture enfant");
+
+        (parent_path, child_path)
+    }
+
+    /// Jalon Vert (roadmap §6.6, cas « override ») — reproduit intégralement
+    /// la séquence de `resolve_page_template` sur fixtures disque réelles,
+    /// jusqu'au point de jonction : lecture, parse ×2, admission en arène,
+    /// `collect_blocks` ×2, `link`, `lower`, `validate_ast`,
+    /// `resolve_and_measure`, `generate_aot_snippet`. Aucun `{{ champ }}`
+    /// dans ces fixtures : `SchemaIndex` vide (`fixed`/`varlena` à `&[]`)
+    /// suffit, `get_file_size` n'est jamais appelé (aucun `{% static %}`).
+    #[test]
+    fn override_case_pipeline_produces_expected_body_and_metrics() {
+        let (parent_path, child_path) = write_fixtures(
+            "override",
+            b"<html>{% block title %}ParentTitle{% endblock %}</html>",
+            b"{% extends parent.marius %}{% block title %}ChildTitle{% endblock %}",
+        );
+
+        let parent_src = read_template_file(&parent_path).expect("lecture du parent");
+        let child_src = read_template_file(&child_path).expect("lecture de l'enfant");
+
+        let parent_ast =
+            parse_page_tokens(scan(&parent_src)).expect("parent syntaxiquement valide");
+        let child_ast = parse_page_tokens(scan(&child_src)).expect("enfant syntaxiquement valide");
+
+        let mut arena = PageArena::default();
+        let child_id = arena.admit(child_ast);
+        let parent_id = arena.admit(parent_ast);
+
+        let child_blocks = collect_blocks(child_id, &arena.get(child_id).tokens)
+            .expect("blocs enfant bien formés");
+        let parent_blocks = collect_blocks(parent_id, &arena.get(parent_id).tokens)
+            .expect("blocs parent bien formés");
+
+        let plan = link(&parent_blocks, &child_blocks, &[], |_| true)
+            .expect("linking doit réussir : bloc correspondant, aucune référence static");
+
+        let mut tokens = lower(&arena.get(parent_id).tokens, &plan, &arena);
+        validate_ast(&tokens).expect("aucun Field/If dans ces fixtures : validation triviale");
+
+        let schema_index = SchemaIndex {
+            fixed: &[],
+            varlena: &[],
+        };
+        let get_file_size =
+            |_: &str| -> Result<usize, String> { Err("aucun static attendu dans ce test".into()) };
+
+        let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size)
+            .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
+
+        // "<html>" (6) + "ChildTitle" (10) + "</html>" (7) = 23 — le contenu
+        // parent substitué ("ParentTitle") ne doit apparaître nulle part.
+        assert_eq!(metrics.total_static_bytes, 23);
+        assert_eq!(metrics.total_dynamic_bytes, 0);
+        assert_eq!(metrics.include_count, 0);
+
+        let body = generate_aot_snippet(&tokens, &schema_index);
+        assert!(body.contains("buf.push_str(\"ChildTitle\")"));
+        assert!(!body.contains("ParentTitle"));
+
+        let _ = std::fs::remove_dir_all(parent_path.parent().unwrap());
+    }
+
+    /// Jalon Vert (roadmap §6.6, cas « fallback parent ») — l'enfant ne
+    /// redéfinit pas le bloc `footer` : le contenu parent traverse
+    /// intégralement le Lowering et se retrouve dans le `body` généré.
+    #[test]
+    fn fallback_case_pipeline_produces_expected_body_and_metrics() {
+        let (parent_path, child_path) = write_fixtures(
+            "fallback",
+            b"<footer>{% block footer %}ParentFooter{% endblock %}</footer>",
+            b"{% extends parent.marius %}",
+        );
+
+        let parent_src = read_template_file(&parent_path).expect("lecture du parent");
+        let child_src = read_template_file(&child_path).expect("lecture de l'enfant");
+
+        let parent_ast =
+            parse_page_tokens(scan(&parent_src)).expect("parent syntaxiquement valide");
+        let child_ast = parse_page_tokens(scan(&child_src)).expect("enfant syntaxiquement valide");
+
+        let mut arena = PageArena::default();
+        let child_id = arena.admit(child_ast);
+        let parent_id = arena.admit(parent_ast);
+
+        let child_blocks = collect_blocks(child_id, &arena.get(child_id).tokens)
+            .expect("blocs enfant bien formés (aucun bloc)");
+        let parent_blocks = collect_blocks(parent_id, &arena.get(parent_id).tokens)
+            .expect("blocs parent bien formés");
+
+        let plan = link(&parent_blocks, &child_blocks, &[], |_| true)
+            .expect("linking doit réussir : aucun bloc enfant, aucune référence static");
+
+        let mut tokens = lower(&arena.get(parent_id).tokens, &plan, &arena);
+        validate_ast(&tokens).expect("aucun Field/If dans ces fixtures : validation triviale");
+
+        let schema_index = SchemaIndex {
+            fixed: &[],
+            varlena: &[],
+        };
+        let get_file_size =
+            |_: &str| -> Result<usize, String> { Err("aucun static attendu dans ce test".into()) };
+
+        let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size)
+            .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
+
+        // "<footer>" (8) + "ParentFooter" (12) + "</footer>" (9) = 29.
+        assert_eq!(metrics.total_static_bytes, 29);
+        assert_eq!(metrics.total_dynamic_bytes, 0);
+        assert_eq!(metrics.include_count, 0);
+
+        let body = generate_aot_snippet(&tokens, &schema_index);
+        assert!(body.contains("buf.push_str(\"ParentFooter\")"));
+
+        let _ = std::fs::remove_dir_all(parent_path.parent().unwrap());
+    }
+
+    /// Jalon Vert (roadmap §6.6, critère oublié en première passe) — le
+    /// `body` généré n'est pas seulement vérifié par sous-chaîne : il est
+    /// réellement compilé via `rustc --edition 2024 --crate-type lib`,
+    /// même critère que la roadmap Fragment Phase 3.3. Enveloppe minimale :
+    /// `fn render(buf: &mut String) { <body> }` — suffisante ici, ces
+    /// fixtures ne contiennent aucun `Field`/`IfBool`/`StaticInclude` (donc
+    /// aucune référence à `record`, `varlena`, ou `marius_html_escape`,
+    /// tous définis par ailleurs dans `GENERATED_HEADER`, hors périmètre
+    /// de ce test).
+    ///
+    /// Précondition d'environnement : `rustc` doit être sur le `PATH` —
+    /// c'est le cas de toute machine construisant ce workspace (même
+    /// toolchain que celle qui compile `build.rs` lui-même).
+    #[test]
+    fn override_case_generated_body_compiles_via_rustc() {
+        let (parent_path, child_path) = write_fixtures(
+            "rustc-check",
+            b"<html>{% block title %}ParentTitle{% endblock %}</html>",
+            b"{% extends parent.marius %}{% block title %}ChildTitle{% endblock %}",
+        );
+
+        let parent_src = read_template_file(&parent_path).expect("lecture du parent");
+        let child_src = read_template_file(&child_path).expect("lecture de l'enfant");
+
+        let parent_ast =
+            parse_page_tokens(scan(&parent_src)).expect("parent syntaxiquement valide");
+        let child_ast = parse_page_tokens(scan(&child_src)).expect("enfant syntaxiquement valide");
+
+        let mut arena = PageArena::default();
+        let child_id = arena.admit(child_ast);
+        let parent_id = arena.admit(parent_ast);
+
+        let child_blocks = collect_blocks(child_id, &arena.get(child_id).tokens)
+            .expect("blocs enfant bien formés");
+        let parent_blocks = collect_blocks(parent_id, &arena.get(parent_id).tokens)
+            .expect("blocs parent bien formés");
+
+        let plan = link(&parent_blocks, &child_blocks, &[], |_| true)
+            .expect("linking doit réussir : bloc correspondant, aucune référence static");
+
+        let mut tokens = lower(&arena.get(parent_id).tokens, &plan, &arena);
+        validate_ast(&tokens).expect("aucun Field/If dans ces fixtures : validation triviale");
+
+        let schema_index = SchemaIndex {
+            fixed: &[],
+            varlena: &[],
+        };
+        let get_file_size =
+            |_: &str| -> Result<usize, String> { Err("aucun static attendu dans ce test".into()) };
+        resolve_and_measure(&mut tokens, &schema_index, get_file_size)
+            .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
+
+        let body = generate_aot_snippet(&tokens, &schema_index);
+
+        let check_dir = std::env::temp_dir().join(format!(
+            "marius-phase-6-6-rustc-check-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&check_dir).expect("création du répertoire de vérification rustc");
+
+        let src_path = check_dir.join("generated_snippet_check.rs");
+        let wrapped = format!(
+            "#[allow(dead_code, unused_mut)]\nfn render(buf: &mut String) {{\n{body}\n}}\n"
+        );
+        std::fs::write(&src_path, &wrapped).expect("écriture du fichier source à compiler");
+
+        let out_path = check_dir.join("generated_snippet_check.rmeta");
+        let output = std::process::Command::new("rustc")
+            .args([
+                "--edition",
+                "2024",
+                "--crate-type",
+                "lib",
+                "--emit",
+                "metadata",
+            ])
+            .arg("-o")
+            .arg(&out_path)
+            .arg(&src_path)
+            .output()
+            .expect(
+                "rustc doit être disponible sur le PATH — même toolchain que celle qui \
+                 compile ce build.rs",
+            );
+
+        assert!(
+            output.status.success(),
+            "le snippet Rust généré par generate_aot_snippet ne compile pas :\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let _ = std::fs::remove_dir_all(&check_dir);
+        let _ = std::fs::remove_dir_all(parent_path.parent().unwrap());
+    }
+
+    /// Jalon Vert (roadmap §6.6, critère oublié en première passe) —
+    /// invalidation de cache : le Document 3 §5 exige qu'un `base.marius`
+    /// modifié invalide le build au même titre que le fichier de la table,
+    /// via `println!("cargo:rerun-if-changed=...")` pour les deux chemins.
+    ///
+    /// Portée assumée de ce test, documentée explicitement : capturer
+    /// littéralement la sortie `cargo:` de `println!` depuis l'intérieur du
+    /// même process de test exigerait soit une redirection de descripteur
+    /// de fichier au niveau OS (FFI `dup`/`dup2` non liée par `std` stable
+    /// sans la crate `libc`), soit un process enfant réexécutant `cargo
+    /// test` récursivement — les deux disproportionnés pour ce seul
+    /// critère, et hors périmètre d'une session de test (pas de nouvelle
+    /// dépendance, pas de code `unsafe` ajouté). Ce test vérifie donc la
+    /// propriété qui rend ces deux lignes atteignables : `resolve_template`
+    /// (chemin complet, enfant + parent) lit effectivement les deux
+    /// fichiers et retourne `Ok(Some(..))` — les deux `println!` de
+    /// `cargo:rerun-if-changed` précèdent inconditionnellement toute
+    /// lecture réussie dans le code de production (vérifié par relecture),
+    /// donc leur exécution est une conséquence directe et nécessaire de ce
+    /// succès, pas une coïncidence.
+    #[test]
+    fn resolve_template_end_to_end_reads_both_child_and_parent_paths() {
+        let manifest_dir = std::env::temp_dir().join(format!(
+            "marius-phase-6-6-rerun-if-changed-{}",
+            std::process::id()
+        ));
+        let templates_dir = manifest_dir.join("templates").join("blog");
+        std::fs::create_dir_all(&templates_dir)
+            .expect("création de l'arborescence templates/{schema}");
+
+        let parent_path = templates_dir.join("base.marius");
+        let child_path = templates_dir.join("post.marius");
+
+        std::fs::write(
+            &parent_path,
+            b"<html>{% block title %}Base{% endblock %}</html>",
+        )
+        .expect("écriture de la fixture parent");
+        std::fs::write(
+            &child_path,
+            b"{% extends templates/blog/base.marius %}{% block title %}Post{% endblock %}",
+        )
+        .expect("écriture de la fixture enfant");
+
+        let manifest_dir_str = manifest_dir.to_string_lossy().into_owned();
+        let result = super::resolve_template(&manifest_dir_str, "blog", "post", &[], &[]);
+
+        assert!(
+            result.is_ok(),
+            "resolve_template doit réussir sur ces fixtures pour que les deux chemins \
+             (enfant + parent) aient effectivement été atteints et lus"
+        );
+        assert!(
+            result.unwrap().is_some(),
+            "template présent sur disque : Ok(Some(..)) attendu, pas Ok(None)"
+        );
+
+        let _ = std::fs::remove_dir_all(&manifest_dir);
     }
 }
 
