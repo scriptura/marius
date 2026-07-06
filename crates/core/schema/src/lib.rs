@@ -190,10 +190,10 @@ mod tests {
             buf.len()
         );
 
-        assert!(buf.starts_with("<article"), "tag ouvrant manquant");
+        assert!(buf.starts_with("<!DOCTYPE html>"), "DOCTYPE manquant");
         assert!(
-            buf.trim_end().ends_with("</article>"),
-            "tag fermant manquant"
+            buf.trim_end().ends_with("</html>"),
+            "balise </html> manquante"
         );
         println!(
             "[no-realloc] ContentCore : cap={}, len={}, ratio={:.0}%",

@@ -73,16 +73,19 @@ static ROUTE_TABLE: &[RouteEntry] = &[
         pattern: "/product/:id",
         packfile_key: "commerce_product_core",
         id_source: IdSource::PathParam("id"),
+        content_type: "text/html; charset=utf-8",
     },
     RouteEntry {
         pattern: "/content/:id",
         packfile_key: "content_core",
         id_source: IdSource::PathParam("id"),
+        content_type: "text/html; charset=utf-8",
     },
     RouteEntry {
         pattern: "/",
         packfile_key: "pages_homepage",
         id_source: IdSource::Fixed(1),
+        content_type: "text/html; charset=utf-8",
     },
 ];
 
@@ -490,11 +493,13 @@ mod tests {
                     pattern: "/produit/:id",
                     packfile_key: key,
                     id_source: IdSource::PathParam("id"),
+                    content_type: "text/html; charset=utf-8",
                 },
                 RouteEntry {
                     pattern: "/",
                     packfile_key: key,
                     id_source: IdSource::Fixed(1),
+                    content_type: "text/html; charset=utf-8",
                 },
             ]
             .into_boxed_slice(),
@@ -554,6 +559,7 @@ mod tests {
                 pattern: "/produit/:id",
                 packfile_key: key,
                 id_source: IdSource::PathParam("id"),
+                content_type: "text/html; charset=utf-8",
             }]
             .into_boxed_slice(),
         );
@@ -598,6 +604,7 @@ mod tests {
                 pattern: "/produit/:id",
                 packfile_key: key,
                 id_source: IdSource::PathParam("id"),
+                content_type: "text/html; charset=utf-8",
             }]
             .into_boxed_slice(),
         );

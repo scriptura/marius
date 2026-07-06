@@ -60,12 +60,12 @@ Dispatcher.
 Deux formats binaires distincts coexistent dans le projet — à ne jamais
 confondre :
 
-| | `store.bin` | packfile HTML (ce document) |
-|---|---|---|
-| Contenu | `StorageRow[]` brutes, `#[repr(C)]` | Fragments HTML concatenés |
-| Lecteur | `PackfileReader<P>` (`marius_projection`) | `PackHtmlIndex` (§5) |
-| Consommateur | `fetch_batch` (relit les données pour re-render) | Render Shell (sert le HTML fini) |
-| Format index | Header en tête (`PackfileStoreHeader`) | **Footer en fin de fichier** (§3) |
+|              | `store.bin`                                      | packfile HTML (ce document)       |
+| ------------ | ------------------------------------------------ | --------------------------------- |
+| Contenu      | `StorageRow[]` brutes, `#[repr(C)]`              | Fragments HTML concatenés         |
+| Lecteur      | `PackfileReader<P>` (`marius_projection`)        | `PackHtmlIndex` (§5)              |
+| Consommateur | `fetch_batch` (relit les données pour re-render) | Render Shell (sert le HTML fini)  |
+| Format index | Header en tête (`PackfileStoreHeader`)           | **Footer en fin de fichier** (§3) |
 
 ---
 
@@ -160,6 +160,7 @@ pub struct RouteEntry {
     /// (`{schema}_{table}_pack.bin` ou `pages_{route}_pack.bin`, ADR-008 §4.4).
     pub packfile_key: &'static str,
     pub id_source:    IdSource,
+    pub content_type: &'static str, // ex. "text/html; charset=utf-8", "application/json"
 }
 
 /// Table plate, recherche linéaire à l'enregistrement des routes Axum
@@ -170,16 +171,19 @@ pub static ROUTE_TABLE: &[RouteEntry] = &[
         pattern:      "/produit/{id}",
         packfile_key: "pages_product_public",
         id_source:    IdSource::PathParam("id"),
+        content_type: "text/html; charset=utf-8",
     },
     RouteEntry {
         pattern:      "/fragment/produit/{id}",
-        packfile_key: "commerce_product_core",   // fragment seul, pour HTMX
+        packfile_key: "commerce_product_core",
         id_source:    IdSource::PathParam("id"),
+        content_type: "text/html; charset=utf-8",
     },
     RouteEntry {
         pattern:      "/",
         packfile_key: "pages_homepage",
-        id_source:    IdSource::Fixed(1),          // ADR-009 — table de synthèse, singleton
+        id_source:    IdSource::Fixed(1),
+        content_type: "text/html; charset=utf-8",
     },
 ];
 ```
@@ -189,6 +193,15 @@ boucle `for entry in ROUTE_TABLE { router = router.route(entry.pattern, ...) }`)
 et fournit, par closure capturée, le `packfile_key` et l'`id_source` au
 handler — zéro lookup dynamique de pattern à la requête, Axum a déjà
 résolu le pattern matching en amont via son propre routeur.
+
+```
+static DUMP_ROUTE_TABLE: &[RouteEntry] = &[RouteEntry {
+    pattern:      "/content/:id",
+    packfile_key: "content_core",
+    id_source:    IdSource::PathParam("id"),
+    content_type: "text/html; charset=utf-8",
+}];
+```
 
 ---
 
@@ -404,7 +417,7 @@ besoin ; ADR-008 : ne pas généraliser `CompositionIndex` par anticipation).
 Note pour cette voie différée : `sendfile(2)` sous Linux accepte un pointeur
 d'offset explicite (`sendfile(out_fd, in_fd, &offset, count)`) — quand cet
 offset est non nul, l'appel lit à la position indiquée sans jamais modifier
-le curseur partagé du fd source, et met à jour la variable *pointée* (propre
+le curseur partagé du fd source, et met à jour la variable _pointée_ (propre
 à l'appelant), pas un état partagé. L'Option B sera donc, elle aussi,
 immunisée contre la race condition ci-dessus dès qu'elle sera implémentée
 avec ce paramètre — à condition de ne jamais omettre ce pointeur d'offset.
@@ -466,7 +479,7 @@ pub async fn regenerate_and_swap<P: Projection>(
 ```
 
 **Ce que cette fonction ne fait pas, volontairement** : elle ne sait rien de
-*quelles autres pages* doivent être régénérées en cascade (ADR-008 §5 — la
+_quelles autres pages_ doivent être régénérées en cascade (ADR-008 §5 — la
 Forge génère cette relation, le Dispatcher l'interroge avant d'appeler cette
 fonction, une fois par cible). Le Render Shell, via cette interface,
 n'orchestre jamais une cascade — il exécute une régénération unitaire,
@@ -476,15 +489,15 @@ appelée autant de fois que nécessaire par l'appelant.
 
 ## 8. Invariants vérifiables et tests à prévoir
 
-| Invariant | Mécanisme de vérification |
-|---|---|
-| `PackfileEntry`/`PackfileFooter` tailles fixes | `const assert!` (livré, §3) |
-| Round-trip footer/index | Test `footer_and_index_roundtrip` (livré) |
+| Invariant                                                                 | Mécanisme de vérification                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PackfileEntry`/`PackfileFooter` tailles fixes                            | `const assert!` (livré, §3)                                                                                                                                                                                                                                                                                                                                            |
+| Round-trip footer/index                                                   | Test `footer_and_index_roundtrip` (livré)                                                                                                                                                                                                                                                                                                                              |
 | Aucun `seek()` n'est jamais appelé sur le fd partagé d'un `PackHtmlIndex` | Revue de code (`grep -rn "\.seek(" crates/shell/render crates/shell/server` doit ne retourner que des usages sur des `BufWriter`/fichiers temporaires côté écriture, jamais sur `PackHtmlIndex::file()`) ; test de charge concurrente lisant systématiquement des offsets différents en parallèle, assertant que chaque réponse correspond exactement à l'`id` demandé |
-| `mmap` d'un `PackHtmlIndex` ne couvre jamais le blob HTML | Test ouvrant un packfile synthétique de blob volontairement plus grand que l'index, assertant `mmap.len() == footer.index_len` (pas `file_len`) |
-| `regenerate_and_swap` atomique vis-à-vis des lecteurs concurrents | Test d'intégration : lecteur en boucle pendant une régénération, jamais d'erreur ni de lecture partielle |
-| `ROUTE_TABLE` exhaustive vis-à-vis des packfiles réellement présents | Vérification au cold start (`LiveRegistry::cold_start` échoue fort si absent — §5) |
-| Ordre ASC de l'index | Non vérifié par le format lui-même (limite connue, §3) — à couvrir par un test d'intégration sur un vrai dump, pas par le format binaire |
+| `mmap` d'un `PackHtmlIndex` ne couvre jamais le blob HTML                 | Test ouvrant un packfile synthétique de blob volontairement plus grand que l'index, assertant `mmap.len() == footer.index_len` (pas `file_len`)                                                                                                                                                                                                                        |
+| `regenerate_and_swap` atomique vis-à-vis des lecteurs concurrents         | Test d'intégration : lecteur en boucle pendant une régénération, jamais d'erreur ni de lecture partielle                                                                                                                                                                                                                                                               |
+| `ROUTE_TABLE` exhaustive vis-à-vis des packfiles réellement présents      | Vérification au cold start (`LiveRegistry::cold_start` échoue fort si absent — §5)                                                                                                                                                                                                                                                                                     |
+| Ordre ASC de l'index                                                      | Non vérifié par le format lui-même (limite connue, §3) — à couvrir par un test d'intégration sur un vrai dump, pas par le format binaire                                                                                                                                                                                                                               |
 
 ---
 

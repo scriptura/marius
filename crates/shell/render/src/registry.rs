@@ -69,6 +69,7 @@ pub struct RouteEntry {
     /// + fragment HTMX du même contenu) — cold_start() déduplique.
     pub packfile_key: &'static str,
     pub id_source: IdSource,
+    pub content_type: &'static str, // ex. "text/html; charset=utf-8", "application/json"
 }
 
 /// Résout le chemin disque d'un packfile à partir de sa clé.
@@ -392,11 +393,13 @@ mod tests {
                     pattern: "/a/:id",
                     packfile_key: key_a,
                     id_source: IdSource::PathParam("id"),
+                    content_type: "text/html; charset=utf-8",
                 },
                 RouteEntry {
                     pattern: "/b",
                     packfile_key: key_b,
                     id_source: IdSource::Fixed(1),
+                    content_type: "text/html; charset=utf-8",
                 },
             ]
             .into_boxed_slice(),
@@ -424,6 +427,7 @@ mod tests {
                 pattern: "/absent/:id",
                 packfile_key: missing_key,
                 id_source: IdSource::PathParam("id"),
+                content_type: "text/html; charset=utf-8",
             }]
             .into_boxed_slice(),
         );
@@ -458,11 +462,13 @@ mod tests {
                     pattern: "/page/:id",
                     packfile_key: shared_key,
                     id_source: IdSource::PathParam("id"),
+                    content_type: "text/html; charset=utf-8",
                 },
                 RouteEntry {
                     pattern: "/fragment/:id",
                     packfile_key: shared_key,
                     id_source: IdSource::PathParam("id"),
+                    content_type: "text/html; charset=utf-8",
                 },
             ]
             .into_boxed_slice(),

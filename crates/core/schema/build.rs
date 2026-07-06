@@ -243,6 +243,18 @@ fn resolve_page_template<'src>(
 ///
 /// Chemin attendu : `{manifest_dir}/templates/{schema}/{table}.marius`.
 ///
+/// Invariant d'incrémentalité (Phase 6.7, post-mortem Dispatcher/PoC figée
+/// en cache) : `cargo:rerun-if-changed` pour `template_path` et son
+/// répertoire parent sont émis de façon INCONDITIONNELLE, avant tout test
+/// d'existence. Cargo fige la liste des chemins surveillés au dernier build
+/// réussi du script — un `rerun-if-changed` émis seulement dans la branche
+/// "fichier trouvé" ne crée jamais l'arête de dépendance tant que le fichier
+/// n'existe pas, et une création ultérieure du fichier reste alors invisible
+/// à l'incrémentalité (le stub `Ok(None)` reste self-consistant à jamais).
+/// Le rerun-if-changed sur le répertoire parent est le filet de sécurité :
+/// son mtime change dès qu'un fichier y est créé, ce qui couvre précisément
+/// ce cas de bord.
+///
 /// Retourne :
 ///   `Ok(None)`        : fichier absent — cargo:warning émis, fallback stub.
 ///   `Ok(Some((body, metrics)))` : template résolu avec succès, Mode
@@ -270,6 +282,16 @@ fn resolve_template(
         .join(schema)
         .join(format!("{table}.marius"));
 
+    // Émission inconditionnelle — avant le test d'existence. Voir invariant
+    // d'incrémentalité ci-dessus.
+    println!("cargo:rerun-if-changed={}", template_path.display());
+    if let Some(parent_dir) = template_path.parent() {
+        println!("cargo:rerun-if-changed={}", parent_dir.display());
+    }
+
+    println!("cargo:warning=DB-Forge [{schema}.{table}]"); // TODO : retirer ce log de débogage une fois la Phase 6.6 stabilisée.
+    println!("cargo:warning=template={}", template_path.display()); // TODO : retirer ce log de débogage une fois la Phase 6.6 stabilisée.
+
     if !template_path.exists() {
         println!(
             "cargo:warning=DB-Forge [{schema}.{table}] : aucun template trouvé \
@@ -278,9 +300,6 @@ fn resolve_template(
         );
         return Ok(None);
     }
-
-    // Invalidation du cache build si le template change.
-    println!("cargo:rerun-if-changed={}", template_path.display());
 
     let src = read_template_file(&template_path)?;
 

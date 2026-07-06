@@ -1901,7 +1901,12 @@ pub fn generate_aot_snippet<'src>(
     for token in tokens {
         match token {
             FlatPageToken::Static(s) => {
-                writeln!(out, "{}buf.push_str({:?});", indent, s).unwrap();
+                if s.len() == 1 {
+                    let c = s.chars().next().unwrap();
+                    writeln!(out, "{}buf.push({:?});", indent, c).unwrap();
+                } else {
+                    writeln!(out, "{}buf.push_str({:?});", indent, s).unwrap();
+                }
             }
 
             FlatPageToken::Field { field, .. } => {
