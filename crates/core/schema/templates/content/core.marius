@@ -1,13 +1,13 @@
 {% extends templates/base.marius %}
 
-{% block head_title %}
-{{ record.description }}
-{% endblock %}
 
-{% block main_content %}
-<article class="content-core" id="{{ record.document_id }}">
-    <h1>{{ record.headline }}</h1>
-    <h2>{{ record.alternative_headline }}</h2>
-    {% if record.is_readable %}<p class="description">{{ record.description }}</p>{% endif %}
-</article>
-{% endblock %}
+
+{% block head_description %}{{ record.description }}{% endblock %}
+
+{% block head_title %}{{ record.description }}{% endblock %}
+
+{% block main_content %}<article class="content-core" id="{{ record.document_id }}">
+                <h1>{{ record.headline }}</h1>
+                <h2>{{ record.alternative_headline }}</h2>
+                {% if record.is_readable %}<p class="description">{{ record.description }}</p>{% endif %}
+            </article>{% endblock %}

@@ -49,6 +49,8 @@ Une version antérieure de l'architecture (v0.1, dépréciée — voir `static-v
 
 Le modèle actuel inverse cette dépendance : **c'est PostgreSQL qui régit la structure**. Le template ne fait que sélectionner, parmi les champs déjà exposés par le schéma (`FieldSpec`, `VarlenField`), lesquels apparaissent dans le HTML généré. Conséquence pratique pour vous : un `.marius` ne peut référencer qu'un champ qui existe déjà dans la table ou la jointure varlena associée. Si le champ n'existe pas, on l'ajoute côté SQL — jamais en contournant le compilateur.
 
+**Précision structurelle — « côté SQL » signifie la table physique du composant, jamais une vue.** `fetch_varlena_cols` résout les bornes via `pg_constraint` (`CHECK`) — une vue n'en porte jamais, seule une table physique en a. `ref_table` dans `meta.component_varlena_join` est donc, par construction, une table de composant ECS physique (`content.identity`, `identity.person_biography`, etc.), jamais une vue sémantique (`content.v_article`). Les vues sémantiques (ADR-012, `db/tools/`) sont une interface de lecture **parallèle**, destinée à d'autres consommateurs SQL — elles n'ont aucune arête avec ce pipeline. Modifier `content.v_article` n'a **aucun effet** sur ce que `fragment-forge` peut introspecter : seule l'existence physique du champ dans la table jointe compte. Si le champ existe déjà et est correctement borné (`VARCHAR(N)`/`CHECK`), il est immédiatement disponible dans `.marius` sans aucune modification SQL, vue comprise.
+
 ---
 
 ## 2. Le langage `.marius` — ce qui compile aujourd'hui
@@ -375,4 +377,4 @@ Toute violation est une erreur de compilation (`cargo build` échoue), jamais un
 
 ---
 
-_Vérifié et corrigé le 7 juillet 2026 — audit croisé + revue de code (`lib.rs`, `introspect.rs`) contre le guide._
+_Vérifié et corrigé le 7 juillet 2026 (v2 : frontière vues sémantiques \/ tables physiques ajoutée) — audit croisé + revue de code (`lib.rs`, `introspect.rs`) contre le guide._

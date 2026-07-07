@@ -79,7 +79,7 @@ Déclare la table portant les champs texte (varlena) d'un composant.
 | `component_id`  | `text` FK | Référence `containment_intent`   |
 | `join_slot_idx` | `int2`    | `0` en Phase 1 (slot unique)     |
 | `ref_schema`    | `text`    | Schéma de la table varlena       |
-| `ref_table`     | `text`    | Table varlena                    |
+| `ref_table`     | `text`    | Table varlena — **table physique uniquement**, jamais une vue sémantique (ADR-012) : la détection de borne (`CHECK`, §3) n'existe que sur les tables |
 | `fk_column`     | `text`    | Colonne FK entre les deux tables |
 
 ```sql

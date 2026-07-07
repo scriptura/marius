@@ -1,11 +1,15 @@
 <!DOCTYPE html>
 <html lang="fr">
     <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block head_title %}Default title{% endblock %}</title>
+        <meta charset="utf-8">
+        <meta name="description" content="{% block head_description %}Default description{% endblock %}">
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+        <meta name="theme-color" content="#333">
+        <title>{% block head_title %}Default title{% endblock %}</title>
     </head>
     <body>
-        <main>{% block main_content %}{% endblock %}</main>
+        <main>
+            {% block main_content %}{% endblock %}
+        </main>
     </body>
 </html>

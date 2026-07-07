@@ -80,6 +80,8 @@ est la cause la plus fréquente d'un « ça ne marche pas » qui prend des heure
 
 Point de vigilance central, vécu en session : **recompiler `render()` ne touche à aucun des deux `.bin`.** Le pack HTML n'est régénéré que si quelque chose appelle explicitement `regenerate_and_swap` avec le nouveau `render()` déjà lié dans le binaire — recompiler seul ne suffit jamais.
 
+**Confusion fréquente, à ne pas reproduire** : `regenerate_and_swap` **n'interroge jamais `{table}_store.bin`** — il exécute `P::fetch_batch(pool, ids)`, une requête PostgreSQL live (`batch_renderer.rs`, en-tête : « distinct du store.bin »). Les deux artefacts `.bin` n'ont **aucune** dépendance de lecture entre eux ; `store.bin` sert exclusivement `marius-dump`/`marius-verify`, jamais le chemin de régénération du pack HTML.
+
 ---
 
 ## 2. Piège Cargo — `rerun-if-changed` conditionnel
