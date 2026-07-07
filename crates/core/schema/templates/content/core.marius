@@ -1,7 +1,7 @@
 {% extends templates/base.marius %}
 
 {% block head_title %}
-{{ record.headline }}
+{{ record.description }}
 {% endblock %}
 
 {% block main_content %}

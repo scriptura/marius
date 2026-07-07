@@ -179,9 +179,6 @@ pub struct FieldSpec {
 ///   VARCHAR(N)            → max_len = N  (depuis atttypmod - 4)
 ///   TEXT sans contrainte  → exclu du listing render (build.rs émet cargo:warning)
 ///   TEXT avec CHECK       → build.rs extrait N de la contrainte CHECK (length(col) <= N)
-///   TEXT sans CHECK ni VARCHAR → panic! si référencé dans le listing dense ;
-///                             fallback à 10 000 pour le rendu page complète,
-///                             accompagné d'un cargo:warning.
 ///
 /// ─── Politique d'escape HTML ─────────────────────────────────────────────────
 ///

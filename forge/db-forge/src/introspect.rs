@@ -402,6 +402,42 @@ mod tests {
         assert_eq!(parse_check_length_limit("(label IS NOT NULL)"), None);
     }
 
+    #[test]
+    fn parse_check_reversed_operands_not_supported() {
+        // H2 (ADR-007) : forme inversée non reconnue par construction — la
+        // fonction ne cherche que "<=", jamais ">=". Dégrade vers None, ne
+        // produit jamais une valeur incorrecte à partir d'une lecture inversée.
+        assert_eq!(parse_check_length_limit("(255 >= length(label))"), None);
+    }
+
+    #[test]
+    fn parse_check_non_literal_expression_rejected() {
+        // H9 (ADR-007) : N doit être un entier littéral nu. parse::<usize>()
+        // échoue nativement sur "2*1000" — dégrade vers None, jamais vers un
+        // calcul silencieusement erroné de l'expression.
+        assert_eq!(parse_check_length_limit("(length(label) <= 2*1000)"), None);
+    }
+
+    #[test]
+    fn parse_check_negative_bound_rejected() {
+        // Défense en profondeur : un CHECK absurde (N négatif) ne doit jamais
+        // produire un usize incorrect via cast implicite — parse::<usize>
+        // échoue nativement sur le signe, dégrade vers None.
+        assert_eq!(parse_check_length_limit("(length(label) <= -5)"), None);
+    }
+
+    #[test]
+    fn parse_check_tolerates_whitespace_variance() {
+        // Contre-exemple positif : une reformulation bénigne d'un CHECK
+        // existant (espacement) ne doit jamais devenir une régression
+        // silencieuse — sinon un simple reformattage SQL non fonctionnel
+        // ferait basculer un champ Hot vers Erreur au prochain build.
+        assert_eq!(
+            parse_check_length_limit("(length(label)   <=   255 )"),
+            Some(255)
+        );
+    }
+
     // ── Tests parse_sentinel ─────────────────────────────────────────────────
 
     #[test]

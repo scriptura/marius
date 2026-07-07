@@ -12,9 +12,11 @@ Ce guide a deux parties de statut différent :
 | Partie | Contenu | Statut |
 | --- | --- | --- |
 | **Partie 1** | Mode fragment : `{{ }}`, `{% if %}`, `{% include %}` | **Implémenté** — pipeline réellement câblé dans `crates/core/schema/build.rs` |
-| **Partie 2** | Mode page : `{% extends %}`, `{% block %}`, `{% static %}` | **Spécifié (v1.1), non implémenté** — décrit ici pour préparer l'écriture des futures spécifications |
+| **Partie 2** | Mode page : `{% extends %}`, `{% block %}`, `{% static %}` | **Implémenté** — `parse_page_block`/`lower`/`link` existent et compilent (`fragment-forge/src/lib.rs`), validé en production sur `content/core.marius` |
 
-Ne confondez pas les deux : tout ce qui est documenté en Partie 1 compile aujourd'hui avec `cargo build`. La Partie 2 décrit un comportement cible — si vous écrivez `{% extends %}` dans un fichier `.marius` aujourd'hui, le parseur actuel le rejette (`InvalidBlockSequence`, mot-clé `extends` non reconnu par l'automate de blocs en vigueur).
+Ne confondez pas les deux avec « également testé de bout en bout » : les deux modes compilent aujourd'hui avec `cargo build`. Ce qui reste réellement non câblé, listé précisément en §4.7 et §4.5 : la validation `UnknownEntity` et l'application stricte du seuil de taille `{% static %}` — deux points où la spécification v1.1 va au-delà de ce que le code fait aujourd'hui. Le reste de la Partie 2 (composition, fusion de blocs, `{% static %}` lui-même) est du code qui tourne, pas une intention.
+
+**Hors périmètre de ce document** : ce guide couvre la compilation `.marius` → `render()`. Il ne couvre pas ce qui se passe *après* — comment `render()` est invoqué, à quelle fréquence, ni ce qui invalide le HTML déjà servi. `cargo build` peut réussir intégralement (nouveau `.marius`, nouveau `render()` généré) sans que la moindre requête HTTP n'en voie la couleur : c'est un autre pipeline, un autre cycle d'invalidation, documenté dans `guide-cycle-de-vie-runtime.md`. Un `.marius` correct est une condition nécessaire, jamais suffisante, pour qu'un changement atteigne le navigateur.
 
 ---
 
@@ -56,10 +58,12 @@ Le modèle actuel inverse cette dépendance : **c'est PostgreSQL qui régit la s
 | --- | --- | --- |
 | `{{ entity.field }}` | Interpolation d'un champ | `write_fmt` (fixed-length) ou `marius_html_escape` (varlena) |
 | `{% if entity.field %} … {% endif %}` | Inclusion conditionnelle | `if record.{field} != 0 { … }` |
-| `{% include "chemin" %}` | Inclusion d'un fragment statique résolu au build | `buf.push_str(include_str!(...))` |
+| `{% include chemin %}` | Inclusion d'un fragment statique résolu au build | `buf.push_str(include_str!(...))` |
 | texte brut | HTML verbatim | `buf.push_str("...")` |
 
 Trois constructions, pas plus. Tout le reste est une erreur de compilation.
+
+**Piège de syntaxe, vérifié contre le scanner** : un chemin (`include`, et en Partie 2 `extends`/`static`) s'écrit **sans guillemets** — `{% include templates/partials/nav.html %}`, jamais `{% include "templates/partials/nav.html" %}`. Le scanner ne connaît aucun token de littéral de chaîne : il découpe tout contenu de bloc en séquences contiguës non-blanc. Des guillemets écrits par réflexe Jinja ne provoquent **pas** une erreur de syntaxe immédiate — ils sont capturés tels quels comme partie du chemin (`"templates/partials/nav.html"`, guillemets inclus), et l'échec n'apparaît qu'en aval, au moment de la résolution du fichier (`ExtendsNotFound`/`StaticFileNotFound`/erreur `include_str!`), avec un chemin visiblement corrompu par les guillemets dans le message — un symptôme trompeur si vous ne savez pas d'où il vient.
 
 ### 2.2 La convention d'entité — et son piège contre-intuitif
 
@@ -70,18 +74,19 @@ Concrètement : `{{ record.description }}` et `{{ nimporte_quoi.description }}` 
 - `record` pour tout champ fixed-length (`FieldSpec`) ;
 - `record` également pour les champs varlena dans les templates actuels (voir `content/core.marius` — `record.description` est en réalité un varlena, pas un fixed-length ; le compilateur tranche sur la présence du nom de champ, pas sur le préfixe).
 
-> La spécification v1.1 (§1.2) prévoit une erreur `UnknownEntity` avec message de migration explicite (voir §4 de ce guide pour le mode page, où cette validation existe déjà dans la conception). En mode fragment, cette garde n'est pas encore câblée — gardez vos noms d'entité cohérents par discipline d'équipe, pas par confiance dans le compilateur.
+> La spécification v1.1 (§1.2) prévoit une erreur `UnknownEntity` avec message de migration explicite — **non implémentée**, ni en mode fragment ni en mode page (voir §4.7 : aucune trace de cette variante dans le code). En l'état, cette garde n'est câblée nulle part — gardez vos noms d'entité cohérents par discipline d'équipe, pas par confiance dans le compilateur.
 
 ### 2.3 Ce qui est banni, et pourquoi
 
 | Interdit | Raison structurelle |
 | --- | --- |
 | `{% for … %}` | Sortie de longueur non bornée → rend `{NAME}_TOTAL_CAP` incalculable au build-time |
+| `{% else %}` | Réflexe Jinja le plus probable après un `{% if %}` — aucune grammaire dédiée : tombe dans le mot-clé inconnu ci-dessous, `InvalidBlockSequence` |
 | Imbrication `{% if %}` dans `{% if %}` | La FSM de validation (`validate_ast`) est un automate à un seul niveau d'état (`current_open_if: Option<(entity, field)>`) — une imbrication ouvre une erreur `NestedIfNotSupported`, l'état reste sur le bloc externe |
 | Mots-clés relationnels (`join`, `where`, `filter`, `group`) | Appartiennent au Write Path PostgreSQL, jamais au Read Path |
 | `{% if %}` sur un champ non booléen | Romprait la largeur de struct statiquement connue (`StorageRow #[repr(C)]`) |
 
-Toute séquence de bloc non reconnue (mot-clé inconnu après `{%`) échoue avec `PageParseError::InvalidBlockSequence` — c'est l'erreur que vous obtiendrez aujourd'hui si vous tentez `{% extends %}` ou `{% for %}`.
+Toute séquence de bloc non reconnue (mot-clé inconnu après `{%`) échoue avec `PageParseError::InvalidBlockSequence` — c'est l'erreur que vous obtiendrez aujourd'hui si vous tentez `{% else %}` ou `{% for %}` : pas une erreur nommée par construction, la même que pour n'importe quel mot-clé absent de la grammaire (`if`/`endif`/`include`, `fragment-forge/src/lib.rs::parse_block`).
 
 ### 2.4 Champs varlena — disjoncteur Hot / Cold / Erreur (ADR-007)
 
@@ -91,9 +96,44 @@ Un champ `TEXT` sans borne exploitable (`VARCHAR(N)` ou `CHECK (length(col) <= N
 - **référencé** et borné → "Hot", sa capacité (`max_len × 6`, facteur d'échappement HTML pire cas) entre dans `total_dynamic_bytes` ;
 - **référencé** et non borné → erreur de compilation (`ResolverError::UnboundedField`).
 
+Le facteur ×6 n'est pas arbitraire : c'est la longueur de la plus longue entité HTML parmi les caractères échappés (`"` → `&quot;`, 6 octets pour 1 caractère source) — le pire cas parmi `&amp;` (5), `&lt;`/`&gt;` (4), `&#39;` (5). Dimensionner sur ce pire cas garantit qu'aucune combinaison de caractères ne peut jamais dépasser `max_len × 6`, quelle que soit la donnée réelle en base.
+
+**Deux mécanismes de détection de la borne, ni plus ni moins** (`VarlenField`, `fragment-forge/src/lib.rs`) :
+
+```sql
+-- 1. VARCHAR(N) — max_len extrait directement de pg_attribute.atttypmod
+CREATE TABLE person (
+  biography VARCHAR(2000)
+);
+
+-- 2. TEXT + CHECK — build.rs parse la contrainte pour en extraire N
+CREATE TABLE person (
+  biography TEXT
+);
+ALTER TABLE person ADD CONSTRAINT person_biography_length_check
+  CHECK (length(biography) <= 2000);
+```
+
+Il n'existe **pas** de troisième mécanisme par annotation (`COMMENT ... 'marius:max_len=N'`) — seul `marius:pre_escaped` (ci-dessous) est un tag `pg_description` reconnu. Un `TEXT` sans l'un de ces deux mécanismes reste `max_len: None`, quoi que vous mettiez en commentaire SQL.
+
+**Forme exacte requise pour un `CHECK` détectable.** La détection repose sur un parsing textuel de la définition de contrainte, pas sur une analyse structurelle de l'arbre SQL — une déviation de forme, sémantiquement équivalente, échoue à être bornée. **Ce n'est pas silencieux** : `cargo:warning` est émis avec le texte brut de la contrainte au moment de l'échec (`DB-Forge [...]: CHECK trouvé mais longueur non parsable : ...`) — visible dans `cargo build -vv`, absent du terminal en `cargo build` par défaut. Pour une détection fiable dès l'écriture du DDL, sans dépendre de ce filet :
+
+- **une seule** contrainte `CHECK` par colonne portant sur sa longueur — une deuxième contrainte introduit une ambiguïté de sélection non garantie par PostgreSQL (`fetch_optional`, sélection arbitraire si plusieurs matchent) ;
+- la forme littérale `length(col) <= N`, jamais `N >= length(col)` (opérandes inversés) ni `char_length(col) <= N` mêlé à une autre fonction ;
+- `N` un entier littéral nu — `length(col) <= 2000`, jamais une expression (`2*1000`) ni un cast ;
+- la contrainte doit être **`VALID`** (comportement par défaut de `ADD CONSTRAINT`) — une contrainte ajoutée via `NOT VALID` n'est pas exclue du parsing mais n'a, par définition PostgreSQL, jamais été vérifiée contre les données existantes : une borne "détectée" sur une contrainte `NOT VALID` n'est pas une garantie réelle sur les données déjà en place.
+
+En cas de doute, préférez `VARCHAR(N)` (§ ci-dessus) : borne extraite de `pg_attribute.atttypmod`, aucun parsing, aucune des fragilités ci-dessus.
+
 Aucun fallback arbitraire n'est substitué à l'absence de borne. Si vous référencez un `TEXT` libre dans votre template, ajoutez une contrainte `CHECK` côté SQL — c'est la seule issue.
 
+**Champ nullable** : un varlena `TEXT` sans `NOT NULL` réserve exactement la même capacité qu'un champ non-nullable — `max_escaped_len()` ne dépend jamais de la nullabilité. En v1, la question est de toute façon pré-tranchée par construction : tout champ varlena issu d'un `LEFT JOIN` est systématiquement `Option<String>` côté Rust (`nullable: true` invariant, v1) ; une valeur `NULL` au runtime réduit simplement les octets effectivement écrits, jamais la capacité pré-allouée au build-time.
+
 Un champ annoté `marius:pre_escaped` (commentaire SQL `COMMENT ON COLUMN ... IS 'marius:pre_escaped'`) bénéficie d'un facteur ×1 au lieu de ×6 : vous certifiez que son contenu est déjà sanitisé (slug, titre normalisé).
+
+⚠️ **`pre_escaped` désactive tout échappement HTML pour ce champ** — aucun filet de rattrapage à l'exécution. Cette annotation certifie l'absence de `<`, `>`, `&`, `"`, `'` dans toute valeur possible de la colonne. Réservez-la aux champs contrôlés par l'application (slugs générés, identifiants techniques, dates formatées) — jamais à une donnée saisie par un utilisateur, même validée côté applicatif : la certification porte sur la colonne SQL elle-même, pas sur un chemin de saisie particulier.
+
+**Plusieurs champs varlena distincts dans un même template** : autorisé, sans limite de nombre. `total_dynamic_bytes` est la somme de `max_escaped_len()` de chaque champ varlena référencé — `{{ person.biography }}` (borné à 2000) et `{{ person.summary }}` (borné à 500) contribuent chacun indépendamment (12 000 + 3 000 = 15 000 octets), sans interaction entre eux. Un seul d'entre eux non borné suffit à faire échouer tout le template (`UnboundedField`), même si les autres sont correctement contraints.
 
 ### 2.5 Exemples réels
 
@@ -111,6 +151,8 @@ Un champ annoté `marius:pre_escaped` (commentaire SQL `COMMENT ON COLUMN ... IS
 ```
 
 Notez `{{ record.description }}` référencé deux fois : chaque occurrence est comptée séparément dans `total_dynamic_bytes` (§2.4, principe de multiplicité — un champ référencé N fois est mesuré N fois, jamais déduppliqué).
+
+**Amplification par composition (Partie 2)** : la fusion `{% extends %}`/`{% block %}` ne réduit jamais ce compte, elle l'agrège. Un champ référencé dans le bloc `title` du parent (`<title>{{ record.headline }}</title>`) **et** dans le bloc `content` de l'enfant (`<h1>{{ record.headline }}</h1>`) est compté deux fois dans `PAGE_TOTAL_CAP` — même principe que §2.5, mais le risque de doublon involontaire grandit avec la composition : le parent et l'enfant sont deux fichiers écrits séparément, sans vue d'ensemble immédiate sur les champs déjà référencés ailleurs dans la page fusionnée.
 
 `templates/commerce/product_core.marius` :
 
@@ -194,19 +236,19 @@ Le principe ne change pas : ces opérateurs n'ont **aucune existence au runtime*
 
 ### 4.2 Discriminant fragment / page
 
-Une spécification `.marius` est en **mode page** si et seulement si sa première construction non-whitespace est `{% extends "chemin" %}`. BOM, lignes vides et whitespace sont tolérés avant. Toute autre première construction → mode fragment, comportement identique à la Partie 1, aucune `PageProjection` générée.
+Une spécification `.marius` est en **mode page** si et seulement si sa première construction non-whitespace est `{% extends chemin %}` — **sans guillemets**, voir le piège de syntaxe en §2.1 : il s'applique identiquement ici, `extends` utilisant la même convention non-quotée que `static` (symétrie délibérée, `fragment-forge/src/lib.rs::parse_page_block`, commentaire de la branche `"extends"`). BOM, lignes vides et whitespace sont tolérés avant. Toute autre première construction → mode fragment, comportement identique à la Partie 1, aucune `PageProjection` générée.
 
 Si `{% extends %}` est présent mais pas en première position : `PageParseError::ExtendsNotFirst`.
 
-### 4.3 `{% extends "path" %}`
+### 4.3 `{% extends chemin %}`
 
 Déclare la spécification parente. Déclenche la fusion des deux AST au build-time. Une seule occurrence, en tête de fichier — pas d'héritage multi-niveaux en v1 (la spécification ne prévoit qu'un parent direct, pas de chaîne `enfant → parent → grand-parent`).
 
 ```jinja
 {# templates/content/core.marius #}
-{% extends "templates/base.marius" %}
+{% extends templates/base.marius %}
 
-{% block title %}{{ content_core.headline }}{% endblock %}
+{% block title %}{{ record.headline }}{% endblock %}
 
 {% block content %}
 <article class="content-core">
@@ -227,28 +269,32 @@ Déclare, dans le parent, un point de substitution avec une valeur par défaut ;
   <title>{% block title %}Marius{% endblock %}</title>
 </head>
 <body>
-{% static "templates/partials/nav.html" %}
+{% static templates/partials/nav.html %}
 <main>
 {% block content %}{% endblock %}
 </main>
-{% static "templates/partials/footer.html" %}
+{% static templates/partials/footer.html %}
 </body>
 </html>
 ```
 
 Contrainte AOT à respecter : **un bloc de l'enfant absent du parent est une erreur** (`OrphanBlock`) — pas un avertissement silencieusement ignoré. Et, comme pour `{% if %}` en mode fragment, **aucune imbrication `{% block %}`/`{% if %}` n'est supportée en v1** : la pile d'état nécessaire est explicitement hors périmètre.
 
-### 4.5 `{% static "path" %}`
+**Empreinte mémoire d'un bloc parent surchargé** : quand l'enfant redéfinit un bloc, le contenu par défaut du parent pour ce bloc **n'est jamais projeté** dans l'AST fusionné — `lower()` (`fragment-forge/src/lib.rs`) ne parcourt et n'émet que les tokens de la source retenue par `LinkPlan` (enfant si override, parent sinon), jamais les deux. Ce n'est pas une élision a posteriori par le compilateur Rust (dead-code elimination) : le contenu perdant n'atteint jamais `generate_aot_snippet`, donc n'existe jamais comme `buf.push_str(...)` — zéro octet en `.rodata`, par construction du pipeline de fusion, pas par optimisation.
+
+### 4.5 `{% static chemin %}`
 
 Inclut un fichier d'octets HTML statiques, lu au build-time, inliné comme `&'static str` dans un module généré `static_partials`. Distinct de `{% include %}` du mode fragment (§2.1) par un détail qui compte en mémoire : si plusieurs pages référencent le même fichier `{% static %}`, elles partagent **la même constante** — déduplication structurelle en `.rodata`, pas une copie par page.
 
-Politique de taille (configurable via `FRAGMENT_FORGE_STATIC_WARN_BYTES`, défaut 32 768) :
+Politique de taille visée (`FRAGMENT_FORGE_STATIC_WARN_BYTES`, défaut 32 768) :
 
 | Taille | Stratégie |
 | --- | --- |
 | < 32 Ko | `static_partials`, par défaut |
 | 32–200 Ko | `cargo:warning!`, à évaluer au cas par cas |
 | > 200 Ko | Service statique externe obligatoire (nginx, CDN) — pas une option en v1 pour ce volume |
+
+**Non appliqué aujourd'hui** : aucun de ces trois paliers n'est vérifié par le code actuel (`lib.rs`, `build.rs`) — `PageLinkError` ne porte que `ExtendsNotFound`, `OrphanBlock`, `StaticFileNotFound`, aucune variante liée à une taille. Un fichier `{% static %}` de 5 Mo compile aujourd'hui sans avertissement ni erreur. Cette politique est une spécification v1.1, pas un comportement observable — ne vous y fiez pas pour dimensionner un fichier réel tant qu'aucun `cargo:warning` de taille n'est vérifié en pratique.
 
 ### 4.6 Algorithme de fusion — ce qui se passe à `cargo build`
 
@@ -276,14 +322,13 @@ Le résultat de la fusion est un AST **plat**, du même type `FlatPageToken` que
 | `ExtendsNotFirst` | `{% extends %}` pas en première position non-whitespace |
 | `StaticFileNotFound` | Chemin de `{% static %}` introuvable |
 | `OrphanBlock` | Bloc enfant sans correspondant dans le parent |
-| `UnknownEntity` | Entité référencée ≠ entité de la spécification (voir le message de migration §1.3) |
 | `UnknownField` | Champ absent du schéma |
 | `NonBoolIfCondition` | `{% if %}` sur un champ non `bool` |
 | `ForLoopDetected` | `{% for %}` détecté |
 | `RelationalKeyword` | `join`/`where`/`filter`/`group` détecté |
 | `NestedBlock` / `NestedIf` | Imbrication détectée |
 
-Contrairement au mode fragment actuel, la spécification de page prévoit explicitement `UnknownEntity` avec message de migration (exemple §1.3) — c'est la garde qui manque aujourd'hui au mode fragment (§2.2).
+**`UnknownEntity` n'existe pas dans le code** — ni en mode page, ni en mode fragment. Ce n'était pas une omission de ce guide, c'était une erreur : la spécification v1.1 la prévoit, mais après fusion (`lower()`), l'AST rejoint le point de convergence documenté au §4.6 — `validate_ast`/`resolve_and_measure`, **gelés, identiques aux deux modes**. Aucune fonction dédiée au mode page n'existe pour vérifier une entité ; le seul contrôle réel porte sur `field`, via `ResolverError::UnknownField` (§2.2, même limitation qu'en mode fragment). Autrement dit : le nom d'entité reste syntaxiquement obligatoire, sémantiquement décoratif, **dans les deux modes** — §2.2 ne décrit pas une lacune propre au fragment en attente d'un futur rattrapage page, c'est l'état réel, partout, aujourd'hui.
 
 ### 4.8 Au runtime : `render()` et `render_page()` coexistent, jamais l'un n'appelle l'autre
 
@@ -310,15 +355,16 @@ Ce découplage n'est pas accessoire : ADR-008 tranche qu'**aucune page complète
 Mode fragment (implémenté) :
   {{ entity.field }}
   {% if entity.bool_field %} … {% endif %}
-  {% include "chemin" %}
+  {% include chemin %}
 
-Mode page (spécifié, non implémenté) :
-  {% extends "chemin" %}          ← doit être la première construction du fichier
+Mode page (implémenté) :
+  {% extends chemin %}            ← doit être la première construction du fichier
   {% block name %} … {% endblock %}
-  {% static "chemin" %}
+  {% static chemin %}
 
 Interdit, dans les deux modes :
   {% for … %}
+  {% else %}
   {% if %} sur un champ non bool
   Imbrication if/if, block/block, block/if
   join / where / filter / group
