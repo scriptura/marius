@@ -1,5 +1,17 @@
 # Meta Tooling Guide — Marius
 
+> **Créé le 17 juin 2026. Vérifié et daté le 7 juillet 2026.**
+> **Note de statut** : le §1 (dernière étape) et le §5 (étape 10) décrivent un
+> modèle de service obsolète — résolution *à la requête* depuis `store.bin`
+> directement (`OnceLock`/`fetch_batch` au premier appel HTTP). Ce modèle a été
+> explicitement écarté par ADR-008 (22 juin 2026, postérieur à la dernière
+> révision de ce guide) au profit d'une résolution *à l'écriture* : un pack
+> HTML pré-rendu (`{table}.bin`, distinct de `{table}_store.bin`), régénéré
+> uniquement sur `NOTIFY` Postgres, servi par `pread`. Le reste de ce document
+> (registre, annotations, format binaire de `store.bin`, procédure d'ajout de
+> composant) reste exact et complémentaire — voir `guide-cycle-de-vie-runtime.md`
+> pour le modèle de service réel.
+
 Guide opérationnel du pipeline AOT. Destiné au développeur qui ajoute, modifie
 ou débogue un composant dans Marius. Ne documente pas les internals de la Forge
 (voir les commentaires inline dans `forge/db-forge/src/`).
@@ -21,8 +33,11 @@ generated_schema.rs              ← types, From impl, Projection impl
     ▼ cargo run --bin marius-dump
 {schema}_{table}_store.bin       ← dump binaire AOT (StorageRow + varlena)
     │
-    ▼ cargo run --bin marius-server
-HTTP serving depuis le mmap       ← zéro requête PG en hot path
+    ▼ [OBSOLÈTE — voir note de statut ci-dessus]
+    ▼ Le service réel passe par regenerate_and_swap() → pack HTML,
+    ▼ déclenché par NOTIFY Postgres, pas par cargo run --bin marius-server
+    ▼ ni par un fetch_batch() à la première requête. Détail complet :
+    ▼ guide-cycle-de-vie-runtime.md, schéma global.
 ```
 
 `cargo build` est le seul outil qui touche `generated_schema.rs`.
@@ -131,7 +146,7 @@ grep "author_entity_id" target/debug/build/marius-schema-*/out/generated_schema.
 ### 3.2 `marius:pre_escaped`
 
 Indique que la colonne est déjà échappée HTML en base.
-Fragment-Forge utilise un facteur d'échappement de 1 au lieu de 5,
+Fragment-Forge utilise un facteur d'échappement de 1 au lieu de 6,
 réduisant `DYNAMIC_CAP` et l'empreinte mémoire des buffers de rendu.
 
 ```sql
@@ -231,10 +246,14 @@ cargo run --bin marius-dump
 cargo run --bin marius-verify
 
 # 10. Démarrer (ou redémarrer) le serveur
-cargo run --bin marius-server
-# Au premier appel de fetch_batch, OnceLock::get_or_init() monte le PackfileReader
-# et déclenche madvise(MADV_WILLNEED) — pages du store.bin pré-chargées en RAM.
-# Les lookups suivants ne génèrent aucun page fault.
+cargo run --bin marius
+# [OBSOLÈTE, voir note de statut en tête de document] Ceci ne charge PAS le
+# pack HTML au premier fetch_batch(). Le serveur ouvre au démarrage
+# (cold_start) les packs déjà présents sur disque, régénérés uniquement sur
+# NOTIFY Postgres — jamais à la première requête HTTP. Si le pack n'existe
+# pas encore pour ce composant, voir guide-cycle-de-vie-runtime.md §5 :
+# marius-dump doit aussi appeler regenerate_and_swap, pas seulement écrire
+# le store.bin.
 ```
 
 ---
@@ -290,4 +309,4 @@ cargo test -p marius-schema
 
 ---
 
-_Dernière mise à jour : Phase 4 db-forge — 17 Juin 2026._
+_Créé le 17 Juin 2026 (Phase 4 db-forge). Vérifié et daté le 7 juillet 2026 — voir note de statut en tête de document._

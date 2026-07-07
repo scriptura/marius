@@ -4,6 +4,8 @@
 > Ce document couvre la couche suivante : comment `render()` est effectivement
 > invoqué, sur quel déclencheur, et ce qui invalide un artefact déjà écrit.
 > Périmètre disjoint par construction — voir le renvoi en tête du guide `fragment-forge`.
+> **Créé le 7 juillet 2026**, à la suite d'une session de débogage complète du
+> pipeline `.marius` → HTTP (cause racine : trigger `NOTIFY` jamais appliqué en base).
 
 ---
 
@@ -206,3 +208,7 @@ suivante — ne pas sauter d'étape :
 5. Seulement si les quatre points précédents sont vérifiés sains : chercher
    une erreur réelle côté `regenerate_and_swap` (le seul point du graphe qui
    logue explicitement un échec, `eprintln!("[dispatcher] ...")`).
+
+---
+
+_Créé le 7 juillet 2026._

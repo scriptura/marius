@@ -2,6 +2,7 @@
 
 > Compilateur de projections HTML AOT du projet Marius.
 > Spécification de référence : `specification-marius-compilateur-projections-html.md` v1.1.
+> **Vérifié et corrigé le 7 juillet 2026** (audit croisé + revue de code contre `fragment-forge/src/lib.rs`).
 
 ---
 
@@ -371,3 +372,7 @@ Interdit, dans les deux modes :
 ```
 
 Toute violation est une erreur de compilation (`cargo build` échoue), jamais un comportement silencieux au runtime.
+
+---
+
+_Vérifié et corrigé le 7 juillet 2026 — audit croisé + revue de code (`lib.rs`, `introspect.rs`) contre le guide._
