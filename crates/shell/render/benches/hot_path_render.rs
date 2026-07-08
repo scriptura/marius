@@ -10,9 +10,9 @@
 //
 // ─── Granularités mesurées ────────────────────────────────────────────────
 //
-//   render/single/*      : coût d'un render() unique, sans overhead Rayon.
-//   render/rayon/nominal : scalabilité parallèle, données courtes.
-//   render/rayon/worst_case : scalabilité parallèle, escape HTML saturé.
+//   render/single/*           : coût d'un render() unique, buffer isolé.
+//   render/sequential/nominal : pipeline batch réel, données courtes.
+//   render/sequential/worst_case : pipeline batch réel, escape HTML saturé.
 //
 // ─── Exécution ────────────────────────────────────────────────────────────
 //
@@ -96,7 +96,7 @@ fn record_worst_case() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
     (storage, varlena)
 }
 
-/// Lot de N enregistrements pour les benchmarks Rayon.
+/// Lot de N enregistrements pour les benchmarks séquentiels.
 /// `f` sélectionne le constructeur : record_nominal ou record_worst_case.
 fn batch(
     size: usize,
@@ -150,35 +150,35 @@ fn bench_render_single_worst_case(bencher: Bencher) {
 }
 
 // =============================================================================
-// III. Benchmarks pipeline Rayon — granularité batch
+// III. Benchmarks pipeline séquentiel — granularité batch
 // =============================================================================
 
-/// Tailles de lot pour les benchmarks Rayon.
-/// 100  : lot petit, overhead Rayon dominant → révèle le coût de distribution.
-/// 1000 : lot moyen, équilibre overhead/calcul → cas nominal du Dispatcher.
+/// Tailles de lot pour les benchmarks séquentiels.
+/// 100  : lot petit, overhead d'itération dominant.
+/// 1000 : lot moyen → cas nominal du Dispatcher.
 /// 10000: lot large, calcul dominant → mesure le débit de saturation CPU.
 const BATCH_SIZES: &[usize] = &[100, 1_000, 10_000];
 
-/// Pipeline Rayon avec données nominales — pattern exact du Dispatcher.
+/// Pipeline séquentiel avec données nominales — pattern exact du Dispatcher.
 ///
-/// Reproduit fidèlement map_with de dispatcher.rs :
-///   seed = (String::new(), 0usize)  →  (buffer réutilisé, ref_cap)
-///   buf.clear() préserve la capacité entre itérations.
+/// Reproduit fidèlement render_batch_pure() de dispatcher.rs :
+///   buffer unique réutilisé, buf.clear() préserve la capacité entre
+///   itérations, zéro allocation intra-lot après le premier render().
 ///
 /// BytesCount = BATCH_SIZE × TOTAL_CAP : borne supérieure du HTML produit.
 /// Le débit réel (MB/s) sera inférieur car les données nominales
 /// n'atteignent pas TOTAL_CAP — c'est le débit de capacité, pas de remplissage.
 #[divan::bench(
-    name    = "render/rayon/nominal",
+    name    = "render/sequential/nominal",
     args    = BATCH_SIZES,
 )]
-fn bench_render_rayon_nominal(bencher: Bencher, batch_size: usize) {
+fn bench_render_sequential_nominal(bencher: Bencher, batch_size: usize) {
     bencher
         .counter(ItemsCount::new(batch_size))
         .counter(BytesCount::new(batch_size * CONTENT_CORE_TOTAL_CAP))
         .with_inputs(|| batch(batch_size, record_nominal))
         .bench_local_values(|records| {
-            // render_batch_pure() : rendu parallèle sans I/O disque.
+            // render_batch_pure() : rendu séquentiel sans I/O disque.
             // Isole le coût CPU (marius_html_escape + push_str) des syscalls
             // write(2) qui domineraient la mesure (~22µs/record vs ~420ns/record).
             // black_box sur le batch entier : empêche LLVM d'éliminer render()
@@ -187,16 +187,16 @@ fn bench_render_rayon_nominal(bencher: Bencher, batch_size: usize) {
         });
 }
 
-/// Pipeline Rayon avec données pires cas.
+/// Pipeline séquentiel avec données pires cas.
 ///
 /// Révèle la dégradation du débit sous charge maximale de marius_html_escape().
 /// Le ratio time/nominal vs time/worst_case quantifie le surcoût de l'escape HTML
 /// sur le chemin critique.
 #[divan::bench(
-    name    = "render/rayon/worst_case",
+    name    = "render/sequential/worst_case",
     args    = BATCH_SIZES,
 )]
-fn bench_render_rayon_worst_case(bencher: Bencher, batch_size: usize) {
+fn bench_render_sequential_worst_case(bencher: Bencher, batch_size: usize) {
     bencher
         .counter(ItemsCount::new(batch_size))
         .counter(BytesCount::new(batch_size * CONTENT_CORE_TOTAL_CAP))

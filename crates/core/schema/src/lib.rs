@@ -30,8 +30,9 @@
 // ─── ADR-003 : Suppression de RenderPayload<'a> ──────────────────────────────
 //
 //   RenderPayload<'a> n'est plus émis dans le fichier généré.
-//   Les &str sont reconstruits localement dans render() via as_deref() sur
-//   chaque thread Rayon, sans traversée de frontière de lifetime.
+//   Les &str sont reconstruits localement dans render() via as_deref(), sans
+//   traversée de frontière de lifetime — la reconstruction est locale à
+//   l'appel, quel que soit le contexte d'exécution (séquentiel ou non).
 //   VarlenOwned est le type transporté (Send+'static) ; le payload est éphémère.
 //
 // ─── ADR-007 : Frontière Hot/Cold/Erreur sur les champs varlena ──────────────

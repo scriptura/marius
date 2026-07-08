@@ -1,6 +1,6 @@
 // marius-render · dispatcher.rs
 // Dispatcher (Reactive Orchestrator) — Shell uniquement.
-// Dépend de Tokio, Rayon, SQLx : ne peut pas être dans le Core.
+// Dépend de Tokio, SQLx : ne peut pas être dans le Core.
 //
 // Migration depuis marius-collector (Phase 1 refactoring) :
 // Le Collector<MAX, WORDS> reste dans le Core (marius-collector, zéro dépendance).
@@ -38,18 +38,19 @@
 //
 //   run()              : boucle asynchrone Tokio. Gère le tick adaptatif,
 //                         appelle regenerate_and_swap().
-//   render_batch_pure() : logique de rendu parallèle Rayon pure, synchrone,
+//   render_batch_pure() : logique de rendu séquentielle pure, synchrone,
 //                         sans I/O disque — utilisée par les benchmarks
 //                         Divan. Non concernée par le bug Append (jamais
-//                         touchait le filesystem) — inchangée par cette
-//                         session.
+//                         touchait le filesystem). Réalignée cette session :
+//                         portait un pipeline Rayon résiduel (map_with),
+//                         désormais buffer unique réutilisé, conforme au
+//                         manifeste révisé (28 juin 2026).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::{LiveRegistry, regenerate_and_swap};
 
-use rayon::prelude::*;
 use tokio::sync::Notify;
 use tokio::time::interval;
 
@@ -217,10 +218,10 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
 }
 
 // =============================================================================
-// Rendu parallèle pur — sans I/O disque (inchangé par cette session)
+// Rendu séquentiel pur — sans I/O disque
 // =============================================================================
 
-/// Rendu parallèle pur — sans I/O disque.
+/// Rendu séquentiel pur — sans I/O disque.
 ///
 /// ─── Rôle ────────────────────────────────────────────────────────────────────
 ///
@@ -234,26 +235,17 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
 ///
 /// ─── Invariants identiques à BatchRenderer::render_batch ────────────────────
 ///
-///   O(T) allocations, buf.clear() préserve la capacité, Send + 'static requis.
-///   black_box() dans le benchmark empêche LLVM d'éliminer les push_str
-///   dont le résultat n'est pas observé hors de la closure.
+///   Buffer unique alloué une fois, réutilisé sur tout le lot. buf.clear()
+///   préserve la capacité entre enregistrements : zéro allocation intra-lot
+///   après le premier render(). Concurrence inter-shard assurée par Tokio en
+///   amont (Dispatcher::run), pas par ce chemin — séquentialité délibérée
+///   intra-lot, conforme au manifeste révisé.
 pub fn render_batch_pure<P: Projection>(batch: Vec<(P::Record, P::VarlenOwned)>) {
-    batch
-        .into_par_iter()
-        .map_with(
-            (String::new(), 0usize), // (buffer réutilisé, ref_cap pour diagnostics)
-            |(buf, ref_cap), (record, varlena)| {
-                buf.clear();
-                P::render(&record, &varlena, buf);
-                // ref_cap : capturé pour diagnostics uniquement.
-                // Permet au test d'intégration de vérifier le no-realloc
-                // sans introduire de logique de mesure dans render_batch().
-                if *ref_cap == 0 {
-                    *ref_cap = buf.capacity();
-                }
-            },
-        )
-        .for_each(|_| {});
+    let mut buf = String::new();
+    for (record, varlena) in &batch {
+        buf.clear();
+        P::render(record, varlena, &mut buf);
+    }
 }
 
 #[cfg(test)]
@@ -262,7 +254,6 @@ mod tests {
         CONTENT_CORE_TOTAL_CAP, ContentCoreProjection, ContentCoreStorageRow,
         ContentCoreVarlenOwned,
     };
-    use rayon::prelude::*;
     // Trait requis en scope pour résoudre ContentCoreProjection::render()
     // et ContentCoreProjection::packfile_path() sous forme qualifiée.
     // use as _ ne suffit pas pour les appels Type::method() — seul
@@ -274,9 +265,8 @@ mod tests {
     // Constantes du jeu de données
     // =========================================================================
 
-    /// Taille du lot : suffisant pour que Rayon subdivise le travail sur
-    /// plusieurs threads et que chaque thread traite plusieurs enregistrements,
-    /// rendant observable la stabilité inter-itération de la capacité.
+    /// Taille du lot : suffisant pour rendre observable la stabilité de
+    /// capacité sur de nombreuses itérations successives du buffer unique.
     const BATCH_SIZE: usize = 1_000;
 
     /// Chaîne varlena agressive : contient les cinq caractères dangereux en HTML
@@ -342,30 +332,22 @@ mod tests {
     ///
     ///   3. Débit sans panique : 1000 records projetés sans erreur.
     ///
-    /// ─── Mécanique du seed (String, usize) ───────────────────────────────────
+    /// ─── Mécanique du buffer unique ──────────────────────────────────────────
     ///
-    ///   Le seed de map_with est (String::new(), 0usize).
-    ///   - String::new() : buffer réutilisé par thread (no-alloc après premier rendu).
-    ///   - 0usize        : capacité de référence. 0 = "pas encore observée".
+    ///   buf est alloué une seule fois, avant la boucle, à TOTAL_CAP.
+    ///   Séquentialité délibérée intra-lot : un seul buffer, réutilisé pour
+    ///   chaque enregistrement — aucun état par thread à tracer.
     ///
-    ///   Au premier rendu du thread (ref_cap == 0) :
-    ///     1. render() est appelé → buf atteint TOTAL_CAP.
-    ///     2. ref_cap est fixé à buf.capacity().
-    ///     3. La correction HTML est vérifiée sur ce premier fragment.
+    ///   À chaque itération :
+    ///     1. cap_before capture la capacité avant le render() courant.
+    ///     2. buf.clear() remet len=0, capacity inchangée.
+    ///     3. render() est appelé.
+    ///     4. Assertion : buf.capacity() == cap_before.
+    ///        Un écart prouve une réallocation à cette itération précise.
     ///
-    ///   Aux rendus suivants (ref_cap > 0) :
-    ///     1. buf.clear() remet len=0, capacity inchangée.
-    ///     2. render() est appelé.
-    ///     3. Assertion : buf.capacity() == ref_cap.
-    ///        Un écart prouve un realloc inter-itération.
-    ///
-    /// ─── Pourquoi map_with retourne () ───────────────────────────────────────
-    ///
-    ///   La closure retourne () — les assertions sont posées inline, pas
-    ///   collectées. map_with est consommé par for_each(|_| {}).
-    ///   Rayon garantit que la closure est appelée séquentiellement par thread
-    ///   sur les éléments qui lui sont assignés : ref_cap est donc un état
-    ///   mono-thread sans besoin de synchronisation.
+    ///   La correction HTML (échappement, structure) est vérifiée sur le
+    ///   premier fragment produit — elle ne dépend pas de l'itération, donc
+    ///   une seule vérification suffit à couvrir marius_html_escape().
     #[test]
     fn test_hot_path_pipeline_stress() {
         // Construction du lot : 1000 tuples (StorageRow, VarlenOwned).
@@ -375,108 +357,75 @@ mod tests {
             .map(|_| (worst_case_storage(), aggressive_varlena()))
             .collect();
 
+        // Buffer unique, préalloué à TOTAL_CAP : conforme au chemin réel
+        // (BatchRenderer::render_batch), pas une reconstitution par thread.
+        let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
+
         // Compteur de records effectivement projetés, pour vérifier qu'aucun
-        // n'est silencieusement sauté par Rayon.
-        // AtomicUsize : seul état partagé entre threads, lecture finale hors Rayon.
-        let projected = std::sync::atomic::AtomicUsize::new(0);
+        // n'est silencieusement sauté.
+        let mut projected = 0usize;
 
-        // Pattern map_with : seed (buf, ref_cap) cloné une fois par thread Rayon.
-        // ref_cap = 0 encode "pas encore observé" — 0 n'est jamais une capacité
-        // valide après un premier render() (TOTAL_CAP > 0 par construction).
-        batch
-            .into_par_iter()
-            .map_with(
-                (String::new(), 0usize), // seed : (buffer réutilisé, ref_cap)
-                |(buf, ref_cap), (storage, varlena)| {
-                    if *ref_cap == 0 {
-                        // ── Premier rendu de ce thread ────────────────────────
-                        // buf part de capacité 0. render() appelle
-                        // buf.reserve(STATIC_CAP + DYNAMIC_CAP) en premier.
-                        // Après render(), buf.capacity() == TOTAL_CAP (ou plus,
-                        // selon l'allocateur système qui peut arrondir à la page).
-                        ContentCoreProjection::render(&storage, &varlena, buf);
+        for (i, (storage, varlena)) in batch.iter().enumerate() {
+            let cap_before = buf.capacity();
+            buf.clear();
 
-                        // Fixe la référence pour toutes les itérations suivantes.
-                        *ref_cap = buf.capacity();
+            ContentCoreProjection::render(storage, varlena, &mut buf);
 
-                        // Borne inférieure : le buffer a au moins été alloué à TOTAL_CAP.
-                        // L'allocateur peut avoir arrondi à la page supérieure,
-                        // donc on n'assert pas l'égalité exacte ici.
-                        assert!(
-                            *ref_cap >= CONTENT_CORE_TOTAL_CAP,
-                            "Premier render() : capacité {ref_cap} < TOTAL_CAP {}. \
-                             Fragment-Forge sous-estime STATIC_CAP + DYNAMIC_CAP.",
-                            CONTENT_CORE_TOTAL_CAP
-                        );
+            // ── Invariant no-realloc inter-itération (primaire) ───────────────
+            // La capacité ne doit pas avoir crû, dès la première itération :
+            // buf est déjà préalloué à TOTAL_CAP avant la boucle.
+            assert_eq!(
+                buf.capacity(),
+                cap_before,
+                "REALLOC détecté à l'itération {i} : capacité {} → {} après render(). \
+                 DYNAMIC_CAP ({}) sous-estime le pire cas varlena.",
+                cap_before,
+                buf.capacity(),
+                CONTENT_CORE_TOTAL_CAP
+            );
 
-                        // ── Correction HTML : vérification sur le premier fragment ─
-                        // Les cinq entités HTML doivent apparaître au moins une fois.
-                        // Si marius_html_escape() manque une branche, le caractère
-                        // brut apparaît dans le fragment — XSS potentiel.
-                        assert!(
-                            buf.contains("&amp;"),
-                            "Escape manquant : '&' non transformé en '&amp;'"
-                        );
-                        assert!(
-                            buf.contains("&lt;"),
-                            "Escape manquant : '<' non transformé en '&lt;'"
-                        );
-                        assert!(
-                            buf.contains("&gt;"),
-                            "Escape manquant : '>' non transformé en '&gt;'"
-                        );
-                        assert!(
-                            buf.contains("&quot;"),
-                            "Escape manquant : '\"' non transformé en '&quot;'"
-                        );
-                        assert!(
-                            buf.contains("&#39;"),
-                            "Escape manquant : '\\'' non transformé en '&#39;'"
-                        );
+            if i == 0 {
+                // ── Correction HTML : vérification sur le premier fragment ────
+                // Les cinq entités HTML doivent apparaître au moins une fois.
+                // Si marius_html_escape() manque une branche, le caractère
+                // brut apparaît dans le fragment — XSS potentiel.
+                assert!(
+                    buf.contains("&amp;"),
+                    "Escape manquant : '&' non transformé en '&amp;'"
+                );
+                assert!(
+                    buf.contains("&lt;"),
+                    "Escape manquant : '<' non transformé en '&lt;'"
+                );
+                assert!(
+                    buf.contains("&gt;"),
+                    "Escape manquant : '>' non transformé en '&gt;'"
+                );
+                assert!(
+                    buf.contains("&quot;"),
+                    "Escape manquant : '\"' non transformé en '&quot;'"
+                );
+                assert!(
+                    buf.contains("&#39;"),
+                    "Escape manquant : '\\'' non transformé en '&#39;'"
+                );
 
-                        // Structure HTML minimale.
-                        assert!(buf.starts_with("<!DOCTYPE html>"), "DOCTYPE manquant");
-                        assert!(
-                            buf.trim_end().ends_with("</html>"),
-                            "balise </html> manquante"
-                        );
-                    } else {
-                        // ── Rendus suivants : invariant no-realloc inter-itération ─
-                        // buf.clear() remet len=0, capacity inchangée.
-                        // render() ne doit pas dépasser la capacité établie.
-                        buf.clear();
-                        let cap_before = buf.capacity();
+                // Structure HTML minimale.
+                assert!(buf.starts_with("<!DOCTYPE html>"), "DOCTYPE manquant");
+                assert!(
+                    buf.trim_end().ends_with("</html>"),
+                    "balise </html> manquante"
+                );
+            }
 
-                        ContentCoreProjection::render(&storage, &varlena, buf);
-
-                        // Assertion primaire : la capacité ne doit pas avoir crû.
-                        // Une croissance = realloc = violation de l'invariant no-realloc.
-                        // L'allocateur ne réduit jamais la capacité spontanément,
-                        // donc cap_before == *ref_cap est garanti si aucun realloc.
-                        assert_eq!(
-                            buf.capacity(),
-                            cap_before,
-                            "REALLOC inter-itération détecté sur thread Rayon : \
-                             capacité {} → {} après render(). \
-                             DYNAMIC_CAP ({}) sous-estime le pire cas varlena.",
-                            cap_before,
-                            buf.capacity(),
-                            CONTENT_CORE_TOTAL_CAP
-                        );
-                    }
-
-                    projected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                },
-            )
-            .for_each(|_| {});
+            projected += 1;
+        }
 
         // ── Vérification de débit ─────────────────────────────────────────────
         // Tous les enregistrements du lot ont été projetés.
-        let total = projected.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
-            total, BATCH_SIZE,
-            "Débit incomplet : {total}/{BATCH_SIZE} records projetés. \
-             Vérifier la distribution Rayon et l'absence de short-circuit."
+            projected, BATCH_SIZE,
+            "Débit incomplet : {projected}/{BATCH_SIZE} records projetés."
         );
 
         println!(

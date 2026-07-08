@@ -22,8 +22,8 @@
 //            push_str / write_fmt ne déborde la capacité pré-allouée.
 //
 //   NE PROUVE PAS : que le processus entier n'alloue pas.
-//            Rayon alloue pour ses work-stealing deques et ses jobs.
 //            Divan alloue pour ses structures de mesure.
+//            Le runtime Tokio alloue pour ses tâches et son ordonnanceur.
 //            Ces allocations sont réelles mais hors du chemin de rendu.
 //            La fenêtre reset/read isole render() de ce bruit.
 //
@@ -47,7 +47,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // =============================================================================
 
 /// Nombre d'allocations depuis le dernier reset().
-/// AtomicU64 : lecture/écriture sans lock depuis n'importe quel thread Rayon.
+/// AtomicU64 : lecture/écriture sans lock depuis n'importe quel thread du
+/// runtime (allocateur global, appelable depuis n'importe quel contexte).
 static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Octets alloués cumulés depuis le dernier reset().
@@ -86,7 +87,7 @@ impl CountingAlloc {
     }
 
     /// Nombre d'allocations enregistrées depuis le dernier reset().
-    /// Ordering::SeqCst : garantit la visibilité des écritures Rayon.
+    /// Ordering::SeqCst : garantit la visibilité de toute écriture concurrente.
     #[inline]
     pub fn alloc_count() -> u64 {
         ALLOC_COUNT.load(Ordering::SeqCst)
