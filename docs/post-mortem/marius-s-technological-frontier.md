@@ -10,7 +10,7 @@ Le point d'origine de cette dérive réside dans la volonté d'isoler la logique
 2. **Du parseur aux Opcodes :** Pour garantir la pureté du rendu, le parseur a été spécifié pour produire un jeu d'instructions machine.
 3. **Des Opcodes au Routeur Mémoire :** L'exécution de ces instructions nécessitait une arène mémoire partagée avec la source de vérité, poussant l'architecture vers la gestion directe de buffers via POSIX `shm` et l'injection de contexte via des CTE SQL complexes.
 
-**Conclusion du diagnostic :** Bien qu'intellectuellement cohérente et structurellement alignée avec les principes Data-Oriented Design (DOD), cette spécification résolvait des problèmes appartenant à une génération ultérieure du moteur (v2), sacrifiant la livrabilité immédiate et introduisant des risques systémiques non spécifiés (divergence de layout mémoire, buffer overreads aveugles).
+**Conclusion du diagnostic :** Bien qu'intellectuellement cohérente et structurellement alignée avec les principes Data-Oriented Design (DOD), cette spécification résolvait des problèmes appartenant à une génération ultérieure du moteur (v2), introduisant des risques systémiques non spécifiés (divergence de layout mémoire, buffer overreads aveugles).
 
 ## 2. Restauration des Invariants (Le Recadrage)
 

@@ -1,12 +1,6 @@
 ```
-marius$ tree -I "target|README.md|db|doc|docs|logs|artifacts"
+marius$ tree -I "docs|doc|README.md|target|logs|tests|artifacts|archives"
 .
-├── archives
-│   └── pre-adr007
-│       ├── body.rs
-│       ├── generator.rs
-│       ├── orchestrator.rs
-│       └── prologue.rs
 ├── Cargo.lock
 ├── Cargo.toml
 ├── crates
@@ -89,11 +83,56 @@ marius$ tree -I "target|README.md|db|doc|docs|logs|artifacts"
 │       │       └── sweep.rs
 │       └── server
 │           ├── Cargo.toml
-│           ├── src
-│           │   ├── handlers.rs
-│           │   └── main.rs
-│           └── tests
-│               └── phase5_3_supervision.rs
+│           └── src
+│               ├── handlers.rs
+│               └── main.rs
+├── db
+│   ├── 00_infra
+│   │   ├── 01_bootstrap.sql
+│   │   ├── 02_extensions.sql
+│   │   └── 03_schemas.sql
+│   ├── 01_meta
+│   │   ├── 01_tables.sql
+│   │   ├── 02_functions.sql
+│   │   └── 03_views.sql
+│   ├── 02_identity
+│   │   ├── 01_components.sql
+│   │   └── 02_systems.sql
+│   ├── 03_geo
+│   │   ├── 01_components.sql
+│   │   └── 02_systems.sql
+│   ├── 04_org
+│   │   ├── 01_components.sql
+│   │   └── 02_systems.sql
+│   ├── 05_content
+│   │   ├── 01_components.sql
+│   │   └── 02_systems.sql
+│   ├── 06_commerce
+│   │   ├── 01_components.sql
+│   │   └── 02_systems.sql
+│   ├── 07_cross_fk
+│   │   └── 01_constraints.sql
+│   ├── 08_dcl
+│   │   ├── 01_grants.sql
+│   │   └── 02_secdef.sql
+│   ├── 09_rls
+│   │   └── 01_policies.sql
+│   ├── 10_meta_seed
+│   │   └── 01_manifest.sql
+│   ├── 11_audit
+│   │   ├── 01_v_performance_sentinel.sql
+│   │   └── 02_v_master_health_audit.sql
+│   ├── dml
+│   │   ├── forge_test_dml.pgsql
+│   │   ├── master_schema_dml.pgsql
+│   │   └── triggers_notify_dml.sql
+│   ├── master_init.sql
+│   ├── migrations
+│   │   └── 01_add_walsn.sql
+│   └── tools
+│       ├── extended-containment-security-matrix.md
+│       ├── master-health-audit.md
+│       └── meta_tooling_guide.md
 └── scripts
     ├── certify_frugality.sh
     └── profile_frugality.sh
