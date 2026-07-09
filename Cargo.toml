@@ -2,10 +2,10 @@
 resolver = "2"
 members = [
     # Forge (build-time uniquement — jamais en [dependencies] runtime)
-    "forge/db-forge",
-    "forge/fragment-forge",
-    "forge/guard-forge",
-    "forge/bridge-forge",
+    "crates/forge/db-forge",
+    "crates/forge/fragment-forge",
+    "crates/forge/guard-forge",
+    "crates/forge/bridge-forge",
 
     # Core (no_std attitude)
     "crates/core/collector",

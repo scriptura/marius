@@ -20,7 +20,7 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 
 [build-dependencies]
-marius-db-forge = { path = "../../../forge/db-forge", version = "0.3.0" }
-marius-fragment-forge = { path = "../../../forge/fragment-forge", version = "0.3.0" }
+marius-db-forge = { path = "../../forge/db-forge", version = "0.3.0" }
+marius-fragment-forge = { path = "../../forge/fragment-forge", version = "0.3.0" }
 sqlx = { workspace = true }
 tokio = { workspace = true }

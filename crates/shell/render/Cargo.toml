@@ -27,7 +27,7 @@ divan = "0.1"
 marius-schema = { path = "../../core/schema", version = "0.3.0" }
 
 [build-dependencies]
-marius-fragment-forge = { path = "../../../forge/fragment-forge", version = "0.3.0" }
+marius-fragment-forge = { path = "../../forge/fragment-forge", version = "0.3.0" }
 
 [[bench]]
 name = "hot_path_render"
