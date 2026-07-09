@@ -2,7 +2,7 @@
 
 **Statut** : Accepté  
 **Date** : 2026  
-**Composants** : `crates/core/projection`, `crates/core/schema`, `forge/fragment-forge`
+**Composants** : `crates/core/projection`, `crates/core/schema`, `crates/forge/fragment-forge`
 
 ---
 

@@ -286,7 +286,7 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
                  dans render() ({bytes} octets). \
                  DYNAMIC_CAP ({CONTENT_CORE_TOTAL_CAP}B) sous-estime le pire cas. \
                  Vérifier max_display_width (FieldKind) et max_escaped_len (VarlenField) \
-                 dans forge/fragment-forge/src/lib.rs."
+                 dans crates/forge/fragment-forge/src/lib.rs."
             );
 
             // black_box sur la référence — force LLVM à considérer buf comme

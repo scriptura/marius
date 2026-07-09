@@ -1,7 +1,7 @@
 # Spécification `marius-db-forge`
 
 **Statut :** Design Validé  
-**Cible :** `forge/db-forge/src/lib.rs` + refactoring `crates/core/schema/build.rs`  
+**Cible :** `crates/forge/db-forge/src/lib.rs` + refactoring `crates/core/schema/build.rs`  
 **Dépendances directes :** `sqlx`, `tokio`, `marius-fragment-forge`
 
 ---
@@ -9,7 +9,7 @@
 ## I. Diagnostic de l'Existant
 
 Le `build.rs` de `crates/core/schema/` contient une implémentation complète et
-fonctionnelle de la logique `db-forge`. La crate `forge/db-forge/` est vide.
+fonctionnelle de la logique `db-forge`. La crate `crates/forge/db-forge/` est vide.
 
 La mission est une **extraction avec extension**, pas une écriture depuis zéro :
 

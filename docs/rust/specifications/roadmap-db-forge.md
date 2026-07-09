@@ -2,12 +2,12 @@
 
 ## Phase 0 — Extraction (Refactoring)
 
-Objectif : déplacer la logique inline de `build.rs` vers `forge/db-forge/src/`
+Objectif : déplacer la logique inline de `build.rs` vers `crates/forge/db-forge/src/`
 sans modifier le comportement. L'output `generated_schema.rs` doit être
 bit-pour-bit identique avant et après.
 
 **0.1** Créer la structure de répertoires :
-`forge/db-forge/src/codegen/` avec fichiers vides.
+`crates/forge/db-forge/src/codegen/` avec fichiers vides.
 
 **0.2** Déplacer vers `mapping.rs` :
 `TypeMapping`, `Column`, `PrimaryKey`, `map_type()`.
@@ -39,7 +39,7 @@ bit-pour-bit identique avant et après.
 
 **0.11** Créer `lib.rs` avec tous les `pub use`.
 
-**0.12** Mettre à jour `forge/db-forge/Cargo.toml` :
+**0.12** Mettre à jour `crates/forge/db-forge/Cargo.toml` :
 ajouter `sqlx`, `tokio` en dépendances workspace. Ajouter `chrono` si nécessaire.
 
 **0.13** Mettre à jour `crates/core/schema/Cargo.toml` :

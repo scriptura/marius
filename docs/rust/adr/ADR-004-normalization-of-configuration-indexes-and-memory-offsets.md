@@ -2,7 +2,7 @@
 
 **Statut** : Accepté  
 **Date** : 2026  
-**Composants** : `forge/guard-forge`, `forge/bridge-forge`, `crates/core/collector`
+**Composants** : `crates/forge/guard-forge`, `crates/forge/bridge-forge`, `crates/core/collector`
 
 ---
 

@@ -1,7 +1,7 @@
 # Architecture du pipeline « Mode Page » — Marius / Fragment-Forge
 
 **Statut :** document d'architecture (pas une spécification fonctionnelle, pas un plan d'implémentation).
-**Portée :** `forge/fragment-forge/src/lib.rs`, `crates/core/schema/build.rs`.
+**Portée :** `crates/forge/fragment-forge/src/lib.rs`, `crates/core/schema/build.rs`.
 **Base factuelle :** lecture directe du code gelé (`lib.rs`), pas de la spécification v1.1 seule. Les écarts entre les deux sont isolés en fin de document.
 
 ---

@@ -2,10 +2,10 @@
 
 > **Créé le 17 juin 2026. Vérifié et daté le 7 juillet 2026.**
 > **Note de statut** : le §1 (dernière étape) et le §5 (étape 10) décrivent un
-> modèle de service obsolète — résolution *à la requête* depuis `store.bin`
+> modèle de service obsolète — résolution _à la requête_ depuis `store.bin`
 > directement (`OnceLock`/`fetch_batch` au premier appel HTTP). Ce modèle a été
 > explicitement écarté par ADR-008 (22 juin 2026, postérieur à la dernière
-> révision de ce guide) au profit d'une résolution *à l'écriture* : un pack
+> révision de ce guide) au profit d'une résolution _à l'écriture_ : un pack
 > HTML pré-rendu (`{table}.bin`, distinct de `{table}_store.bin`), régénéré
 > uniquement sur `NOTIFY` Postgres, servi par `pread`. Le reste de ce document
 > (registre, annotations, format binaire de `store.bin`, procédure d'ajout de
@@ -14,7 +14,7 @@
 
 Guide opérationnel du pipeline AOT. Destiné au développeur qui ajoute, modifie
 ou débogue un composant dans Marius. Ne documente pas les internals de la Forge
-(voir les commentaires inline dans `forge/db-forge/src/`).
+(voir les commentaires inline dans `crates/forge/db-forge/src/`).
 
 ---
 
@@ -74,13 +74,13 @@ ne cassera pour un composant pré-déclaré.
 
 Déclare la table portant les champs texte (varlena) d'un composant.
 
-| Colonne         | Type      | Description                      |
-| --------------- | --------- | -------------------------------- |
-| `component_id`  | `text` FK | Référence `containment_intent`   |
-| `join_slot_idx` | `int2`    | `0` en Phase 1 (slot unique)     |
-| `ref_schema`    | `text`    | Schéma de la table varlena       |
+| Colonne         | Type      | Description                                                                                                                                          |
+| --------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `component_id`  | `text` FK | Référence `containment_intent`                                                                                                                       |
+| `join_slot_idx` | `int2`    | `0` en Phase 1 (slot unique)                                                                                                                         |
+| `ref_schema`    | `text`    | Schéma de la table varlena                                                                                                                           |
 | `ref_table`     | `text`    | Table varlena — **table physique uniquement**, jamais une vue sémantique (ADR-012) : la détection de borne (`CHECK`, §3) n'existe que sur les tables |
-| `fk_column`     | `text`    | Colonne FK entre les deux tables |
+| `fk_column`     | `text`    | Colonne FK entre les deux tables                                                                                                                     |
 
 ```sql
 INSERT INTO meta.component_varlena_join
@@ -169,7 +169,7 @@ COMMENT ON COLUMN content.identity.description
 la Forge. Le `stride` du store.bin est calculé indépendamment par `mem::size_of::<P::Record>()`.
 
 `intent_density_bytes` doit correspondre exactement au layout calculé
-par `validate_layout()` dans `forge/db-forge/src/validate.rs`.
+par `validate_layout()` dans `crates/forge/db-forge/src/validate.rs`.
 
 **Formule :**
 

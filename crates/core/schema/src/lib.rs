@@ -42,7 +42,7 @@
 //   ni comblé par un fallback arbitraire (10 000B, désormais supprimé). La
 //   classification Hot/Cold/Erreur est tranchée par resolve_and_measure selon
 //   que le champ est référencé ou non par le template résolu — voir
-//   forge/fragment-forge/src/lib.rs, module tests_phase_2_1, tests dédiés à
+//   crates/forge/fragment-forge/src/lib.rs, module tests_phase_2_1, tests dédiés à
 //   cette table de vérité (unbounded_field_referenced_fails_resolution, etc).
 //   Cette frontière vit entièrement côté compilateur (Voie B) ; les tests de
 //   ratio de remplissage ci-dessous ne la concernent pas et ont été déclassés
@@ -253,7 +253,7 @@ mod tests {
     // n'est plus un signal fiable d'un défaut du compilateur. L'invariant qui
     // comptait réellement ("un champ non borné référencé échoue explicitement
     // à la compilation") est désormais vérifié directement et positivement
-    // dans forge/fragment-forge/src/lib.rs (tests dédiés au disjoncteur
+    // dans crates/forge/fragment-forge/src/lib.rs (tests dédiés au disjoncteur
     // Hot/Cold/Erreur), sans dépendre du contenu d'un fixture de rendu.
     //
     // Conservé comme indicateur informatif (eprintln!, jamais de panic!) :

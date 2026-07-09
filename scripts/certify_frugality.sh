@@ -144,7 +144,7 @@ else
     echo "       → buf.reserve() a déclenché un realloc."
     echo "       → Vérifier max_display_width (FieldKind)"
     echo "         et max_escaped_len (VarlenField)"
-    echo "         dans forge/fragment-forge/src/lib.rs."
+    echo "         dans crates/forge/fragment-forge/src/lib.rs."
     echo ""
     echo "    2. Nouveau champ varlena sans max_len défini"
     echo "       → Régénérer via : cargo build -p marius-schema"

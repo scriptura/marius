@@ -1,7 +1,7 @@
 # Spécification : Compilateur de Projections HTML AOT — Moteur Marius
 
 **Version :** 1.1 (stabilisation éditoriale post-revue finale)
-**Périmètre :** `forge/fragment-forge`, `crates/core/projection`, `crates/core/schema`
+**Périmètre :** `crates/forge/fragment-forge`, `crates/core/projection`, `crates/core/schema`
 **Date :** 9 juin 2026
 
 ---

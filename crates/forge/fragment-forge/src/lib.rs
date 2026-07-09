@@ -1,5 +1,5 @@
 // =============================================================================
-// marius-fragment-forge — forge/fragment-forge/src/lib.rs
+// marius-fragment-forge — crates/forge/fragment-forge/src/lib.rs
 // Projet Marius · ADR-002 / no_std-attitude-within-marius.md
 //
 // Génère le corps de render() pour chaque table surveillée.

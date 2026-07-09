@@ -13,7 +13,7 @@ longueur de tout champ varlena (`TEXT`, `VARCHAR`) participant à une projection
 HTML, afin de calculer `PAGE_DYNAMIC_CAP` et garantir l'invariant zéro-réallocation
 (`buf.reserve(PAGE_TOTAL_CAP)` suffisant en toute circonstance).
 
-`fetch_varlena_cols()` (`forge/db-forge/src/introspect.rs`) résout cette borne
+`fetch_varlena_cols()` (`crates/forge/db-forge/src/introspect.rs`) résout cette borne
 selon trois cas :
 
 1. `VARCHAR(N)` / `BPCHAR(N)` → lecture directe de `atttypmod`.

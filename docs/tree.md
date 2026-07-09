@@ -32,6 +32,36 @@ marius$ tree -I "target|README.md|db|doc|docs|logs|artifacts"
 │   │           │   └── product_core.marius
 │   │           └── content
 │   │               └── core.marius
+│   ├── forge
+│   │   ├── bridge-forge
+│   │   │   ├── Cargo.toml
+│   │   │   └── src
+│   │   │       └── lib.rs
+│   │   ├── db-forge
+│   │   │   ├── Cargo.toml
+│   │   │   └── src
+│   │   │       ├── codegen
+│   │   │       │   ├── collector.rs
+│   │   │       │   ├── from_impl.rs
+│   │   │       │   ├── mod.rs
+│   │   │       │   ├── projection.rs
+│   │   │       │   ├── row.rs
+│   │   │       │   ├── storage.rs
+│   │   │       │   └── varlen.rs
+│   │   │       ├── introspect.rs
+│   │   │       ├── lib.rs
+│   │   │       ├── mapping.rs
+│   │   │       ├── naming.rs
+│   │   │       ├── registry.rs
+│   │   │       └── validate.rs
+│   │   ├── fragment-forge
+│   │   │   ├── Cargo.toml
+│   │   │   └── src
+│   │   │       └── lib.rs
+│   │   └── guard-forge
+│   │       ├── Cargo.toml
+│   │       └── src
+│   │           └── lib.rs
 │   ├── marius
 │   │   ├── Cargo.toml
 │   │   └── src
@@ -64,36 +94,6 @@ marius$ tree -I "target|README.md|db|doc|docs|logs|artifacts"
 │           │   └── main.rs
 │           └── tests
 │               └── phase5_3_supervision.rs
-├── forge
-│   ├── bridge-forge
-│   │   ├── Cargo.toml
-│   │   └── src
-│   │       └── lib.rs
-│   ├── db-forge
-│   │   ├── Cargo.toml
-│   │   └── src
-│   │       ├── codegen
-│   │       │   ├── collector.rs
-│   │       │   ├── from_impl.rs
-│   │       │   ├── mod.rs
-│   │       │   ├── projection.rs
-│   │       │   ├── row.rs
-│   │       │   ├── storage.rs
-│   │       │   └── varlen.rs
-│   │       ├── introspect.rs
-│   │       ├── lib.rs
-│   │       ├── mapping.rs
-│   │       ├── naming.rs
-│   │       ├── registry.rs
-│   │       └── validate.rs
-│   ├── fragment-forge
-│   │   ├── Cargo.toml
-│   │   └── src
-│   │       └── lib.rs
-│   └── guard-forge
-│       ├── Cargo.toml
-│       └── src
-│           └── lib.rs
 └── scripts
     ├── certify_frugality.sh
     └── profile_frugality.sh

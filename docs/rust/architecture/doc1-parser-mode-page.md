@@ -1,6 +1,6 @@
 # Document 1 — Parser Mode Page
 
-**Contrat d'architecture, pas d'implémentation.** Portée : `forge/fragment-forge/src/lib.rs`, nouveau module.
+**Contrat d'architecture, pas d'implémentation.** Portée : `crates/forge/fragment-forge/src/lib.rs`, nouveau module.
 **Principe :** produire l'AST d'**un seul fichier**, sans lecture d'un second fichier, sans résolution d'héritage. Toute connaissance inter-fichiers est hors périmètre de ce document (Document 2).
 
 ---
