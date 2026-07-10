@@ -1,0 +1,115 @@
+/* @bug @affected Chrome @note Nombreux bugs : éléments html ou effets d'ombre tronqués s'ils dépassent des colonnes, drop-shadow utilisé sur des éléments internes aux colonnes créé des artefacts. */
+
+[class^='column'] {
+  :has(> &) {
+    container: grid/inline-size;
+    width: 100%; /* @note Important si le conteneur n'a pas de largeur définie par défaut. */
+  }
+  column-gap: 0;
+  position: relative;
+
+  & > * {
+    display: inline-block;
+    width: 100%;
+    /* @note Évite aux items enfants de column d'être éventuellement coupés en deux. @see https://stackoverflow.com/questions/7785374 */
+    break-inside: avoid-column;
+    /* @note Alias de overflow-wrap @see https://developer.mozilla.org/fr/docs/Web/CSS/overflow-wrap */
+    word-wrap: break-word;
+  }
+
+  &.gap {
+    column-gap: var(--gap);
+    /* @note column-gap pour les goutières verticales, margin pour les goutières horizontales. */
+
+    & > * {
+      margin-block-end: var(--gap);
+    }
+  }
+
+  &.gap-top {
+    margin-block-start: var(--gap);
+  }
+
+  &.gap-bottom {
+    margin-block-end: 0;
+  }
+
+  &.gap-vertical {
+    gap: 0 var(--gap);
+    /* column-gap: var(--gap); */
+  }
+}
+
+@container grid (width <= 35em) {
+  .XS-column2 {
+    column-count: 2;
+  }
+}
+
+@container grid (width > 35em) {
+  .column2,
+  .column3,
+  .column4,
+  .s-column2 {
+    column-count: 2;
+  }
+
+  .column5,
+  .column6 {
+    column-count: 3;
+  }
+}
+
+@container grid (width > 50em) {
+  .column3,
+  .column4 {
+    column-count: 3;
+  }
+
+  .column5,
+  .column6 {
+    column-count: 4;
+  }
+
+  .m-column2 {
+    column-count: 2;
+  }
+}
+
+@container grid (width > 70em) {
+  .column4 {
+    column-count: 4;
+  }
+
+  .column5 {
+    column-count: 5;
+  }
+
+  .column6 {
+    column-count: 6;
+  }
+
+  .l-column3 {
+    column-count: 3;
+  }
+}
+
+.column-fix {
+  --column-width: 22.25em; /* = 356px, donc 4 colonnes pour les 92em quand wrap au max. */
+  max-width: var(--column-width);
+  column-count: 1;
+  margin-inline: auto;
+  @media (48.5em < width) {
+    /* @note +3em comprend les 2 gaps plus l'épaisseur estimée de la barre de scroll vertical. */
+    max-width: calc(var(--column-width) * 2 + var(--gap));
+    column-count: 2;
+  }
+  @media (71.75em < width) {
+    max-width: calc(var(--column-width) * 3 + 2 * var(--gap));
+    column-count: 3;
+  }
+  @media (95em < width) {
+    max-width: calc(var(--column-width) * 4 + 3 * var(--gap));
+    column-count: 4;
+  }
+}

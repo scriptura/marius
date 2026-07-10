@@ -1,0 +1,18 @@
+::-webkit-scrollbar {
+  /* @affected Chrome, Edge, and Safari. */
+  /* @note Ne doit pas être scalable. */
+  width: 11px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--colorA003);
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--color2);
+}
+
+* {
+  /* @affected Firefox @todo Standard futur ? */
+  scrollbar-color: var(--color2) var(--colorA003);
+}

@@ -1,0 +1,163 @@
+.forum {
+  all: unset;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1em;
+}
+
+.topic-item {
+  position: relative;
+  display: grid;
+  grid-template-rows: repeat(2, auto);
+  padding-inline: 1em;
+  background-color: var(--colorG27);
+  border-radius: var(--r1);
+  box-shadow: var(--shadow1);
+  gap: 0 1em;
+
+  @media (--to-xs) {
+    grid-template-columns: minmax(0, 1fr) 2em;
+    grid-template-areas: 'ttt ttt' 'uuu aaa';
+  }
+
+  @media (--from-xs) {
+    grid-template-columns: 4em minmax(0, 1fr);
+    grid-template-areas: 'aaa ttt' 'aaa uuu';
+  }
+
+  & .topic-link {
+    /* @note Permet à tout l'élément d'être cliquable (simulation d'imbrication des liens) */
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+
+    &:where(:hover, :active) + * h2 a {
+      /* @note Pas de focus car tabindex='-1' */
+      /* color: var(--colorW); */
+      text-decoration: underline;
+    }
+  }
+
+  & > * a {
+    /* @note Rétablit la possibilité de cliquer les liens de base en les faisant passer au dessus. */
+    position: relative;
+    z-index: 3;
+    text-decoration: none;
+  }
+
+  & > :nth-child(2),
+  & > :nth-child(3) {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0 1em;
+  }
+
+  & :where(p, ul, li) {
+    all: unset;
+  }
+
+  & > :nth-child(2) {
+    grid-area: ttt;
+  }
+
+  & > :nth-child(2) div {
+    flex-shrink: 0;
+  }
+
+  & > :nth-child(3) {
+    flex-wrap: wrap;
+
+    & p {
+      justify-content: start;
+      margin-block: 0.25em 1em;
+    }
+
+    & ul {
+      display: flex;
+      flex-wrap: wrap;
+      gap: calc(var(--gap) / 2) calc(var(--gap) / 2);
+      font-size: 0.8em;
+      margin-block-end: 1em;
+
+      & li {
+        margin-block-end: 0.5em;
+      }
+
+      & > :last-child {
+        margin-inline-end: 0;
+      }
+
+      & a {
+        padding: 0.25em 0.75em 0.25em 1.25em;
+        white-space: nowrap;
+        color: var(--colorT);
+        background-color: var(--colorG33);
+        clip-path: polygon(0.75em 0, 100% 0, 100% 100%, 0.75em 100%, 0 50%);
+
+        &:where(:focus, :hover, :active) {
+          color: var(--colorW);
+          background-color: var(--color2);
+        }
+      }
+    }
+  }
+
+  & h2 {
+    all: unset;
+    margin-block: 1.25em 0;
+    font-weight: bold;
+    /* font-size: 1em; */
+    text-wrap: balance;
+    & a {
+      color: var(--colorT);
+    }
+
+    & a:where(:focus, :hover, :active) {
+      text-decoration: underline;
+    }
+  }
+
+  &.topic-solved > :nth-child(2) svg:first-child {
+    color: var(--colorS4);
+  }
+}
+
+.avatars {
+  grid-area: aaa;
+  position: relative;
+  margin: auto;
+
+  @media (--to-xs) {
+    /* @note Valeur obtenue de manière un peu empirique, liée à la propriété font-size définie ci après. */
+    margin-block-end: 2em;
+    font-size: 0.5em;
+  }
+
+  &,
+  & > * {
+    width: 3.5em;
+    height: 3.5em;
+    background-image: var(--img, '');
+    background-color: var(--colorG13);
+    background-size: cover;
+    border-radius: 50%;
+    border: 0.2em solid var(--colorG27);
+  }
+
+  & > * {
+    position: absolute;
+  }
+
+  & > :nth-child(1) {
+    transform: translate(1.2em, 1em) scale(0.5);
+  }
+
+  & > :nth-child(2) {
+    transform: translate(1.2em, 0.2em) scale(0.5);
+  }
+
+  & > :nth-child(3) {
+    transform: translate(1.2em, -0.6em) scale(0.5);
+  }
+}

@@ -1,0 +1,278 @@
+/**
+ * @note Les ressets CSS sont inspiré de Bootstrap Reboot et Normalize CSS 8.0.1 puis étendu par nos soins.
+ * @see https://github.com/twbs/bootstrap/blob/v4-dev/scss/_reboot.scss
+ * @see https://github.com/necolas/normalize.css
+ * @see https://github.com/alsacreations/KNACSS/blob/v8/sass/base/_reset.scss
+ * @see https://github.com/alsacreations/KNACSS/blob/master/sass/_vendor/_reboot.scss
+ */
+
+:root {
+  color-scheme: var(--color-scheme);
+  /* Ability to the value of the root font sizes, affecting the value of `rem`. Null by default, thus nothing is generated. */
+  /*font-size: 1rem; */
+}
+
+*,
+::before,
+::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* @bugfix Prevent adjustments of font size after orientation changes @affected iOS. */
+  -webkit-text-size-adjust: 100%;
+  /* -webkit-tap-highlight-color: transparent */
+  /* Change the default tap highlight to be completely transparent. @affected iOS. */
+  color: var(--colorT);
+  background-color: var(--color1);
+  font-family: var(--font-list1);
+  /**
+   * Sur les verrous CSS @see https://hugogiraudel.com/2020/05/18/using-calc-to-figure-out-optimal-line-height/
+   * Outil en ligne @see https://modern-fluid-typography.vercel.app
+   * Le site étant entièrement scalable dans son ensemble, il n'y a pas d'utilisation de vérrou CSS en raison de ses effets de bords sur certains éléments (typographie, pre > code, ribbons...).
+  /* font-size: clamp(1em, .7vw + .1em, 1.125em); */
+  /* @bugfix Correct the line height @affected All browsers. */
+  line-height: 1.5;
+
+  @media (prefers-reduced-motion: no-preference) {
+    scroll-behavior: smooth;
+  }
+}
+
+::selection {
+  color: var(--colorW);
+  background-color: var(--colorAS2);
+}
+
+a {
+  color: var(--colorT2);
+  text-underline-offset: 10%;
+
+  &:where(:focus, :hover, :active) {
+    color: var(--colorW);
+    text-decoration: none;
+    outline: none;
+  }
+}
+
+p {
+  margin-block: 0.75em;
+}
+
+hr {
+  /* @bugfix Show the overflow @affected Edge and IE. */
+  overflow: visible;
+  /* @bugfix Add the correct box sizing @affected Firefox. */
+  box-sizing: content-box;
+  /* @bugfix Add the correct box sizing @affected Firefox @note Toujours définir une valeur. */
+  height: 0.5em;
+  margin: 2.5em 0;
+  /* @bugfix Reset gray color. @affected Firefox. */
+  color: transparent;
+  background-image: repeating-linear-gradient(-45deg, transparent 0 5px, var(--colorA1) 5px 10px);
+  border: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.h1,
+.h2,
+.h3,
+.h4,
+.h5,
+.h6 {
+  font-family: var(--font-list2);
+  text-align: start; /* @note Permet d'écraser le placement en justifié si besoin car conflit de cette dernière définition avec "text-wrap: balance". @todo À évaluer. */
+  text-wrap: balance;
+}
+
+:where(.h2, .h3, .h4, .h5, .h6) {
+  /* @note Important à redéfinir pour les classes aposées sur d'autres éléments que des titres, comme <legend> ou <label> par exemple. */
+  margin-block: 0.83em;
+  fieldset > legend& {
+    /* @bugfix @affected Chrome @note Si pas de correctif la marge passe en dessous du fieldset conteneur. */
+    padding-block-start: 0.83em;
+  }
+}
+
+h1,
+.h1 {
+  margin-block: clamp(0.83em, 5vw, 0.67em); /* 0.83em */
+  font-size: clamp(2em, 5vw, 2.5em); /* 2.5em */
+}
+
+h2,
+.h2 {
+  font-size: 2em;
+}
+
+h3,
+.h3 {
+  font-size: 1.75em;
+}
+
+h4,
+.h4 {
+  font-size: 1.5em;
+}
+
+h5,
+.h5 {
+  font-size: 1.25em;
+}
+
+h6,
+.h6 {
+  font-size: 1em;
+}
+
+hgroup {
+  & h1 {
+    margin-block-end: 0;
+  }
+}
+
+pre {
+  margin: 0;
+  /* @bugfix Correct the inheritance and scaling of font size @affected All browsers. */
+  font-family: monospace, monospace;
+  /* @bugfix Correct the odd `em` font sizing @affected All browsers. */
+  font-size: 1em;
+  white-space: pre-wrap;
+  /* word-break: keep-all; */
+}
+
+abbr[title] {
+  /* @bugfix Add the correct text decoration @affected Chrome, Edge, IE, Opera, and Safari. */
+  text-decoration: underline;
+  /* @bugfix Idem */
+  text-decoration: underline dotted;
+}
+
+b,
+strong {
+  /* @bugfix Add the correct font weight @affected Chrome, Edge, and Safari. */
+  font-weight: bold;
+}
+
+i,
+em {
+  font-style: italic;
+}
+
+blockquote {
+  margin: 0;
+}
+
+q {
+  /* Harmonisation des citations. */
+  quotes: '\201C' '\201D' '\2018' '\2019';
+}
+
+mark {
+  color: currentcolor;
+  background-color: var(--color3); /* --color2 */
+}
+
+small {
+  /* @bugfix Add the correct font size @affected All browsers. */
+  font-size: 80%;
+}
+
+sub,
+sup {
+  /* @bugfix Prevent `sub` and `sup` elements from affecting the line height @affected All browsers. */
+  position: relative;
+  line-height: 0;
+  font-size: 75%;
+  vertical-align: baseline;
+}
+
+sub {
+  /* @bugfix Prevent `sub` and `sup` elements from affecting the line height @affected All browsers. */
+  bottom: -0.25em;
+}
+
+sup {
+  /* @bugfix Prevent `sub` and `sup` elements from affecting the line height @affected All browsers. */
+  top: -0.5em;
+}
+
+ins {
+  text-underline-offset: 10%;
+}
+
+details {
+  /* @note Tentative de reproduire avec les marges l'espacement des items d'une liste. */
+  display: block;
+
+  &:first-child {
+    margin-block-start: 0.75em;
+  }
+
+  &:last-child {
+    margin-block-end: 0.75em;
+  }
+
+  :not(.accordion) > & details {
+    margin: 0 0 0 2em;
+
+    &:first-child {
+      margin-block-start: 0;
+    }
+
+    &:last-child {
+      margin-block-end: 0;
+    }
+  }
+}
+
+summary {
+  /* @bugfix Add the correct display @affected All browsers. */
+  display: list-item;
+  list-style: none;
+  cursor: pointer;
+
+  &:focus-visible,
+  &:hover {
+    outline: none;
+    color: var(--colorW);
+    text-decoration: underline;
+
+    &::before {
+      color: var(--colorW);
+    }
+  }
+
+  &::before {
+    /* @note Nous n'utilisons pas ::marker car le rendu diffère sur mobiles, ceci nous permet aussi de personnaliser la puce. @affected Chrome mobile. */
+    content: '➤';
+    display: inline-block;
+    margin-inline-end: 0.5em;
+    color: var(--color2);
+  }
+
+  details[open] > &::before {
+    transform: rotate(90deg);
+  }
+}
+
+iframe {
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+ruby {
+  display: grid;
+  gap: 0.5em;
+
+  & * {
+    margin: auto;
+  }
+}

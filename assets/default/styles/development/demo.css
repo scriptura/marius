@@ -1,0 +1,154 @@
+[class*='demo-items'] {
+  --itemHeight: 2em;
+
+  & > * {
+    box-sizing: border-box;
+    padding: 1em;
+    background-color: var(--colorG27);
+    box-shadow: var(--shadow1);
+  }
+
+  & > * code {
+    margin-left: 0.2em;
+    background-color: var(--colorAB2);
+  }
+}
+
+.demo-items-empty > * {
+  min-height: var(--itemHeight);
+}
+
+.demo-item {
+  box-sizing: border-box;
+  padding: 1em;
+  background-color: var(--colorG27);
+  box-shadow: var(--shadow1);
+
+  &.ribbon-content {
+    /* @note Si ribbon, alors une hauteur minimum doit être présente sur les éléments parents vides. */
+    min-height: 7.5em;
+  }
+}
+
+.demo-items-color {
+  color: var(--colorG18);
+
+  $demoColorDeg: 15;
+  $demoColorDeviation: 7;
+  @for $i from 1 to 15 {
+    & > :nth-child($(i)n) {
+      background-color: hsl(calc($i * $demoColorDeviation - $demoColorDeviation + $demoColorDeg), 100%, 50%);
+    }
+  }
+
+  & code {
+    background-color: var(--colorG27);
+  }
+}
+.demo-counter > * {
+  counter-increment: div;
+
+  &::before {
+    content: counter(div) '.';
+    display: inline;
+  }
+
+  & :first-child {
+    display: inline;
+  }
+}
+
+.type-components .box2 {
+  scroll-margin-block-start: 1em;
+}
+
+@media (--to-s) {
+  .type-components .box2 {
+    position: relative;
+    padding: 0;
+  }
+}
+
+@media (--from-s) {
+  .type-components .box2 {
+    padding: 4em 6em;
+    box-shadow: var(--shadow3);
+  }
+}
+
+@media (--to-s) {
+  .type-components .box2.ribbon-content::before {
+    content: '';
+    position: absolute;
+    top: -0.5em;
+    right: -0.5em;
+    width: 100%;
+    max-width: 20em;
+    aspect-ratio: 1/1;
+    background-image: linear-gradient(-135deg, var(--colorA005), transparent 50%);
+    background-repeat: no-repeat;
+    background-position: 100% 0%;
+    pointer-events: none;
+  }
+}
+
+@media (--to-s) {
+  .type-components .box2 > .ribbon-top-right {
+    transform: translate(2.85em, 0.9em) rotate(45deg) !important;
+  }
+}
+
+.demo-icons {
+  & ruby {
+    padding: 1em 0 0.5em;
+    background-color: var(--color1);
+    border-radius: var(--r2);
+    transition: all 0.3s ease-in-out;
+    &:hover {
+      background-color: var(--color5);
+      & * {
+        color: var(--colorW);
+      }
+    }
+  }
+  & svg {
+    font-size: 2em;
+  }
+  & rt {
+    font-size: 0.8em;
+    text-align: center;
+    color: var(--colorG38);
+  }
+}
+
+/*
+body::after {
+  content: 'XS';
+  position: fixed;
+  z-index: 5000;
+  bottom: .5em;
+  left: .5em;
+  width: 3em;
+  height: 3em;
+  line-height: 3em;
+  text-align: center;
+  color: #fff;
+  background-color: orange;
+  border-radius: 50%;
+  @media (min-width: $sizeS) {
+    content: 'S';
+  }
+  @media (min-width: $sizeM) {
+    content: 'M';
+  }
+  @media (min-width: $sizeL) {
+    content: 'L';
+  }
+  @media (min-width: $sizeXL) {
+    content: 'XL';
+  }
+  @media (min-width: $sizeXXL) {
+    content: 'XXL';
+  }
+}
+*/

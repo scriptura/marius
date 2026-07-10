@@ -1,0 +1,49 @@
+@media (--to-s) {
+  .line-mark {
+    /* @note Un match media javascript peutconditionner le script, mais cette solution est moins modulable et surtout moins robuste que la solution CSS. */
+    display: none;
+  }
+}
+
+@media (--from-s) {
+  .add-line-marks > * {
+    position: relative;
+  }
+
+  .line-mark {
+    position: absolute;
+    top: 0;
+    right: -6em;
+    width: 4em;
+    height: 2em;
+    vertical-align: sub;
+    /* @note Unité rem obligatoire car ne doit pas dépendre de l'élément parent. */
+    font-size: 1rem;
+    font-weight: normal;
+    text-decoration: none;
+    color: var(--colorG38);
+    outline: none;
+    transition: color 0.2s ease-in-out;
+    /* @note On évite de sélectionner les marqueurs, ceux-ci sont un élément de navigation et non de contenu. */
+    user-select: none;
+    scroll-margin-block-start: 1em;
+
+    &:where(:focus, :hover, :active) {
+      color: var(--colorW);
+      text-decoration: none;
+    }
+
+    &::before {
+      content: '- ';
+    }
+
+    &::after {
+      content: ' -';
+    }
+  }
+
+  h2 .line-mark,
+  h3 .line-mark {
+    top: 0.5em;
+  }
+}

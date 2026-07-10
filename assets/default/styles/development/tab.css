@@ -1,0 +1,72 @@
+.tabs {
+  & .tab-list {
+    display: flex;
+    padding: 0;
+
+    & ~ * .tab-list {
+      /* @note Si onglets imbriqués. */
+      margin-block-start: 0.5em;
+    }
+
+    & button {
+      z-index: 1;
+      overflow: hidden;
+      display: block;
+      height: 2.5em;
+      padding: 0 1em;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      text-decoration: none;
+      color: inherit;
+      background-color: var(--colorG27);
+      border: var(--border2);
+      border-radius: 0.5em 0.5em 0 0;
+      box-shadow: 0 -1rem 1rem var(--colorAB005);
+      /* filter: drop-shadow(0 -.5rem .5rem rgba(0, 0, 0, .1)); */
+      cursor: pointer;
+      transition: 0.2s box-shadow ease-in-out;
+      
+      &:where(:focus-visible, :hover) {
+        @media (hover: hover) and (pointer: fine) {
+          outline: none;
+          box-shadow: inset 0 -0.3em var(--color2), 0 -1rem 1rem var(--colorAB005);
+        }
+      }
+
+      &[aria-selected='true'] {
+        /* @note Permet une gestion correcte des ombres. */
+        z-index: 2;
+        flex-shrink: 0;
+        max-width: 60%;
+        background-color: var(--color1);
+        border-bottom: none;
+        pointer-events: none;
+      }
+
+      &[aria-selected='false'] {
+        user-select: none;
+      }
+    }
+  }
+
+  & .tab-panel {
+
+    &:not([hidden='until-found']) {
+      position: relative;
+      /* @note Compensation de la bordure inférieure des onglets. */
+      top: -1px;
+      /* @note Idem. */
+      padding: calc(0.5em + 1px) 1em 0.5em;
+      border: var(--border2);
+      box-shadow: var(--shadow8);
+    }
+
+    &[aria-hidden='false'] {
+      display: block;
+    }
+
+    &[aria-hidden='true'] {
+      display: none;
+    }
+  }
+}
