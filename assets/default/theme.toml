@@ -11,7 +11,7 @@ version = "1.0.0"
 [styles]
 # Liste plate des points d'entrée. 
 # Le compilateur va lire ces fichiers, résoudre leurs @import internes, et générer les artéfacts.
-entries = ["styles/development/main.mcss", "styles/development/more.mcss"]
+entries = ["styles/development/main.mcss"]
 
 [scripts.components]
 # Dictionnaire (HashMap) : Cible -> Dossier Source.

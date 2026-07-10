@@ -6,57 +6,57 @@
 
 /* 1. COUCHE TOKENS (Variables de Runtime & Déclarations de ressources) */
 /* Ingestion globale (Hors-couche pour résolution globale par l'AST) */
-@import "variable.css";
-@import "font.css" layer(tokens);
+@import "variable.mcss";
+@import "font.mcss" layer(tokens);
 
 /* 2. COUCHE BASE (Règles génériques et sémantique brute) */
-@import "base.css" layer(base);
-@import "typography.css" layer(base);
+@import "base.mcss" layer(base);
+@import "typography.mcss" layer(base);
 
 /* 3. COUCHE LAYOUT (Invariants structurels et systèmes de grilles) */
-@import "layout.css" layer(layout);
-@import "grid.css" layer(layout);
-@import "column.css" layer(layout);
+@import "layout.mcss" layer(layout);
+@import "grid.mcss" layer(layout);
+@import "column.mcss" layer(layout);
 
 /* 4. COUCHE TRANSITIONS (Animations et transitions) */
-@import "transition.css" layer(transitions);
+@import "transition.mcss" layer(transitions);
 
 /* 5. COUCHE COMPONENTS (Logique modulaire et blocs atomiques) */
-/* @import 'navigation.css' layer(components); */
-@import "breadcrumb.css" layer(components);
-@import "alert.css" layer(components);
-@import "list.css" layer(components);
-/* @import "image.css" layer(components); */
-@import "imageAnimation.css" layer(components);
-@import "mediaPlayer.css" layer(components);
-@import "map.css" layer(components);
-@import "card.css" layer(components);
-@import "flip.css" layer(components);
-@import "codeBlock.css" layer(components);
-@import "messageBox.css" layer(components);
-@import "table.css" layer(components);
-@import "form.css" layer(components);
-@import "input.css" layer(components);
-@import "checkbox.css" layer(components);
-@import "range.css" layer(components);
-@import "button.css" layer(components);
-@import "accordion.css" layer(components);
-@import "tab.css" layer(components);
-@import "scrollTop.css" layer(components);
-@import "footer.css" layer(components);
-@import "article.css" layer(components);
-@import "dropCap.css" layer(components);
-@import "lineMark.css" layer(components);
-@import "calendar.css" layer(components);
-@import "progress.css" layer(components);
-@import "loader.css" layer(components);
-@import "chart.css" layer(components);
-@import "scrollBar.css" layer(components);
-@import "ribbon.css" layer(components);
-@import "forum.css" layer(components);
-@import "skin.css" layer(components);
-/* @import 'demo.css' layer(components); */
+/* @import 'navigation.mcss' layer(components); */
+@import "breadcrumb.mcss" layer(components);
+@import "alert.mcss" layer(components);
+@import "list.mcss" layer(components);
+/* @import "image.mcss" layer(components); */
+@import "imageAnimation.mcss" layer(components);
+@import "mediaPlayer.mcss" layer(components);
+@import "map.mcss" layer(components);
+@import "card.mcss" layer(components);
+@import "flip.mcss" layer(components);
+@import "codeBlock.mcss" layer(components);
+@import "messageBox.mcss" layer(components);
+@import "table.mcss" layer(components);
+@import "form.mcss" layer(components);
+@import "input.mcss" layer(components);
+@import "checkbox.mcss" layer(components);
+@import "range.mcss" layer(components);
+@import "button.mcss" layer(components);
+@import "accordion.mcss" layer(components);
+@import "tab.mcss" layer(components);
+@import "scrollTop.mcss" layer(components);
+@import "footer.mcss" layer(components);
+@import "article.mcss" layer(components);
+@import "dropCap.mcss" layer(components);
+@import "lineMark.mcss" layer(components);
+@import "calendar.mcss" layer(components);
+@import "progress.mcss" layer(components);
+@import "loader.mcss" layer(components);
+@import "chart.mcss" layer(components);
+@import "scrollBar.mcss" layer(components);
+@import "ribbon.mcss" layer(components);
+@import "forum.mcss" layer(components);
+@import "skin.mcss" layer(components);
+/* @import 'demo.mcss' layer(components); */
 
 /* 6. COUCHE HELPERS (Surcharges de commodité / Utilitaires) */
 /* @note Les helpers s'appliquent à la fin dans le but d'écraser des styles tels que font-size. */
-/*@import 'helper.css' layer(helpers); */
+/*@import 'helper.mcss' layer(helpers); */
