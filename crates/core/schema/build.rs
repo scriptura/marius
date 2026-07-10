@@ -12,7 +12,10 @@
 // Prérequis : DATABASE_URL pointe vers marius avec rôle marius_admin.
 // =============================================================================
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
 
 use marius_db_forge::{
     PrimaryKey, build_field_specs, fetch_columns, fetch_component_list, fetch_max_id,
@@ -26,6 +29,92 @@ use marius_fragment_forge::{
     detect_extends, generate_aot_snippet, link, lower, parse_page_tokens, parse_tokens,
     relative_path_for_include_str, resolve_and_measure, scan, validate_ast,
 };
+
+// =============================================================================
+// Manifeste d'assets — marius-assets-specification.md §7, Roadmap §1.4 (clos).
+//
+// Structure miroir du TOML `[assets."clé"]` (dictionnaire, pas [[asset]]) —
+// désérialisation directe en HashMap, lookup O(1) pour chaque {% asset %}
+// rencontré. Décision actée : voir échange de session, format dictionnaire
+// retenu explicitement au détriment du tableau pour cette raison.
+//
+// serde + toml : build-dependencies uniquement (Cargo.toml) — jamais liées
+// au binaire du Shell ni du Core (no_std). Coût de parsing entièrement
+// confiné à la machine hôte, phase AOT.
+// =============================================================================
+
+#[derive(Deserialize)]
+struct AssetManifest {
+    assets: HashMap<String, AssetEntry>,
+}
+
+/// Une entrée du manifeste — champs de la spec §7. Seuls `url` (et sa
+/// longueur) sont consommés par ce build.rs ; `path`/`mime`/`size`/`hash`/
+/// `version` sont ceux que le Shell consomme au runtime (`handlers.rs`),
+/// partagés depuis le même fichier — producteur unique, spec §8.
+#[derive(Deserialize)]
+struct AssetEntry {
+    url: String,
+    #[allow(dead_code)]
+    path: String,
+    #[allow(dead_code)]
+    mime: String,
+    #[allow(dead_code)]
+    size: u64,
+    #[allow(dead_code)]
+    hash: String,
+    #[allow(dead_code)]
+    version: String,
+}
+
+/// Nom du thème actif. Décision actée en session : un seul thème possible
+/// pour cette v1 — pas de mécanisme de sélection (env var, section
+/// Cargo.toml, configuration multi-thème) nécessaire tant que cet invariant
+/// tient. Si un jour plusieurs thèmes coexistent, ce point redevient ouvert
+/// et cette constante devra être remplacée par un paramètre réel — mais ce
+/// n'est plus une inconnue pour la v1.
+const THEME_NAME: &str = "default";
+
+/// Résout le chemin du manifeste d'assets et l'enregistre auprès de Cargo.
+///
+/// Chemin : `{workspace_root}/build/{theme}/manifest.toml`, où
+/// `workspace_root` = `CARGO_MANIFEST_DIR` (= `crates/core/schema`) + trois
+/// remontées (`schema → core → crates → racine`) — PAS deux, erreur
+/// initialement proposée et corrigée par calcul explicite (voir session).
+///
+/// `cargo:rerun-if-changed` émis de façon INCONDITIONNELLE, avant tout test
+/// d'existence, y compris sur le répertoire parent — piège documenté dans
+/// `guide-cycle-de-vie-runtime.md` §2 : une émission conditionnelle ne
+/// rattrape jamais un fichier qui apparaît après le premier build. Même
+/// discipline que `resolve_template` (ligne ~316) pour les templates.
+fn load_asset_manifest(manifest_dir: &str) -> Result<HashMap<String, AssetEntry>, ()> {
+    let manifest_path = Path::new(manifest_dir)
+        .join("../../../build")
+        .join(THEME_NAME)
+        .join("manifest.toml");
+
+    // Émission inconditionnelle — avant le test d'existence.
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+    if let Some(parent_dir) = manifest_path.parent() {
+        println!("cargo:rerun-if-changed={}", parent_dir.display());
+    }
+
+    let raw = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        println!(
+            "cargo:error=DB-Forge : manifeste d'assets introuvable ({}) : {e}",
+            manifest_path.display()
+        );
+    })?;
+
+    let parsed: AssetManifest = toml::from_str(&raw).map_err(|e| {
+        println!(
+            "cargo:error=DB-Forge : manifeste d'assets malformé ({}) : {e}",
+            manifest_path.display()
+        );
+    })?;
+
+    Ok(parsed.assets)
+}
 
 // En-tête statique du fichier généré — pas de couplage sur fragment-forge pour
 // ce seul token textuel (décision architecturale Phase 0).
@@ -111,8 +200,10 @@ fn read_template_file(path: &Path) -> Result<String, ()> {
 ///   `Ok((body, metrics))` : template Mode Page résolu avec succès —
 ///               structurellement indiscernable, à ce point, d'un résultat
 ///               Mode Fragment (Document 2 §5, postcondition finale).
+#[allow(clippy::too_many_arguments)]
 fn resolve_page_template<'src>(
     manifest_dir: &str,
+    assets: &HashMap<String, AssetEntry>,
     schema: &str,
     table: &str,
     fixed: &[marius_fragment_forge::FieldSpec],
@@ -224,13 +315,35 @@ fn resolve_page_template<'src>(
             .map_err(|e| e.to_string())
     };
 
-    let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size).map_err(|errors| {
+    // Résolution des {% asset key %} — manifeste réel (Roadmap marius-assets
+    // §1.4, close). `resolve_asset_len` sert `resolve_and_measure` (longueur
+    // de l'URL publique, jamais celle du fichier source) ; `resolve_asset_url`
+    // sert `generate_aot_snippet` (émission littérale). Clé absente : `None`
+    // /panic respectivement — `AssetNotFound` est déjà remonté comme
+    // `ResolverError` par `resolve_and_measure`, capturé par le `map_err`
+    // ci-dessous ; un panic dans `resolve_asset_url` signalerait uniquement
+    // un appel hors ordre (bug interne), jamais atteint si
+    // `resolve_and_measure` a réussi en premier.
+    let resolve_asset_len = |key: &str| -> Option<usize> { assets.get(key).map(|a| a.url.len()) };
+    let resolve_asset_url = |key: &str| -> &str {
+        assets.get(key).map(|a| a.url.as_str()).unwrap_or_else(|| {
+            panic!("AssetNotFound '{key}' non intercepté par resolve_and_measure")
+        })
+    };
+
+    let metrics = resolve_and_measure(
+        &mut tokens,
+        &schema_index,
+        get_file_size,
+        resolve_asset_len,
+    )
+    .map_err(|errors| {
         println!(
             "cargo:error=DB-Forge [{schema}.{table}] : résolution du template Mode Page échouée : {errors:?}"
         );
     })?;
 
-    let body = generate_aot_snippet(&tokens, &schema_index);
+    let body = generate_aot_snippet(&tokens, &schema_index, resolve_asset_url);
 
     Ok((body, metrics))
 }
@@ -272,6 +385,7 @@ fn resolve_page_template<'src>(
 ///                       cargo:error déjà émis ; l'appelant doit exit(1).
 fn resolve_template(
     manifest_dir: &str,
+    assets: &HashMap<String, AssetEntry>,
     schema: &str,
     table: &str,
     fixed: &[marius_fragment_forge::FieldSpec],
@@ -322,6 +436,7 @@ fn resolve_template(
 
         let (body, metrics) = resolve_page_template(
             manifest_dir,
+            assets,
             schema,
             table,
             fixed,
@@ -354,13 +469,28 @@ fn resolve_template(
             .map_err(|e| e.to_string())
     };
 
-    let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size).map_err(|errors| {
+    // Résolution des {% asset key %} — manifeste réel, même câblage que
+    // resolve_page_template ci-dessus.
+    let resolve_asset_len = |key: &str| -> Option<usize> { assets.get(key).map(|a| a.url.len()) };
+    let resolve_asset_url = |key: &str| -> &str {
+        assets.get(key).map(|a| a.url.as_str()).unwrap_or_else(|| {
+            panic!("AssetNotFound '{key}' non intercepté par resolve_and_measure")
+        })
+    };
+
+    let metrics = resolve_and_measure(
+        &mut tokens,
+        &schema_index,
+        get_file_size,
+        resolve_asset_len,
+    )
+    .map_err(|errors| {
         println!(
             "cargo:error=DB-Forge [{schema}.{table}] : résolution du template échouée : {errors:?}"
         );
     })?;
 
-    let body = generate_aot_snippet(&tokens, &schema_index);
+    let body = generate_aot_snippet(&tokens, &schema_index, resolve_asset_url);
 
     Ok(Some((body, metrics)))
 }
@@ -637,8 +767,10 @@ mod tests_phase_6_6_full_pipeline {
         let get_file_size =
             |_: &str| -> Result<usize, String> { Err("aucun static attendu dans ce test".into()) };
 
-        let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size)
-            .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
+        let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        })
+        .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
 
         // "<html>" (6) + "ChildTitle" (10) + "</html>" (7) = 23 — le contenu
         // parent substitué ("ParentTitle") ne doit apparaître nulle part.
@@ -646,7 +778,9 @@ mod tests_phase_6_6_full_pipeline {
         assert_eq!(metrics.total_dynamic_bytes, 0);
         assert_eq!(metrics.include_count, 0);
 
-        let body = generate_aot_snippet(&tokens, &schema_index);
+        let body = generate_aot_snippet(&tokens, &schema_index, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        });
         assert!(body.contains("buf.push_str(\"ChildTitle\")"));
         assert!(!body.contains("ParentTitle"));
 
@@ -693,15 +827,19 @@ mod tests_phase_6_6_full_pipeline {
         let get_file_size =
             |_: &str| -> Result<usize, String> { Err("aucun static attendu dans ce test".into()) };
 
-        let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size)
-            .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
+        let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        })
+        .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
 
         // "<footer>" (8) + "ParentFooter" (12) + "</footer>" (9) = 29.
         assert_eq!(metrics.total_static_bytes, 29);
         assert_eq!(metrics.total_dynamic_bytes, 0);
         assert_eq!(metrics.include_count, 0);
 
-        let body = generate_aot_snippet(&tokens, &schema_index);
+        let body = generate_aot_snippet(&tokens, &schema_index, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        });
         assert!(body.contains("buf.push_str(\"ParentFooter\")"));
 
         let _ = std::fs::remove_dir_all(parent_path.parent().unwrap());
@@ -756,10 +894,14 @@ mod tests_phase_6_6_full_pipeline {
         };
         let get_file_size =
             |_: &str| -> Result<usize, String> { Err("aucun static attendu dans ce test".into()) };
-        resolve_and_measure(&mut tokens, &schema_index, get_file_size)
-            .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
+        resolve_and_measure(&mut tokens, &schema_index, get_file_size, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        })
+        .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
 
-        let body = generate_aot_snippet(&tokens, &schema_index);
+        let body = generate_aot_snippet(&tokens, &schema_index, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        });
 
         let check_dir = std::env::temp_dir().join(format!(
             "marius-phase-6-6-rustc-check-{}",
@@ -847,7 +989,14 @@ mod tests_phase_6_6_full_pipeline {
         .expect("écriture de la fixture enfant");
 
         let manifest_dir_str = manifest_dir.to_string_lossy().into_owned();
-        let result = super::resolve_template(&manifest_dir_str, "blog", "post", &[], &[]);
+        let result = super::resolve_template(
+            &manifest_dir_str,
+            &std::collections::HashMap::new(),
+            "blog",
+            "post",
+            &[],
+            &[],
+        );
 
         assert!(
             result.is_ok(),
@@ -871,6 +1020,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("DB-Forge : CARGO_MANIFEST_DIR non définie (toujours fournie par Cargo).");
+
+    // Lecture unique du manifeste d'assets — une seule fois pour tout le
+    // build, pas par table (évite un re-parsing TOML redondant et une
+    // duplication d'émissions rerun-if-changed).
+    let assets = load_asset_manifest(&manifest_dir).unwrap_or_else(|()| {
+        // cargo:error déjà émis par load_asset_manifest — arrêt immédiat,
+        // même discipline que resolve_template plus bas.
+        std::process::exit(1);
+    });
 
     let database_url = std::env::var("DATABASE_URL").expect("DB-Forge : DATABASE_URL non définie.");
     let pool = sqlx::PgPool::connect(&database_url).await?;
@@ -916,6 +1074,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let field_specs = build_field_specs(&columns);
         let render = resolve_template(
             &manifest_dir,
+            &assets,
             &comp.schema,
             &comp.table,
             &field_specs,

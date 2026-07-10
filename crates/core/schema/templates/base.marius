@@ -13,11 +13,11 @@
         <link rel="icon" type="image/png" href="/favicons/favicon.png">
         <link rel="apple-touch-icon" sizes="180x180" href="/favicons/apple-touch-icon.png">
         <link rel="mask-icon" href="/favicons/safari-pinned-tab.svg" color="#5bbad5">
-        <link rel="stylesheet" href="/styles/main.css" media="screen">
-        <link rel="stylesheet" href="/styles/print.css" media="print">
-        <link rel="preload" href="/fonts/notoSans-Regular.woff2" as="font" type="font/woff2" crossorigin>
-        <link rel="preload" href="/fonts/notoSerif-Regular.woff2" as="font" type="font/woff2" crossorigin>
         -->
+        <link rel="stylesheet" href="{% asset main.css %}" media="screen">
+        <link rel="stylesheet" href="{% asset print.css %}" media="print">
+        <link rel="preload" href="{% asset notoSans-Regular.woff2 %}" as="font" type="font/woff2" crossorigin>
+        <link rel="preload" href="{% asset notoSerif-Regular.woff2 %}" as="font" type="font/woff2" crossorigin>
     </head>
     <body>
         <a class="sr-only" href="#main">Aller au contenu</a>
@@ -32,8 +32,8 @@
                 <span class="sr-only">Menu</span>
             </button>
             <ul class="sub-nav" id="sub-nav" aria-labelledby="cmd-nav">
-                <li><a href="/content/5"><svg class="icon-inline" role="img" focusable="false"><use href="/sprites/util.svg#ampersand"></use></svg>Home</a></li>
-                <li><a href="//github.com/scriptura/marius"><svg class="icon-inline" role="img" focusable="false"><use href="/sprites/util.svg#github"></use></svg>Repository</a></li>
+                <li><a href="/content/5"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset util.svg %}#ampersand"></use></svg>Home</a></li>
+                <li><a href="//github.com/scriptura/marius"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset util.svg %}#github"></use></svg>Repository</a></li>
             </ul>
             <ol class="breadcrumb" aria-label="Breadcrumb">
                 <li><div>Sriptura <span>.&nbsp;Home page</span></div>
@@ -102,7 +102,7 @@
                 </div>
             </noscript>
         </div>
-        <script src="/scripts/main.js" type="module"></script>
+        <script src="{% asset main.js %}" type="module"></script>
         -->
     </body>
 </html>

@@ -24,3 +24,5 @@ marius-db-forge = { path = "../../forge/db-forge", version = "0.3.0" }
 marius-fragment-forge = { path = "../../forge/fragment-forge", version = "0.3.0" }
 sqlx = { workspace = true }
 tokio = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.8" }

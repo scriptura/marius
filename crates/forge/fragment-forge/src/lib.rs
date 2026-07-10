@@ -493,6 +493,25 @@ pub enum FlatPageToken<'src> {
     /// Fermeture de bloc : `{% endif %}`.
     EndIf,
 
+    /// Référence à un artefact préparé par `marius-assets` : `{% asset key %}`
+    /// (spec `marius-assets-specification.md` §9). `key` est l'identifiant
+    /// logique écrit tel quel par le développeur (`main.css`), jamais une
+    /// URL — la résolution vers le chemin public versionné n'a jamais lieu
+    /// ici. `fragment-forge` ne lit jamais le manifeste d'assets lui-même
+    /// (aucun I/O dans ce module) : `resolve_and_measure` et
+    /// `generate_aot_snippet` reçoivent chacun une closure de résolution
+    /// injectée par `build.rs`, même patron que `StaticInclude`/
+    /// `get_file_size` ci-dessous — à la différence que la closure ne
+    /// renvoie jamais le contenu d'un fichier (inadapté : un asset est une
+    /// URL, pas du texte à inliner), seulement une longueur (mesure) puis
+    /// une chaîne résolue (émission).
+    ///
+    /// Contrairement à `StaticInclude`, ce token ne porte aucun champ
+    /// provisoire à patcher en place : `resolve_and_measure` accumule
+    /// directement la longueur résolue dans `TemplateMetrics`, sans jamais
+    /// muter l'AST pour cette variante.
+    AssetRef(&'src str),
+
     /// Inclusion statique résolue au build-time : `{% include path %}`.
     ///
     /// `len` : longueur en octets du fichier inclus, connue à la compilation
@@ -1011,7 +1030,7 @@ fn parse_block<'src, I>(iter: &mut I) -> Result<FlatPageToken<'src>, PageParseEr
 where
     I: Iterator<Item = RawSpan<'src>>,
 {
-    let keyword = expect_ident(iter, "keyword (if | endif | include)")?;
+    let keyword = expect_ident(iter, "keyword (if | endif | include | asset)")?;
 
     match keyword {
         "if" => {
@@ -1023,6 +1042,15 @@ where
         "endif" => {
             expect_kind(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
             Ok(FlatPageToken::EndIf)
+        }
+        // `{% asset key %}` (spec §9) : capture brute de la clé logique,
+        // zéro E/S, zéro résolution — même discipline que `include` :
+        // la résolution (ici vers une URL, jamais un contenu) est différée
+        // à `resolve_and_measure`/`generate_aot_snippet`.
+        "asset" => {
+            let key = expect_ident(iter, "Ident(key)")?;
+            expect_kind(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+            Ok(FlatPageToken::AssetRef(key))
         }
         "include" => {
             let path = expect_ident(iter, "Ident(path)")?;
@@ -1185,7 +1213,7 @@ mod tests_phase_1_3 {
         assert_eq!(
             err,
             PageParseError::UnexpectedToken {
-                expected: "keyword (if | endif | include)",
+                expected: "keyword (if | endif | include | asset)",
                 got: SpanKind::BlockClose,
             }
         );
@@ -1291,10 +1319,11 @@ pub fn validate_ast<'src>(tokens: &[FlatPageToken<'src>]) -> Result<(), Vec<Sema
                 }
             },
 
-            // Static, Field, StaticInclude : aucun effet sur la FSM.
+            // Static, Field, StaticInclude, AssetRef : aucun effet sur la FSM.
             FlatPageToken::Static(_)
             | FlatPageToken::Field { .. }
-            | FlatPageToken::StaticInclude { .. } => {}
+            | FlatPageToken::StaticInclude { .. }
+            | FlatPageToken::AssetRef(_) => {}
         }
     }
 
@@ -1462,6 +1491,11 @@ pub enum ResolverError<'src> {
     /// non référencé avec la même absence de borne ne produit jamais cette
     /// erreur — il reste Cold, invisible au calcul de capacité.
     UnboundedField { entity: &'src str, field: &'src str },
+    /// `{% asset key %}` référençant une clé absente du manifeste d'assets
+    /// produit par `marius-assets` — spec §9 et §11 : `AssetNotFound` est un
+    /// échec fatal de compilation, jamais un repli ou une résolution
+    /// dynamique différée au runtime.
+    AssetNotFound { key: &'src str },
 }
 
 /// Résout les inclusions, mute l'AST en place, calcule les métriques statiques.
@@ -1477,10 +1511,20 @@ pub enum ResolverError<'src> {
 /// # Allocation conditionnelle
 /// `Vec::new()` n'alloue pas de bloc heap avant le premier `push`.
 /// Un projet sans fichier manquant traverse cette fonction sans allocation.
+///
+/// # Résolution des assets
+/// `resolve_asset_len` : injectée par `build.rs` après lecture du manifeste
+/// d'assets — jamais d'I/O ici. Retourne la longueur en octets de l'URL
+/// publique versionnée finale (celle qui sera effectivement écrite par
+/// `generate_aot_snippet`), pas la taille du fichier lui-même : c'est ce
+/// nombre d'octets, et lui seul, qui contribue à `PAGE_STATIC_CAP`. `None`
+/// signifie clé absente du manifeste → `ResolverError::AssetNotFound`,
+/// jamais une longueur par défaut devinée.
 pub fn resolve_and_measure<'src>(
     tokens: &mut [FlatPageToken<'src>],
     schema: &SchemaIndex<'_>,
     get_file_size: impl Fn(&str) -> Result<usize, String>,
+    resolve_asset_len: impl Fn(&str) -> Option<usize>,
 ) -> Result<TemplateMetrics, Vec<ResolverError<'src>>> {
     let mut metrics = TemplateMetrics {
         total_static_bytes: 0,
@@ -1549,6 +1593,15 @@ pub fn resolve_and_measure<'src>(
 
             // EndIf : aucun effet sur les métriques.
             FlatPageToken::EndIf => {}
+
+            // Asset : longueur de l'URL résolue, jamais celle du fichier
+            // source — même famille que Static/StaticInclude (contribution
+            // directe à total_static_bytes), aucune mutation en place (voir
+            // doc de la variante : pas de champ provisoire à patcher ici).
+            FlatPageToken::AssetRef(key) => match resolve_asset_len(key) {
+                Some(len) => metrics.total_static_bytes += len,
+                None => errors.push(ResolverError::AssetNotFound { key }),
+            },
         }
     }
 
@@ -1592,10 +1645,15 @@ mod tests_phase_2_1 {
             fixed: &[],
             varlena: &[],
         };
-        let result = resolve_and_measure(&mut tokens, &schema, |path| match path {
-            "a.html" => Ok(10),
-            other => Err(format!("unknown : {other}")),
-        });
+        let result = resolve_and_measure(
+            &mut tokens,
+            &schema,
+            |path| match path {
+                "a.html" => Ok(10),
+                other => Err(format!("unknown : {other}")),
+            },
+            |_| unreachable!("aucun AssetRef dans ce test"),
+        );
 
         // Métriques correctes.
         assert_eq!(
@@ -1645,10 +1703,15 @@ mod tests_phase_2_1 {
             fixed: &[],
             varlena: &[],
         };
-        let result = resolve_and_measure(&mut tokens, &schema, |path| match path {
-            "a.html" => Ok(10),
-            other => Err(format!("introuvable : {other}")),
-        });
+        let result = resolve_and_measure(
+            &mut tokens,
+            &schema,
+            |path| match path {
+                "a.html" => Ok(10),
+                other => Err(format!("introuvable : {other}")),
+            },
+            |_| unreachable!("aucun AssetRef dans ce test"),
+        );
 
         // Exactement 1 erreur accumulée.
         let errors = result.expect_err("doit retourner Err pour un fichier manquant");
@@ -1667,6 +1730,9 @@ mod tests_phase_2_1 {
             }
             ResolverError::UnboundedField { entity, field } => {
                 panic!("UnboundedField inattendu dans ce test : {entity}.{field}");
+            }
+            ResolverError::AssetNotFound { key } => {
+                panic!("AssetNotFound inattendu dans ce test : {key}");
             }
         }
 
@@ -1708,9 +1774,12 @@ mod tests_phase_2_1 {
         };
 
         assert_eq!(
-            resolve_and_measure(&mut tokens, &schema, |_| unreachable!(
-                "get_file_size ne doit pas être appelé sans StaticInclude"
-            ),),
+            resolve_and_measure(
+                &mut tokens,
+                &schema,
+                |_| unreachable!("get_file_size ne doit pas être appelé sans StaticInclude"),
+                |_| unreachable!("aucun AssetRef dans ce test"),
+            ),
             Ok(TemplateMetrics {
                 total_static_bytes: 7,
                 total_dynamic_bytes: FieldKind::I32.max_display_width(),
@@ -1767,9 +1836,12 @@ mod tests_phase_2_1 {
             varlena: &varlena,
         };
 
-        let result = resolve_and_measure(&mut tokens, &schema, |_| {
-            unreachable!("aucun StaticInclude dans ce test")
-        });
+        let result = resolve_and_measure(
+            &mut tokens,
+            &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+            |_| unreachable!("aucun AssetRef dans ce test"),
+        );
 
         assert_eq!(
             result,
@@ -1796,9 +1868,12 @@ mod tests_phase_2_1 {
             varlena: &varlena,
         };
 
-        let metrics = resolve_and_measure(&mut tokens, &schema, |_| {
-            unreachable!("aucun StaticInclude dans ce test")
-        })
+        let metrics = resolve_and_measure(
+            &mut tokens,
+            &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+            |_| unreachable!("aucun AssetRef dans ce test"),
+        )
         .expect("champ borné référencé : résolution attendue en succès");
 
         assert_eq!(
@@ -1824,9 +1899,12 @@ mod tests_phase_2_1 {
             varlena: &varlena,
         };
 
-        let metrics = resolve_and_measure(&mut tokens, &schema, |_| {
-            unreachable!("aucun StaticInclude dans ce test")
-        })
+        let metrics = resolve_and_measure(
+            &mut tokens,
+            &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+            |_| unreachable!("aucun AssetRef dans ce test"),
+        )
         .expect("champ Cold non référencé : résolution attendue en succès");
 
         assert_eq!(
@@ -1866,9 +1944,29 @@ mod tests_phase_2_1 {
 ///   Field fixe   → write_fmt (pas d'allocation).
 ///   Field varlena → html_escape via ref locale as_deref().
 ///   IfBool        → `if record.field != 0` (u8 dans StorageRow, pas bool).
-pub fn generate_aot_snippet<'src>(
+///
+/// # Résolution des assets
+/// `resolve_asset_url` : supposée infaillible à ce stade — toute clé absente
+/// du manifeste a déjà fait échouer la compilation via
+/// `ResolverError::AssetNotFound` dans `resolve_and_measure`, appelé
+/// obligatoirement avant cette fonction (même précédent que `StaticInclude`,
+/// dont l'existence est vérifiée par `get_file_size` avant que
+/// `include_str!` ne soit émis ici). Un panic ici signale une violation de
+/// cet ordonnancement par l'appelant (`build.rs`), jamais une clé
+/// utilisateur invalide.
+///
+/// `'r` distinct de `'src` et de la lifetime (anonyme, par argument) de
+/// `key` dans la closure : sans ce paramètre nommé, `impl Fn(&str) -> &str`
+/// s'élide en `for<'a> Fn(&'a str) -> &'a str` (HRTB — la sortie liée à
+/// l'entrée). Une closure réelle capturant `&HashMap` (build.rs) renvoie un
+/// emprunt sur la durée de vie de la map, jamais sur celle de `key` : elle
+/// ne peut satisfaire cette borne que si la map vit `'static`, ce qui n'est
+/// pas le cas. `'r` découple la sortie de l'entrée et se résout, à l'appel,
+/// sur la durée de vie réelle capturée par la closure.
+pub fn generate_aot_snippet<'src, 'r>(
     tokens: &[FlatPageToken<'src>],
     schema: &SchemaIndex<'_>,
+    resolve_asset_url: impl Fn(&str) -> &'r str,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(25 + tokens.len() * 60);
@@ -1944,6 +2042,16 @@ pub fn generate_aot_snippet<'src>(
                 )
                 .unwrap();
             }
+
+            // Asset : URL versionnée gravée en dur, exactement comme un
+            // segment Static — zéro indirection, zéro allocation au runtime
+            // (spec §9). Pas d'`include_str!` : ce n'est pas un contenu de
+            // fichier à inliner, c'est une chaîne déjà connue au moment de
+            // la génération.
+            FlatPageToken::AssetRef(key) => {
+                let url = resolve_asset_url(key);
+                writeln!(out, "{}buf.push_str({:?});", indent, url).unwrap();
+            }
         }
     }
 
@@ -2013,7 +2121,9 @@ mod tests_phase_2_2 {
             },
         ];
 
-        let got = generate_aot_snippet(tokens, &schema);
+        let got = generate_aot_snippet(tokens, &schema, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        });
 
         // Varlena ref déclarée en tête, triée.
         assert!(
@@ -2066,7 +2176,9 @@ mod tests_phase_2_2 {
             },
             FlatPageToken::Static("</p>"),
         ];
-        let got = generate_aot_snippet(tokens, &schema);
+        let got = generate_aot_snippet(tokens, &schema, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        });
         assert!(
             !got.contains("_ref"),
             "pas de déclaration ref sans varlena:\n{got}"
@@ -3275,7 +3387,7 @@ where
 {
     let keyword = expect_ident_page(
         iter,
-        "keyword (if | endif | block | endblock | static | extends)",
+        "keyword (if | endif | block | endblock | static | extends | asset)",
     )?;
 
     match keyword {
@@ -3348,6 +3460,20 @@ where
         // que le catch-all serait ajouté — un effet de bord de ce diff, pas
         // une décision prise consciemment.
         "include" => Err(PageComposeParseError::InvalidBlockSequence),
+        // `{% asset key %}` (spec `marius-assets-specification.md` §9) :
+        // à la différence d'`include` (Mode Fragment exclusif, cf. bras
+        // ci-dessus), `asset` est valide dans les deux modes — l'exemple de
+        // référence de la spec §9 (balises `<link>` dans un layout) est
+        // typiquement du Mode Page. Enveloppé sous `Runtime` comme `if`/
+        // `endif` : c'est un token de contenu ordinaire pour ce Parser,
+        // résolu plus tard par `resolve_and_measure`/`generate_aot_snippet`.
+        "asset" => {
+            let key = expect_ident_page(iter, "Ident(key)")?;
+            expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+            Ok(PageBlockOutcome::Token(PageSourceToken::Runtime(
+                FlatPageToken::AssetRef(key),
+            )))
+        }
         // Catch-all (Phase 4.7, roadmap §4.7, Document 1 §2.1) : tout
         // mot-clé de bloc hors grammaire déjà reconnue (`for`, `join`,
         // `where`, `filter`, `group`, ou tout mot-clé inconnu) est capturé
