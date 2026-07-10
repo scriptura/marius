@@ -35,14 +35,19 @@ hr[data-hr],
 }
 
 .decorative-hr hr::after {
-  content: '✻ ✻ ✻';
+  content: "✻ ✻ ✻";
 }
 
 .blockquote blockquote {
   position: relative;
   margin: 0;
   padding-inline-start: 2em;
-  background: repeating-linear-gradient(-45deg, transparent 0 5px, var(--colorA1) 5px 10px) no-repeat;
+  background: repeating-linear-gradient(
+      -45deg,
+      transparent 0 5px,
+      var(--colorA1) 5px 10px
+    )
+    no-repeat;
   background-size: 0.5em 100%;
 
   &::before,
@@ -56,12 +61,12 @@ hr[data-hr],
   }
 
   &::before {
-    content: '\00AB'; /* '\201D' */
+    content: "\00AB"; /* '\201D' */
     top: -0.1em;
   }
 
   &::after {
-    content: '\00BB'; /* '\201C' */
+    content: "\00BB"; /* '\201C' */
     bottom: 0;
   }
 
@@ -71,11 +76,11 @@ hr[data-hr],
   }
 
   & footer::before {
-    content: '\2014 \00A0';
+    content: "\2014 \00A0";
   }
 
   & footer::after {
-    content: '.';
+    content: ".";
   }
 }
 
@@ -83,7 +88,7 @@ hr[data-hr],
 
 :lang(he) {
   direction: rtl;
-  /* font-family: $font-list; */
+  /* font-family: font-list; */
 }
 
 .verse {
@@ -91,13 +96,13 @@ hr[data-hr],
 }
 
 .links p a {
-  &:not([href^='#'])::after {
+  &:not([href^="#"])::after {
     /* @note Liens internes, sauf pour les ancres. */
-    content: ' ↩';
+    content: " ↩";
   }
   /* Liens externes */
-  &[href*='//']::after {
-    content: ' ↗';
+  &[href*="//"]::after {
+    content: " ↗";
   }
 }
 

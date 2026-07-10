@@ -17,14 +17,14 @@ entries = ["styles/development/main.mcss", "styles/development/more.mcss"]
 # Dictionnaire (HashMap) : Cible -> Dossier Source.
 # Spécification §10.4.1 : un dossier = une cible de concaténation.
 # Le compilateur concatène le contenu du dossier et génère /scripts/<cible>.<hash>.js.
-main = "build/scripts/main"
-more = "build/scripts/more"
+main = "scripts/development/main"
+more = "scripts/development/more"
 
 [sprites]
 # Dictionnaire (HashMap) : Nom du Sprite -> Dossier Source.
 # Spécification §10.2 : SVG groupés dans un fichier `<cible>.<hash>.svg`.
-silos = "sprites/utils"
-various = "sprites/players"
+utils = "sprites/utils"
+players = "sprites/players"
 
 # ==========================================
 # Pipelines de copie (Zéro-Transformation)

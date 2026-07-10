@@ -1,0 +1,41 @@
+[package]
+name = "marius-assets"
+version = "0.1.0"
+edition = "2024"
+description = "Compilateur AOT d'assets statiques du thème Marius — hachage BLAKE3 (cache-busting), manifeste plat, outil de build hôte exclusivement."
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "marius-assets"
+path = "src/main.rs"
+
+[dependencies]
+# Lecture de theme.toml et écriture de manifest.toml. Jamais lié au binaire
+# du Shell ni du Core (no_std) — ce crate est un outil de build hôte
+# indépendant, pas une dépendance du workspace runtime.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# Hachage de contenu pour le cache-busting des URLs publiques (§9 de la
+# spec marius-assets). Aucune dépendance cryptographique plus lourde
+# n'est nécessaire : BLAKE3 est déjà le choix acté ailleurs dans Marius
+# (cf. manifest-reactive-projection.md).
+blake3 = "1"
+# Pipeline [styles] Phase 2 — bundling (@import), visiteur AST (validation
+# + réécriture Fonts↔CSS, spec §10.1), minification.
+#
+# ATTENTION VERSION : lightningcss n'a jamais eu de release stable —
+# max_stable_version est absent sur crates.io au moment de cette session
+# (vérifié le jour même), seule une série 1.0.0-alpha.N existe. Épinglé
+# explicitement plutôt que laissé sur "1" (qui ne matcherait aucune
+# pré-version sous les règles semver standard de Cargo). Attendez-vous à
+# devoir remonter ce numéro à la prochaine session — l'API de ce crate
+# peut encore changer tant qu'aucune 1.0.0 stable n'existe.
+# "bundler" active Bundler/FileProvider/SourceProvider (@import).
+# "visitor" active le trait Visitor/VisitTypes (parcours d'AST personnalisé).
+lightningcss = { version = "1.0.0-alpha.71", features = ["bundler", "visitor"] }
+
+# Volontairement absent : aucune dépendance async/tokio (ce binaire est
+# séquentiel, DOD — un seul thread, un seul passage par fichier, buffers
+# réutilisés), aucun framework CLI (clap, etc. — un seul argument
+# positionnel ne le justifie pas), aucun "anyhow" (Box<dyn Error> + `?`
+# suffit pour un outil de build à vie courte).

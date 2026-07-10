@@ -16,6 +16,9 @@ members = [
     "crates/shell/render",
     "crates/shell/server",
 
+    # Assets (build-time uniquement — jamais en [dependencies] runtime)
+    "crates/assets",
+
     # Facade
     "crates/marius",
 ]
