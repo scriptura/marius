@@ -29,8 +29,8 @@ use lightningcss::bundler::{Bundler, FileProvider};
 use lightningcss::rules::CssRule;
 use lightningcss::stylesheet::{MinifyOptions, ParserOptions, PrinterOptions};
 use lightningcss::values::url::Url;
-use lightningcss::visitor::{Visit, VisitTypes, Visitor};
 use lightningcss::visit_types;
+use lightningcss::visitor::{Visit, VisitTypes, Visitor};
 
 // =============================================================================
 // theme.toml — désérialisation d'entrée
@@ -350,13 +350,12 @@ impl<'i> Visitor<'i> for FontFaceUrlVisitor<'_> {
 /// token `$variable` si un tel fichier apparaît avant qu'un lexer dédié ne
 /// soit écrit (hors périmètre de cette session).
 ///
-/// AVERTISSEMENT DE CONFIANCE : l'API Rust de `lightningcss` (bundler,
-/// visiteur) n'a pas pu être compilée dans cet environnement (pas de
-/// `rustc`) — vérifiée par recherche documentaire au moment de l'écriture,
-/// mais jamais exécutée. Le point le plus fragile : la signature exacte de
-/// `Bundler::new` (constructeur à 2 ou 3 arguments selon la source
-/// consultée — j'ai retenu la forme à 2 arguments, `ParserOptions` passé à
-/// `.bundle()`) est possiblement sensible à la version exacte du crate.
+/// Note de version — confirmé par compilation réelle (retour de session,
+/// `lightningcss = "=1.0.0-alpha.71"`) : `ParserOptions` se passe à
+/// `Bundler::new()` (3 arguments), pas à `.bundle()` (1 seul argument, le
+/// chemin). L'ancienne version de ce commentaire supposait l'inverse par
+/// prudence documentaire, faute de pouvoir compiler dans cet
+/// environnement — l'ambiguïté est levée, plus un avertissement.
 fn transform_css(
     entry_path: &Path,
     font_registry: &FontRegistry,
@@ -364,9 +363,12 @@ fn transform_css(
     let provider = FileProvider::new();
     let parser_options = ParserOptions::default();
     let mut bundler = Bundler::new(&provider, None, parser_options);
-    let mut stylesheet = bundler
-        .bundle(entry_path)
-        .map_err(|e| format!("styles : bundling échoué pour {} : {e:?}", entry_path.display()))?;
+    let mut stylesheet = bundler.bundle(entry_path).map_err(|e| {
+        format!(
+            "styles : bundling échoué pour {} : {e:?}",
+            entry_path.display()
+        )
+    })?;
 
     let mut visitor = FontFaceUrlVisitor {
         font_registry,
@@ -376,16 +378,24 @@ fn transform_css(
         .visit(&mut visitor)
         .map_err(|e| format!("styles : {e}"))?;
 
-    stylesheet
-        .minify(MinifyOptions::default())
-        .map_err(|e| format!("styles : minification échouée pour {} : {e:?}", entry_path.display()))?;
+    stylesheet.minify(MinifyOptions::default()).map_err(|e| {
+        format!(
+            "styles : minification échouée pour {} : {e:?}",
+            entry_path.display()
+        )
+    })?;
 
     let result = stylesheet
         .to_css(PrinterOptions {
             minify: true,
             ..Default::default()
         })
-        .map_err(|e| format!("styles : émission échouée pour {} : {e:?}", entry_path.display()))?;
+        .map_err(|e| {
+            format!(
+                "styles : émission échouée pour {} : {e:?}",
+                entry_path.display()
+            )
+        })?;
 
     Ok(result.code)
 }
@@ -401,11 +411,7 @@ fn run_styles_pipeline(
     for rel_path in entries {
         let source_path = theme_dir.join(rel_path);
         if !source_path.is_file() {
-            return Err(format!(
-                "styles : fichier introuvable : {}",
-                source_path.display()
-            )
-            .into());
+            return Err(format!("styles : fichier introuvable : {}", source_path.display()).into());
         }
 
         let transformed = transform_css(&source_path, font_registry)?;
@@ -473,9 +479,9 @@ fn join_slash(a: &str, b: &str) -> String {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let theme_dir_arg = args.next().ok_or(
-        "usage : marius-assets <chemin-du-dossier-de-theme> (ex: ./assets/default)",
-    )?;
+    let theme_dir_arg = args
+        .next()
+        .ok_or("usage : marius-assets <chemin-du-dossier-de-theme> (ex: ./assets/default)")?;
 
     let theme_dir = PathBuf::from(&theme_dir_arg);
     if !theme_dir.is_dir() {
@@ -487,12 +493,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let theme_toml_path = theme_dir.join("theme.toml");
-    let raw_theme = fs::read_to_string(&theme_toml_path).map_err(|e| {
-        format!(
-            "theme.toml introuvable dans {} : {e}",
-            theme_dir.display()
-        )
-    })?;
+    let raw_theme = fs::read_to_string(&theme_toml_path)
+        .map_err(|e| format!("theme.toml introuvable dans {} : {e}", theme_dir.display()))?;
     let theme: ThemeConfig = toml::from_str(&raw_theme)
         .map_err(|e| format!("theme.toml malformé ({}) : {e}", theme_toml_path.display()))?;
 
