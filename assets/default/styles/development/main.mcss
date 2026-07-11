@@ -22,11 +22,11 @@
 @import "transition.mcss" layer(transitions);
 
 /* 5. COUCHE COMPONENTS (Logique modulaire et blocs atomiques) */
-/* @import 'navigation.mcss' layer(components); */
+@import "navigation.mcss" layer(components);
 @import "breadcrumb.mcss" layer(components);
 @import "alert.mcss" layer(components);
 @import "list.mcss" layer(components);
-/* @import "image.mcss" layer(components); */
+@import "image.mcss" layer(components);
 @import "imageAnimation.mcss" layer(components);
 @import "mediaPlayer.mcss" layer(components);
 @import "map.mcss" layer(components);
@@ -55,8 +55,8 @@
 @import "ribbon.mcss" layer(components);
 @import "forum.mcss" layer(components);
 @import "skin.mcss" layer(components);
-/* @import 'demo.mcss' layer(components); */
+@import "demo.mcss" layer(components);
 
 /* 6. COUCHE HELPERS (Surcharges de commodité / Utilitaires) */
 /* @note Les helpers s'appliquent à la fin dans le but d'écraser des styles tels que font-size. */
-/*@import 'helper.mcss' layer(helpers); */
+@import "helper.mcss" layer(helpers);

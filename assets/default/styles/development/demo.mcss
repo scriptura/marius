@@ -1,4 +1,4 @@
-[class*='demo-items'] {
+[class*="demo-items"] {
   --itemHeight: 2em;
 
   & > * {
@@ -37,7 +37,11 @@
   $demoColorDeviation: 7;
   @for $i from 1 to 15 {
     & > :nth-child($(i)n) {
-      background-color: hsl(calc($i * $demoColorDeviation - $demoColorDeviation + $demoColorDeg), 100%, 50%);
+      background-color: hsl(
+        calc($i * $demoColorDeviation - $demoColorDeviation + $demoColorDeg),
+        100%,
+        50%
+      );
     }
   }
 
@@ -49,7 +53,7 @@
   counter-increment: div;
 
   &::before {
-    content: counter(div) '.';
+    content: counter(div) ".";
     display: inline;
   }
 
@@ -78,14 +82,18 @@
 
 @media (--to-s) {
   .type-components .box2.ribbon-content::before {
-    content: '';
+    content: "";
     position: absolute;
     top: -0.5em;
     right: -0.5em;
     width: 100%;
     max-width: 20em;
     aspect-ratio: 1/1;
-    background-image: linear-gradient(-135deg, var(--colorA005), transparent 50%);
+    background-image: linear-gradient(
+      -135deg,
+      var(--colorA005),
+      transparent 50%
+    );
     background-repeat: no-repeat;
     background-position: 100% 0%;
     pointer-events: none;
@@ -120,8 +128,12 @@
     color: var(--colorG38);
   }
 }
-
 /*
+$size-s: 30em;
+$size-m: 48em;
+$size-l: 64em;
+$size-xl: 80em;
+$size-xxl: 90em;
 body::after {
   content: 'XS';
   position: fixed;
@@ -135,19 +147,19 @@ body::after {
   color: #fff;
   background-color: orange;
   border-radius: 50%;
-  @media (min-width: $sizeS) {
+  @media ($size-s) {
     content: 'S';
   }
-  @media (min-width: $sizeM) {
+  @media ($size-m) {
     content: 'M';
   }
-  @media (min-width: $sizeL) {
+  @media ($size-l) {
     content: 'L';
   }
-  @media (min-width: $sizeXL) {
+  @media ($size-xl) {
     content: 'XL';
   }
-  @media (min-width: $sizeXXL) {
+  @media ($size-xxl) {
     content: 'XXL';
   }
 }

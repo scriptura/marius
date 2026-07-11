@@ -18,14 +18,15 @@
 // programme s'exécute une fois, sur la machine hôte, jamais par requête.
 // =============================================================================
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use lightningcss::bundler::{Bundler, FileProvider};
+use lightningcss::bundler::{Bundler, ResolveResult, SourceProvider};
 use lightningcss::rules::CssRule;
 use lightningcss::stylesheet::{MinifyOptions, ParserOptions, PrinterOptions};
 use lightningcss::values::url::Url;
@@ -328,6 +329,587 @@ impl<'i> Visitor<'i> for FontFaceUrlVisitor<'_> {
     }
 }
 
+// =============================================================================
+// Phase 3 — Résolution AOT des `$variables` (dialecte Sass-like du thème).
+//
+// Piège identifié : `lightningcss` est un parseur W3C strict, il ne peut
+// jamais voir un token `$nom`. Toute pré-passe doit donc s'exécuter
+// AVANT que quoi que ce soit ne soit tendu à `Bundler`/`StyleSheet::parse`.
+//
+// Écart écarté : substituer à l'intérieur d'un `SourceProvider::read()`
+// pris isolément, fichier par fichier. Ordre réel d'appel du `Bundler` :
+// il lit d'abord le texte BRUT du fichier d'entrée en entier, PUIS le
+// parse, et ne découvre (donc ne lit) un `@import` qu'à ce moment-là —
+// après coup. Si `$brand-primary` est déclaré dans un partial importé
+// mais utilisé dans le fichier d'entrée, le registre serait encore vide
+// au moment de traiter l'entrée : substitution manquée, pas d'erreur
+// franche, corruption silencieuse du CSS émis. C'est exactement le piège
+// signalé par l'auteur du projet.
+//
+// Conséquence architecturale : deux passes strictement séparées, jamais
+// fusionnées dans un seul appel — même discipline que la séparation
+// extraction-d'usage / substitution actée en Roadmap §2.1 pour le futur
+// tree-shaking (éviter un faux cycle en confondant deux passes qui n'ont
+// pas la même dépendance de données) :
+//
+//   Passe A — walk_variable_graph  (lecture seule, texte brut)
+//     Parcourt le graphe `@import` par un scan textuel minimal — PAS par
+//     `lightningcss` (qui crasherait). Construit le VariableRegistry
+//     complet pour TOUT le graphe avant que quiconque ne songe à
+//     substituer quoi que ce soit. Ne connaît aucune sémantique CSS
+//     (`layer(...)`, media, supports) — seul le chemin importé l'intéresse.
+//
+//   Passe B — MvarProvider (SourceProvider custom, remplace FileProvider)
+//     Une fois le registre figé, `Bundler` s'exécute normalement pour la
+//     sémantique réelle (`@import`, `layer(...)`, media/supports — cf.
+//     Handoff §1, non ré-implémentée ici). Le seul point d'interception
+//     est `read()` : chaque fichier, qu'il soit l'entrée ou n'importe
+//     quel import résolu par `Bundler`, passe par la substitution avant
+//     que son texte n'atteigne le parseur. Un seul point d'ancrage
+//     garantit la couverture totale du graphe sans dupliquer la logique
+//     de résolution d'imports de `Bundler` lui-même.
+// =============================================================================
+
+/// Registre des variables `$nom -> valeur`, construit par la Passe A et
+/// figé (lecture seule) pendant toute la Passe B. Pas de `RefCell`/mutation
+/// partagée : le cycle de vie séquentiel (registre complet AVANT premher
+/// `read()`) rend toute synchronisation runtime inutile.
+type VariableRegistry = HashMap<String, String>;
+
+#[derive(Debug)]
+enum MvarError {
+    Io(std::io::Error),
+    /// `$nom` rencontré à la substitution mais absent du registre — échec
+    /// dur, même politique que `FontResolutionError` : pas de passthrough
+    /// silencieux d'un token non résolu vers le CSS final.
+    UndefinedVariable(String, PathBuf),
+    /// Grammaire `@for` malformée (borne manquante, accolade non fermée,
+    /// pas nul, etc.) — voir `ForLoopError` plus bas dans ce fichier.
+    ForLoop(ForLoopError),
+}
+
+impl fmt::Display for MvarError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MvarError::Io(e) => write!(f, "styles (variables) : lecture impossible : {e}"),
+            MvarError::UndefinedVariable(name, file) => write!(
+                f,
+                "styles (variables) : ${name} utilisée mais jamais déclarée (fichier {})",
+                file.display()
+            ),
+            MvarError::ForLoop(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for MvarError {}
+
+impl From<std::io::Error> for MvarError {
+    fn from(e: std::io::Error) -> Self {
+        MvarError::Io(e)
+    }
+}
+
+/// Passe A — walk textuel minimal du graphe `@import`, lecture seule.
+///
+/// Ne passe jamais par `lightningcss` : un scan ligne-à-ligne suffit, la
+/// seule information recherchée est (a) les déclarations `$nom: valeur;`
+/// et (b) les cibles `@import "chemin";` à suivre récursivement. Aucune
+/// sémantique `layer(...)`/media n'est interprétée ici — seul le chemin
+/// importé compte, la sémantique réelle reste intégralement déléguée à
+/// `Bundler` en Passe B.
+///
+/// Hypothèse de grammaire posée explicitement (non vérifiée par l'auteur
+/// à ce stade, à confirmer) : une déclaration `$nom: valeur;` tient sur
+/// une seule ligne. Aucun `.mcss` réel ne contredit cette hypothèse au
+/// moment de l'écriture (cf. Handoff §1 : aucun fichier de test n'utilise
+/// encore de variables).
+fn build_variable_registry(entry: &Path) -> Result<VariableRegistry, Box<dyn std::error::Error>> {
+    let mut registry = VariableRegistry::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    walk_variable_graph(entry, &mut registry, &mut visited)?;
+    Ok(registry)
+}
+
+fn walk_variable_graph(
+    path: &Path,
+    registry: &mut VariableRegistry,
+    visited: &mut HashSet<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Clé de dédoublonnage canonique — un même partial importé deux fois
+    // (diamant d'imports) ne doit être ni relu, ni source d'une boucle
+    // infinie sur un cycle d'imports.
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(key) {
+        return Ok(());
+    }
+
+    let text = fs::read_to_string(path)
+        .map_err(|e| format!("styles (variables) : lecture impossible de {} : {e}", path.display()))?;
+
+    extract_declarations(&text, registry);
+
+    for import_rel in extract_import_targets(&text) {
+        // Même règle de résolution que `FileProvider::resolve` (spec :
+        // chemin relatif au fichier important, jamais à la racine du
+        // thème) — dupliquée ici volontairement : la Passe A n'a pas
+        // accès à `Bundler`, mais doit rester cohérente avec sa
+        // convention de résolution de chemin.
+        let import_path = path.with_file_name(&import_rel);
+        walk_variable_graph(&import_path, registry, visited)?;
+    }
+
+    Ok(())
+}
+
+/// Extrait les déclarations `$nom: valeur;` d'un texte source, une par
+/// ligne. Purement additif sur `registry` — dernière déclaration lue
+/// l'emporte en cas de redéfinition inter-fichiers (portée globale,
+/// cohérent avec l'absence de toute notion de scope/import qualifié dans
+/// la spec actuelle du dialecte `$variable`).
+fn extract_declarations(text: &str, registry: &mut VariableRegistry) {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix('$') else {
+            continue;
+        };
+        let Some(colon) = rest.find(':') else {
+            continue;
+        };
+        let name = rest[..colon].trim();
+        let Some(value) = rest[colon + 1..].trim().strip_suffix(';') else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        registry.insert(name.to_string(), value.trim().to_string());
+    }
+}
+
+/// Extrait les cibles `@import "chemin";` (ou `@import url("chemin");`)
+/// d'un texte source. Ne traite que ce dont la Passe A a besoin : le
+/// chemin. Les qualificatifs (`layer(...)`, media, supports) sont ignorés
+/// ici sans risque — ils ne changent jamais QUEL fichier est importé,
+/// seulement comment `Bundler` l'enveloppera en Passe B.
+fn extract_import_targets(text: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("@import") {
+            continue;
+        }
+        let rest = &trimmed["@import".len()..];
+        let Some(start) = rest.find(['"', '\'']) else {
+            continue;
+        };
+        let quote = rest.as_bytes()[start] as char;
+        let Some(end_rel) = rest[start + 1..].find(quote) else {
+            continue;
+        };
+        targets.push(rest[start + 1..start + 1 + end_rel].to_string());
+    }
+    targets
+}
+
+/// Substitue chaque `$nom` par sa valeur résolue et purge les lignes de
+/// déclaration (grammaire CSS fermée, §10.3 de la spec — un token `$nom`
+/// non substitué ferait échouer `lightningcss` de toute façon ; le purger
+/// en amont est la seule option, pas un choix parmi d'autres).
+fn substitute_and_purge(
+    text: &str,
+    registry: &VariableRegistry,
+    file: &Path,
+) -> Result<String, MvarError> {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // Ligne de déclaration : déjà capturée en Passe A, purgée ici
+        // pour ne jamais atteindre le parseur (grammaire non reconnue).
+        if trimmed.starts_with('$') && trimmed.contains(':') {
+            continue;
+        }
+        out.push_str(&substitute_line(line, registry, file)?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Substitution caractère-à-caractère d'une seule ligne — un seul passage,
+/// aucune allocation intermédiaire hors la chaîne de sortie elle-même.
+/// Opère sur `char_indices` (pas `bytes[i] as char`) : une valeur UTF-8
+/// multioctet dans un `$nom` de variable romprait un découpage par octet.
+fn substitute_line(line: &str, registry: &VariableRegistry, file: &Path) -> Result<String, MvarError> {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.char_indices().peekable();
+
+    while let Some((idx, c)) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+
+        let start = idx + c.len_utf8();
+        let mut end = start;
+        while let Some(&(j, ch)) = chars.peek() {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                end = j + ch.len_utf8();
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        if end == start {
+            // '$' isolé, sans nom derrière : pas une variable, recopié tel quel.
+            out.push(c);
+            continue;
+        }
+
+        let name = &line[start..end];
+        match registry.get(name) {
+            Some(value) => out.push_str(value),
+            None => return Err(MvarError::UndefinedVariable(name.to_string(), file.to_path_buf())),
+        }
+    }
+
+    Ok(out)
+}
+
+// =============================================================================
+// Phase 3 (suite) — Déroulage AOT des boucles `@for` (dialecte Sass-like).
+//
+// Différence structurelle avec le registre de $variables plates ci-dessus :
+// une boucle `@for` est ENTIÈREMENT locale à son fichier — borne, pas et
+// corps sont dans le même texte. Pas de piège d'ordre inter-fichiers ici,
+// donc pas de Passe A dédiée : le déroulage tient dans le point
+// d'interception déjà en place (`MvarProvider::read`).
+//
+// Ordre à l'intérieur de `read()` (voir plus bas) :
+//   1. `expand_for_loops`     — élimine tout `@for`, ne substitue QUE la
+//                                variable de boucle courante ($i / $(i)),
+//                                laisse tout autre `$nom` strictement
+//                                intact.
+//   2. `substitute_and_purge` — résout les `$nom` globaux restants via le
+//                                VariableRegistry de la Passe A.
+// Ne jamais inverser : `substitute_and_purge` échoue dur sur tout `$nom`
+// non déclaré — inversé, elle verrait encore `$i` et le traiterait comme
+// une variable globale absente. C'est exactement l'erreur observée
+// (`UndefinedVariable("i", …)`) avant ce correctif.
+// =============================================================================
+
+#[derive(Debug)]
+struct ForLoopError(String);
+
+impl fmt::Display for ForLoopError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "styles (@for) : {}", self.0)
+    }
+}
+
+impl std::error::Error for ForLoopError {}
+
+/// Déroule tous les `@for $var from A to B [by S] { ... }` d'un texte.
+/// Récursif : le corps isolé (comptage d'accolades, pas de regex) est
+/// entièrement déplié AVANT d'être dupliqué par la boucle englobante — une
+/// boucle imbriquée est donc traitée une seule fois, pas de second passage
+/// nécessaire. Limite assumée : deux boucles imbriquées partageant le même
+/// nom de variable ($i dans les deux) ne sont pas gardées contre une
+/// collision — cas non rencontré dans les fichiers actuels, à traiter si
+/// besoin réel se présente.
+///
+/// Hypothèse de grammaire à confirmer explicitement : `to` est ici traité
+/// comme EXCLUSIF de la borne haute (convention Sass standard — `through`
+/// serait inclusif, mais n'apparaît pas dans la grammaire cible donnée).
+/// Conséquence concrète sur votre second exemple : `@for $i from 90 to
+/// 180 by 90` ne produit qu'UNE itération (i = 90, 180 exclu) avec cette
+/// hypothèse. Si vous attendiez `rotate90` ET `rotate180`, c'est `to`
+/// inclusif qu'il faut — je ne tranche pas ce point à votre place, à
+/// confirmer avant de considérer cette Phase 3 close.
+fn expand_for_loops(text: &str) -> Result<String, ForLoopError> {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+
+    while let Some(rel) = text[cursor..].find("@for") {
+        let for_start = cursor + rel;
+        out.push_str(&text[cursor..for_start]);
+
+        let mut i = for_start + "@for".len();
+        i = skip_ws(bytes, i);
+
+        i = expect_byte(bytes, i, b'$')
+            .ok_or_else(|| ForLoopError(format!("'$' attendu après @for (position {i})")))?;
+        let (var_name, next) = parse_ident(text, i)
+            .ok_or_else(|| ForLoopError(format!("nom de variable attendu après '$' (position {i})")))?;
+        i = skip_ws(bytes, next);
+
+        i = expect_literal(text, i, "from")
+            .ok_or_else(|| ForLoopError(format!("mot-clé 'from' attendu (position {i})")))?;
+        i = skip_ws(bytes, i);
+        let (start, next) = parse_int(text, i)
+            .ok_or_else(|| ForLoopError(format!("borne basse entière attendue (position {i})")))?;
+        i = skip_ws(bytes, next);
+
+        i = expect_literal(text, i, "to")
+            .ok_or_else(|| ForLoopError(format!("mot-clé 'to' attendu (position {i})")))?;
+        i = skip_ws(bytes, i);
+        let (end, next) = parse_int(text, i)
+            .ok_or_else(|| ForLoopError(format!("borne haute entière attendue (position {i})")))?;
+        i = skip_ws(bytes, next);
+
+        let mut step: i64 = 1;
+        if let Some(after_by) = expect_literal(text, i, "by") {
+            let after_ws = skip_ws(bytes, after_by);
+            let (s, next) = parse_int(text, after_ws).ok_or_else(|| {
+                ForLoopError(format!("pas entier attendu après 'by' (position {after_ws})"))
+            })?;
+            if s == 0 {
+                return Err(ForLoopError("pas ('by') ne peut pas être 0".to_string()));
+            }
+            step = s;
+            i = skip_ws(bytes, next);
+        }
+
+        i = expect_byte(bytes, i, b'{').ok_or_else(|| {
+            ForLoopError(format!(
+                "'{{' attendu pour ouvrir le corps de boucle (position {i})"
+            ))
+        })?;
+
+        let body_start = i;
+        let body_end = find_matching_brace(bytes, body_start)
+            .ok_or_else(|| ForLoopError("accolade fermante manquante pour @for".to_string()))?;
+        let raw_body = &text[body_start..body_end];
+
+        // Récursion AVANT duplication : toute boucle imbriquée dans le
+        // corps est entièrement dépliée une seule fois ici.
+        let expanded_body = expand_for_loops(raw_body)?;
+
+        let mut i_iter = start;
+        loop {
+            let done = if step > 0 { i_iter >= end } else { i_iter <= end };
+            if done {
+                break;
+            }
+            out.push_str(&substitute_loop_variable(&expanded_body, &var_name, i_iter));
+            i_iter += step;
+        }
+
+        cursor = body_end + 1; // juste après la '}' fermante du @for
+    }
+
+    out.push_str(&text[cursor..]);
+    Ok(out)
+}
+
+fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && (bytes[i] as char).is_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+fn expect_byte(bytes: &[u8], i: usize, b: u8) -> Option<usize> {
+    if i < bytes.len() && bytes[i] == b {
+        Some(i + 1)
+    } else {
+        None
+    }
+}
+
+fn expect_literal(text: &str, i: usize, lit: &str) -> Option<usize> {
+    text.get(i..)?.strip_prefix(lit).map(|_| i + lit.len())
+}
+
+fn parse_ident(text: &str, i: usize) -> Option<(String, usize)> {
+    let rest = text.get(i..)?;
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(rest.len());
+    if end == 0 {
+        None
+    } else {
+        Some((rest[..end].to_string(), i + end))
+    }
+}
+
+fn parse_int(text: &str, i: usize) -> Option<(i64, usize)> {
+    let rest = text.get(i..)?;
+    let bytes = rest.as_bytes();
+    let mut end = 0;
+    if end < bytes.len() && (bytes[end] == b'-' || bytes[end] == b'+') {
+        end += 1;
+    }
+    let digits_start = end;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == digits_start {
+        return None;
+    }
+    rest[..end].parse::<i64>().ok().map(|v| (v, i + end))
+}
+
+/// Comptage d'accolades — pas de regex, la grammaire n'est pas régulière
+/// (le corps contient ses propres règles CSS imbriquées avec `{`/`}`).
+/// `open_pos` pointe sur la '{' d'ouverture ; retourne l'indice de la '}'
+/// fermante correspondante (profondeur 0).
+fn find_matching_brace(bytes: &[u8], open_pos: usize) -> Option<usize> {
+    let mut depth: i32 = 1;
+    let mut i = open_pos + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Remplace UNIQUEMENT `$(nom)` et `$nom` (frontière de mot stricte) par
+/// la valeur de l'itération courante — tout autre `$token` (variable
+/// globale pas encore résolue, ex. `$demoColorDeviation`) traverse
+/// strictement inchangé. Volontairement non-erronant sur un `$autre`
+/// rencontré : ce n'est pas son rôle, `substitute_and_purge` s'en charge
+/// en aval, une fois le registre global connu.
+fn substitute_loop_variable(body: &str, var_name: &str, value: i64) -> String {
+    let value_str = value.to_string();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0usize;
+
+    while i < body.len() {
+        if body.as_bytes()[i] != b'$' {
+            let next_dollar = body[i..].find('$').map(|r| i + r).unwrap_or(body.len());
+            out.push_str(&body[i..next_dollar]);
+            i = next_dollar;
+            continue;
+        }
+
+        // Forme interpolée : $(nom)
+        if body.get(i + 1..).map(|s| s.starts_with('(')).unwrap_or(false) {
+            let name_start = i + 2;
+            if let Some(close_rel) = body[name_start..].find(')') {
+                let name_end = name_start + close_rel;
+                let name = &body[name_start..name_end];
+                if name == var_name {
+                    out.push_str(&value_str);
+                } else {
+                    // $(autre_nom) : pas notre variable, recopié tel quel.
+                    out.push_str(&body[i..name_end + 1]);
+                }
+                i = name_end + 1;
+                continue;
+            }
+            // '(' sans ')' fermante : pas une interpolation valide, '$'
+            // recopié seul, le reste suit son cours normalement.
+            out.push('$');
+            i += 1;
+            continue;
+        }
+
+        // Forme nue : $nom, frontière de mot stricte.
+        let name_start = i + 1;
+        let name_end = body[name_start..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .map(|r| name_start + r)
+            .unwrap_or(body.len());
+
+        if name_end > name_start {
+            let name = &body[name_start..name_end];
+            if name == var_name {
+                out.push_str(&value_str);
+            } else {
+                out.push_str(&body[i..name_end]);
+            }
+            i = name_end;
+        } else {
+            out.push('$');
+            i += 1;
+        }
+    }
+
+    out
+}
+
+/// Passe B — `SourceProvider` custom, remplace `FileProvider` en entrée de
+/// `Bundler`. Seul point d'interception : chaque fichier du graphe,
+/// entrée comme import résolu par `Bundler` lui-même, transite par
+/// `read()` avant tout parsing — la substitution y est donc appliquée de
+/// façon globale et transparente sans dupliquer la logique d'import de
+/// `Bundler`.
+///
+/// Contrainte de signature à respecter strictement :
+/// `read<'a>(&'a self, file: &Path) -> Result<&'a str, Self::Error>` — la
+/// référence retournée est liée à la durée de vie de `&self`, pas de
+/// l'appel. Un `String` local ne peut donc pas être retourné par `&str`
+/// sans que son adresse reste stable après la fin de `read()`. Solution
+/// identique à celle déjà employée par `FileProvider` lui-même (lu dans
+/// le code source du crate, §"Point de vigilance" du Handoff toujours
+/// valable) : `Box::into_raw` + accumulation des pointeurs, libérés au
+/// `Drop` de `MvarProvider`, jamais retirés du `Vec` entre-temps.
+struct MvarProvider {
+    registry: VariableRegistry,
+    outputs: Mutex<Vec<*mut String>>,
+}
+
+impl MvarProvider {
+    fn new(registry: VariableRegistry) -> Self {
+        MvarProvider {
+            registry,
+            outputs: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+// SAFETY : même justification que `FileProvider` dans lightningcss —
+// aucun état mutable partagé n'est exposé sans passer par le `Mutex`, et
+// les pointeurs accumulés ne sont jamais déréférencés en dehors de ce
+// fichier ni retirés avant le `Drop`.
+unsafe impl Sync for MvarProvider {}
+unsafe impl Send for MvarProvider {}
+
+impl SourceProvider for MvarProvider {
+    type Error = MvarError;
+
+    fn read<'a>(&'a self, file: &Path) -> Result<&'a str, Self::Error> {
+        let raw = fs::read_to_string(file)?;
+        // Ordre impératif : déroulage des @for D'ABORD (élimine $i / $(i)
+        // sans toucher aux $vars globales), résolution du registre global
+        // ENSUITE (voir commentaire "Phase 3 (suite)" plus haut).
+        let unrolled = expand_for_loops(&raw).map_err(MvarError::ForLoop)?;
+        let transformed = substitute_and_purge(&unrolled, &self.registry, file)?;
+        let ptr = Box::into_raw(Box::new(transformed));
+        self.outputs.lock().unwrap().push(ptr);
+        // SAFETY : le pointeur ne meurt qu'au `Drop` de `MvarProvider`, et
+        // n'est jamais retiré du `Vec` avant — la référence rendue reste
+        // valide aussi longtemps que `&'a self`.
+        Ok(unsafe { &*ptr })
+    }
+
+    fn resolve(&self, specifier: &str, originating_file: &Path) -> Result<ResolveResult, Self::Error> {
+        // Résolution de chemin identique à `FileProvider::resolve` — la
+        // Phase 3 ne change pas la convention de résolution des imports,
+        // seulement le contenu texte renvoyé pour chaque fichier.
+        Ok(originating_file.with_file_name(specifier).into())
+    }
+}
+
+impl Drop for MvarProvider {
+    fn drop(&mut self) {
+        for ptr in self.outputs.lock().unwrap().iter() {
+            drop(unsafe { Box::from_raw(*ptr) });
+        }
+    }
+}
+
 /// Pipeline `[styles]` réel — spec §10.1 et §10.3.
 ///
 /// 1. Bundling (`Bundler` + `FileProvider`) : résout et inline les
@@ -345,10 +927,15 @@ impl<'i> Visitor<'i> for FontFaceUrlVisitor<'_> {
 ///    validation dure + réécriture d'URL, spec §10.1.
 /// 3. Minification, puis émission du CSS final.
 ///
-/// Pré-passe lexicale des variables `$` : non implémentée, confirmé absent
-/// du CSS de test par l'auteur du projet — `lightningcss` échouera sur un
-/// token `$variable` si un tel fichier apparaît avant qu'un lexer dédié ne
-/// soit écrit (hors périmètre de cette session).
+/// Pré-passe lexicale des variables `$` et des boucles `@for` (Phase 3,
+/// cette session) : dans `MvarProvider::read`, `expand_for_loops` d'abord
+/// (élimine `@for`, local à chaque fichier, pas de piège d'ordre), puis
+/// résolution des `$nom` globaux via le `VariableRegistry` construit en
+/// amont par `build_variable_registry` (walk textuel du graphe `@import`,
+/// AVANT que `Bundler` ne lise quoi que ce soit — piège d'ordre inter-
+/// fichiers, celui-là bien réel, évité par cette séparation). Voir les
+/// deux blocs de commentaires "Phase 3" plus haut dans ce fichier pour le
+/// raisonnement complet.
 ///
 /// Note de version — confirmé par compilation réelle (retour de session,
 /// `lightningcss = "=1.0.0-alpha.71"`) : `ParserOptions` se passe à
@@ -360,7 +947,17 @@ fn transform_css(
     entry_path: &Path,
     font_registry: &FontRegistry,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let provider = FileProvider::new();
+    // Passe A — walk textuel complet du graphe AVANT toute chose : le
+    // registre doit être figé pour tout le graphe avant que `Bundler` ne
+    // lise ne serait-ce que le fichier d'entrée (cf. commentaire Phase 3
+    // ci-dessus — piège d'ordre si cette étape était fusionnée avec la
+    // lecture individuelle de chaque fichier).
+    let var_registry = build_variable_registry(entry_path)?;
+
+    // Passe B — `Bundler` s'exécute normalement, mais chaque lecture de
+    // fichier passe par `MvarProvider` : substitution + purge transparentes,
+    // `Bundler` ne voit jamais un seul token `$`.
+    let provider = MvarProvider::new(var_registry);
     let parser_options = ParserOptions::default();
     let mut bundler = Bundler::new(&provider, None, parser_options);
     let mut stylesheet = bundler.bundle(entry_path).map_err(|e| {
