@@ -13,10 +13,69 @@ use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 
 use axum::extract::{Extension, Path, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 
 use marius_render::{IdSource, LiveRegistry, PackHtmlIndex, RouteEntry};
+
+use crate::{ASSET_ROUTES, AssetRoute};
+
+/// Handler unique pour tout asset statique — fallback du routeur (spec
+/// §7/§9). `ASSET_ROUTES` (générée par build.rs, phf) est la seule liste
+/// blanche : `uri.path()` sert de clé opaque, jamais de fragment de chemin
+/// filesystem. C'est ce qui élimine toute traversée de chemin par
+/// construction (aucune concaténation `base_dir + chemin_utilisateur`
+/// n'existe nulle part dans cette fonction), pas par validation a
+/// posteriori — une clé absente de la table est un 404 immédiat, zéro I/O
+/// disque, avant même de considérer l'idée d'un chemin réel.
+pub async fn serve_asset(uri: Uri) -> Response {
+    // Lookup O(1) — seule opération avant tout I/O. `uri.path()` exclut la
+    // query string par construction (http::Uri), pas besoin de la retirer
+    // manuellement.
+    let Some(route) = ASSET_ROUTES.get(uri.path()).copied() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    deliver_asset(route).await
+}
+
+/// I/O réelle, isolée pour rester symétrique avec `deliver` (fragments HTML
+/// ci-dessus) : une seule fonction fait l'ouverture, l'appelant ne connaît
+/// que la donnée déjà validée.
+///
+/// `tokio::fs::read` (async natif, pas `spawn_blocking` + `std::fs::read`) :
+/// n'immobilise jamais un worker Tokio pendant l'appel système, à la
+/// différence du patron `spawn_blocking` retenu pour les packfiles HTML —
+/// différence justifiée par la nature de l'opération (une lecture complète
+/// de fichier borné, pas un `pread` à offset sur un fd long-lived partagé :
+/// aucune raison ici d'éviter l'API async standard de Tokio).
+async fn deliver_asset(route: AssetRoute) -> Response {
+    match tokio::fs::read(route.path).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static(route.mime)),
+                (header::CONTENT_LENGTH, HeaderValue::from(route.size)),
+                (header::ETAG, HeaderValue::from_static(route.etag)),
+                // URL déjà versionnée par le hash de contenu (spec §9) :
+                // cache agressif légitime, c'est tout l'intérêt du
+                // cache-busting — jamais de revalidation nécessaire tant
+                // que l'URL ne change pas.
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=31536000, immutable"),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+
+        // route.path absent du disque alors qu'ASSET_ROUTES l'affirme :
+        // désynchronisation build/déploiement (bug interne, artefact non
+        // copié), jamais imputable à la requête cliente — 500, même
+        // discipline que `deliver` ci-dessus pour les fragments HTML.
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
 
 /// Point d'entrée Axum pour toute route de ROUTE_TABLE — la même fonction
 /// sert toutes les routes, distinguées entre elles par la `RouteEntry`

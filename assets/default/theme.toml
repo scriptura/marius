@@ -11,7 +11,7 @@ version = "1.0.0"
 [styles]
 # Liste plate des points d'entrée. 
 # Le compilateur va lire ces fichiers, résoudre leurs @import internes, et générer les artéfacts.
-entries = ["styles/development/main.mcss"]
+entries = ["styles/development/main.mcss", "styles/development/print.mcss"]
 
 [scripts.components]
 # Dictionnaire (HashMap) : Cible -> Dossier Source.
@@ -35,6 +35,10 @@ players = "sprites/players"
 # Le compilateur préserve le type MIME et applique le hash, sans toucher au contenu.
 files = [
     "favicons/favicon.ico",
+    "favicons/favicon.svg",
+    "favicons/favicon.png",
+    "favicons/apple-touch-icon.png",
+    "favicons/safari-pinned-tab.svg",
     "fonts/notoSans-Regular.woff2",
     "fonts/notoSerif-Regular.woff2",
     # "libraries/htmx.min.js"

@@ -65,6 +65,28 @@ use marius_schema::{
 // n'a besoin de nommer Collector<_, _> pour appeler .insert().
 use marius_collector::InsertResult;
 
+/// Entrée de routage HTTP pour un asset statique — générée par build.rs
+/// depuis manifest.toml (projection inverse : indexée par URL, pas par id
+/// logique — voir build.rs pour la justification). Tous les champs sont
+/// `&'static str`/`Copy` : aucune allocation à la lecture, la valeur entière
+/// est déjà en .rodata.
+#[derive(Clone, Copy)]
+pub struct AssetRoute {
+    /// Chemin physique, relatif à la racine du workspace — même convention
+    /// CWD-relative que les autres artefacts Marius (guide-cycle-de-vie-
+    /// runtime.md §4).
+    pub path: &'static str,
+    pub mime: &'static str,
+    pub size: u64,
+    /// Forme HTTP prête à l'emploi (guillemets inclus) — voir build.rs.
+    pub etag: &'static str,
+}
+
+// Table de routage assets — fonction de hachage parfaite calculée à la
+// compilation par build.rs (phf_codegen), embarquée en .rodata. Lookup O(1)
+// strict sur l'URL entrante : aucune itération sur le manifeste au runtime.
+include!(concat!(env!("OUT_DIR"), "/asset_routes.rs"));
+
 /// Table de routage AOT — écrite à la main (cf. en-tête de fichier).
 /// 3 entrées : suffisant pour le Jalon 3 ("2-3 packfiles synthétiques"),
 /// couvre les deux IdSource (PathParam, Fixed).
@@ -151,7 +173,12 @@ fn build_router(route_table: &'static [RouteEntry], registry: Arc<LiveRegistry>)
             get(handlers::serve_route).layer(Extension(entry)),
         );
     }
-    router.with_state(registry)
+    // Assets statiques (spec §7/§9) : un seul point d'entrée générique, pas
+    // une route par fichier haché — ASSET_ROUTES fait le tri, jamais le
+    // radix-tree d'Axum. Ordonnancement : le fallback n'intercepte que ce
+    // qu'aucune route explicite ci-dessus n'a matché, donc jamais les
+    // routes de fragments HTML (spec §6).
+    router.fallback(handlers::serve_asset).with_state(registry)
 }
 
 /// PgListener réactif (Phase 5.2). Boucle de reconnexion externe (invariant

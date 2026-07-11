@@ -42,6 +42,7 @@ marius-schema = { path = "../../core/schema" }
 tokio = { workspace = true }
 axum = { workspace = true }
 sqlx = { workspace = true }
+phf = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 # Client HTTP pour les tests d'intégration Jalon 3 (requêtes concurrentes
@@ -51,3 +52,9 @@ sqlx = { workspace = true }
 # de l'ajout (max_stable_version 0.13.4) — même discipline que arc-swap en
 # Phase 2. Inchangé par cette session.
 reqwest = { version = "0.13", default-features = false }
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+phf = { version = "0.14", default-features = false }
+phf_codegen = "0.14"
