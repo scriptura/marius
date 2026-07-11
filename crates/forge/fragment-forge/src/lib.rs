@@ -1470,6 +1470,31 @@ pub struct TemplateMetrics {
     pub include_count: usize,
 }
 
+/// Résultat de la résolution d'un `{% asset key %}` par la closure injectée
+/// depuis `build.rs`. Pas un `Option<usize>` : le cas d'échec porte sa
+/// propre suggestion diagnostique, calculée par l'appelant — seul à
+/// posséder le registre d'assets (`fragment-forge` reste sans I/O, sans
+/// connaissance du manifeste, invariant inchangé depuis la doc de
+/// `resolve_asset_len` ci-dessous).
+///
+/// Test de substitution (retirer la fonctionnalité de suggestion) :
+/// `Found(usize)` reste `Found(usize)` quoi qu'il arrive au diagnostic —
+/// contrairement à un `Result<usize, String>` calqué sur `get_file_size`,
+/// où le canal de succès aurait dû redevenir `Option<usize>` si un jour la
+/// suggestion disparaissait. Le canal de succès n'est pas couplé au canal
+/// diagnostique.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AssetLookup {
+    /// Clé trouvée dans le manifeste — longueur en octets de l'URL
+    /// publique versionnée finale (voir doc de `resolve_asset_len`).
+    Found(usize),
+    /// Clé absente du manifeste. `suggestion`, si présente, est un message
+    /// déjà formaté par l'appelant (casse différente ou plus proche
+    /// voisin par distance d'édition) — `fragment-forge` ne la recalcule
+    /// jamais, il n'a pas accès aux clés candidates pour le faire.
+    NotFound { suggestion: Option<String> },
+}
+
 /// Erreur de résolution I/O produite par `resolve_and_measure`.
 ///
 /// `path` emprunte `'src` depuis le token AST : zéro allocation pour
@@ -1495,7 +1520,15 @@ pub enum ResolverError<'src> {
     /// produit par `marius-assets` — spec §9 et §11 : `AssetNotFound` est un
     /// échec fatal de compilation, jamais un repli ou une résolution
     /// dynamique différée au runtime.
-    AssetNotFound { key: &'src str },
+    ///
+    /// `suggestion` transporte, sans le recalculer, le diagnostic déjà
+    /// produit par `AssetLookup::NotFound` — `None` signifie qu'aucun
+    /// candidat plausible n'a été trouvé dans le manifeste, pas qu'aucune
+    /// tentative n'a eu lieu.
+    AssetNotFound {
+        key: &'src str,
+        suggestion: Option<String>,
+    },
 }
 
 /// Résout les inclusions, mute l'AST en place, calcule les métriques statiques.
@@ -1517,14 +1550,17 @@ pub enum ResolverError<'src> {
 /// d'assets — jamais d'I/O ici. Retourne la longueur en octets de l'URL
 /// publique versionnée finale (celle qui sera effectivement écrite par
 /// `generate_aot_snippet`), pas la taille du fichier lui-même : c'est ce
-/// nombre d'octets, et lui seul, qui contribue à `PAGE_STATIC_CAP`. `None`
-/// signifie clé absente du manifeste → `ResolverError::AssetNotFound`,
-/// jamais une longueur par défaut devinée.
+/// nombre d'octets, et lui seul, qui contribue à `PAGE_STATIC_CAP`.
+/// `AssetLookup::NotFound` signifie clé absente du manifeste →
+/// `ResolverError::AssetNotFound`, jamais une longueur par défaut devinée
+/// — la suggestion diagnostique éventuelle est transportée telle quelle,
+/// `fragment-forge` ne la recalcule jamais (il n'a pas les clés
+/// candidates pour le faire, seul `build.rs` les possède).
 pub fn resolve_and_measure<'src>(
     tokens: &mut [FlatPageToken<'src>],
     schema: &SchemaIndex<'_>,
     get_file_size: impl Fn(&str) -> Result<usize, String>,
-    resolve_asset_len: impl Fn(&str) -> Option<usize>,
+    resolve_asset_len: impl Fn(&str) -> AssetLookup,
 ) -> Result<TemplateMetrics, Vec<ResolverError<'src>>> {
     let mut metrics = TemplateMetrics {
         total_static_bytes: 0,
@@ -1599,8 +1635,10 @@ pub fn resolve_and_measure<'src>(
             // directe à total_static_bytes), aucune mutation en place (voir
             // doc de la variante : pas de champ provisoire à patcher ici).
             FlatPageToken::AssetRef(key) => match resolve_asset_len(key) {
-                Some(len) => metrics.total_static_bytes += len,
-                None => errors.push(ResolverError::AssetNotFound { key }),
+                AssetLookup::Found(len) => metrics.total_static_bytes += len,
+                AssetLookup::NotFound { suggestion } => {
+                    errors.push(ResolverError::AssetNotFound { key, suggestion });
+                }
             },
         }
     }
@@ -1619,8 +1657,8 @@ pub fn resolve_and_measure<'src>(
 #[cfg(test)]
 mod tests_phase_2_1 {
     use super::{
-        FieldKind, FieldSpec, FlatPageToken, ResolverError, SchemaIndex, TemplateMetrics,
-        VarlenField, resolve_and_measure,
+        AssetLookup, FieldKind, FieldSpec, FlatPageToken, ResolverError, SchemaIndex,
+        TemplateMetrics, VarlenField, resolve_and_measure,
     };
 
     /// Construit un StaticInclude avec len = 0 (valeur provisoire Phase 1.3).
@@ -1731,7 +1769,7 @@ mod tests_phase_2_1 {
             ResolverError::UnboundedField { entity, field } => {
                 panic!("UnboundedField inattendu dans ce test : {entity}.{field}");
             }
-            ResolverError::AssetNotFound { key } => {
+            ResolverError::AssetNotFound { key, .. } => {
                 panic!("AssetNotFound inattendu dans ce test : {key}");
             }
         }
@@ -1912,6 +1950,127 @@ mod tests_phase_2_1 {
             "champ Cold ne doit jamais contribuer"
         );
         assert_eq!(metrics.total_static_bytes, 19); // "<article></article>".len()
+    }
+
+    // =========================================================================
+    // `{% asset key %}` — AssetLookup / ResolverError::AssetNotFound.
+    //
+    // Ces trois tests documentent un invariant précis, pas seulement le
+    // chemin heureux : `fragment-forge` transporte la `suggestion` fournie
+    // par la closure `resolve_asset_len` TELLE QUELLE — il ne la calcule
+    // jamais, ne la reformate jamais, ne la remplace jamais par `None` par
+    // défaut. Le calcul réel (casse insensible, Levenshtein) vit côté
+    // `build.rs` (`resolve_asset_lookup`/`suggest_asset_key`), hors de
+    // portée de ce crate — ces tests n'exercent donc délibérément que le
+    // passage à travers `resolve_and_measure`, pas l'algorithme de
+    // suggestion lui-même (qui n'existe pas ici).
+    // =========================================================================
+
+    /// Chemin heureux : clé résolue, contribue à `total_static_bytes` au
+    /// même titre qu'un `Static`/`StaticInclude` — jamais à
+    /// `total_dynamic_bytes` (spec §9 : une URL versionnée est un segment
+    /// figé au moment de la génération, pas une valeur runtime).
+    #[test]
+    fn asset_ref_found_contributes_static_bytes() {
+        let mut tokens = vec![
+            FlatPageToken::Static("<link href=\""),
+            FlatPageToken::AssetRef("main.css"),
+            FlatPageToken::Static("\">"),
+        ];
+        let schema = SchemaIndex {
+            fixed: &[],
+            varlena: &[],
+        };
+
+        let metrics = resolve_and_measure(
+            &mut tokens,
+            &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+            |key| {
+                assert_eq!(key, "main.css");
+                AssetLookup::Found(20) // longueur de l'URL versionnée, pas du fichier
+            },
+        )
+        .expect("clé présente : résolution attendue en succès");
+
+        assert_eq!(metrics.total_static_bytes, 12 + 20 + 2);
+        assert_eq!(
+            metrics.total_dynamic_bytes, 0,
+            "un asset résolu ne doit jamais contribuer à total_dynamic_bytes"
+        );
+    }
+
+    /// Clé absente AVEC suggestion : `ResolverError::AssetNotFound` doit
+    /// porter la `suggestion` fournie par la closure mot pour mot — aucune
+    /// transformation, aucun recalcul. C'est le contrat qui permet à
+    /// `build.rs` de calculer le diagnostic (il a les clés candidates,
+    /// `fragment-forge` ne les a jamais).
+    #[test]
+    fn asset_not_found_carries_supplied_suggestion_unchanged() {
+        let mut tokens = vec![FlatPageToken::AssetRef("util.svg")];
+        let schema = SchemaIndex {
+            fixed: &[],
+            varlena: &[],
+        };
+
+        let result = resolve_and_measure(
+            &mut tokens,
+            &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+            |key| {
+                assert_eq!(key, "util.svg");
+                AssetLookup::NotFound {
+                    suggestion: Some("vouliez-vous dire 'utils.svg' ?".to_string()),
+                }
+            },
+        );
+
+        let errors = result.expect_err("clé absente : Err attendu");
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            ResolverError::AssetNotFound { key, suggestion } => {
+                assert_eq!(*key, "util.svg");
+                assert_eq!(
+                    suggestion.as_deref(),
+                    Some("vouliez-vous dire 'utils.svg' ?"),
+                    "la suggestion doit traverser resolve_and_measure sans altération"
+                );
+            }
+            other => panic!("AssetNotFound attendu, obtenu : {other:?}"),
+        }
+    }
+
+    /// Clé absente SANS suggestion plausible : `suggestion` doit rester
+    /// `None`, jamais remplacé par un texte générique fabriqué par
+    /// `fragment-forge` — ce cas (aucun candidat proche dans le manifeste,
+    /// ex. `silos/195v.svg`) doit rester silencieusement `None` jusqu'au
+    /// site d'affichage, qui décide seul comment le présenter.
+    #[test]
+    fn asset_not_found_without_suggestion_stays_none() {
+        let mut tokens = vec![FlatPageToken::AssetRef("silos/195v.svg")];
+        let schema = SchemaIndex {
+            fixed: &[],
+            varlena: &[],
+        };
+
+        let result = resolve_and_measure(
+            &mut tokens,
+            &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+            |_| AssetLookup::NotFound { suggestion: None },
+        );
+
+        let errors = result.expect_err("clé absente : Err attendu");
+        match &errors[0] {
+            ResolverError::AssetNotFound { key, suggestion } => {
+                assert_eq!(*key, "silos/195v.svg");
+                assert_eq!(
+                    *suggestion, None,
+                    "aucun candidat plausible : None attendu, pas un texte générique"
+                );
+            }
+            other => panic!("AssetNotFound attendu, obtenu : {other:?}"),
+        }
     }
 }
 

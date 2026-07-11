@@ -6,10 +6,11 @@
 // le Core no_std) — voir marius-assets-specification.md et
 // marius-assets-HANDOFF.md pour le contexte complet.
 //
-// Étape 1 de la roadmap d'implémentation : pipelines [static.verbatim] et
-// [styles] uniquement. [scripts.components] et [sprites] apparaissent dans
-// theme.toml mais ne sont pas encore traités ici (Phase 2) — serde les
-// ignore silencieusement, aucun champ ne les capture dans ThemeConfig.
+// Étape 1 de la roadmap d'implémentation : pipelines [static.verbatim],
+// [styles] (variables `$`, boucles `@for`, Fonts↔CSS) et [sprites]
+// (Phase 4, cette session). [scripts.components] apparaît dans
+// theme.toml mais n'est pas encore traité ici — serde l'ignore
+// silencieusement, aucun champ ne le capture dans ThemeConfig.
 //
 // Invariant DOD respecté : traitement séquentiel, un seul passage par
 // fichier, aucune structure de données hiérarchique, aucun trait dynamique.
@@ -33,6 +34,13 @@ use lightningcss::values::url::Url;
 use lightningcss::visit_types;
 use lightningcss::visitor::{Visit, VisitTypes, Visitor};
 
+// Pipeline [sprites] (Phase 4) — parseur pull, aucun DOM construit : un
+// seul passage par fichier SVG, mémoire proportionnelle au buffer de
+// sortie, pas à la taille de l'arbre. `Event<'a>` emprunte directement le
+// texte source (&str), aucune copie avant la sérialisation ciblée.
+use quick_xml::Reader;
+use quick_xml::events::Event;
+
 // =============================================================================
 // theme.toml — désérialisation d'entrée
 // =============================================================================
@@ -46,9 +54,16 @@ struct ThemeConfig {
     // côté TOML (la clé `[static.verbatim]` reste inchangée dans le fichier).
     #[serde(rename = "static", default)]
     static_: StaticConfig,
-    // [scripts.components] et [sprites] existent dans theme.toml (Phase 2,
-    // non traités) : absents de cette struct, serde les ignore sans erreur
-    // tant qu'aucun #[serde(deny_unknown_fields)] n'est posé ici — délibéré.
+    // [sprites] — Phase 4, cette session : dictionnaire plat nom logique
+    // -> dossier source (`silos = "sprites/silos"`). Pas de struct
+    // intermédiaire nécessaire, contrairement à `styles`/`static_` : une
+    // seule paire clé/valeur par entrée, `HashMap<String, String>` suffit
+    // à la représenter fidèlement sans couche superflue.
+    #[serde(default)]
+    sprites: HashMap<String, String>,
+    // [scripts.components] existe dans theme.toml, non traité cette
+    // session : absent de cette struct, serde l'ignore sans erreur tant
+    // qu'aucun #[serde(deny_unknown_fields)] n'est posé ici — délibéré.
 }
 
 #[derive(Deserialize)]
@@ -252,6 +267,268 @@ fn run_verbatim_pipeline(
 }
 
 // =============================================================================
+// Pipeline [sprites] — Phase 4. Un dossier source = une cible : tous les
+// `.svg` du dossier sont fusionnés en un unique `<symbol>` par fichier,
+// assemblés dans un seul sprite maître `<svg>` (masqué, `display:none`),
+// haché comme tout autre artefact transformé (le hash reflète le sprite
+// assemblé, jamais les fichiers sources pris isolément).
+//
+// Sympathie mécanique : `quick_xml::Reader` est un parseur PULL sur `&str`
+// — aucun DOM construit, mémoire proportionnelle à la sortie produite, pas
+// à la taille de l'arbre XML. Un seul passage par fichier, la profondeur
+// d'imbrication du contenu utile (tout ce qui est À L'INTÉRIEUR de la
+// balise racine `<svg>`) est suivie par un simple compteur entier — même
+// discipline que `find_matching_brace` pour les boucles `@for` : pas de
+// pile explicite, la structure XML étant garantie bien formée par le
+// parseur lui-même (toute erreur de nesting remonte comme `Err` avant
+// d'atteindre notre logique de comptage).
+// =============================================================================
+
+#[derive(Debug)]
+struct SpriteError(String);
+
+impl fmt::Display for SpriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "sprites : {}", self.0)
+    }
+}
+
+impl std::error::Error for SpriteError {}
+
+/// Sérialise une balise ouvrante (`Start` ou `Empty`) en purgeant `fill`/
+/// `stroke` codés en dur — sauf `currentColor`/`none`, qui doivent
+/// survivre tels quels (comportement déjà correct, rien à réécrire :
+/// `none` signifie explicitement "pas de remplissage", `currentColor` est
+/// déjà la manipulabilité CSS visée, pas un codage en dur à éliminer).
+/// Toute autre valeur (`#ff0000`, `rgb(...)`, un nom de couleur littéral)
+/// fige la couleur au niveau du fichier source — exactement ce que la
+/// mission demande de retirer pour laisser le CSS du thème piloter la
+/// couleur au runtime.
+fn serialize_start(
+    e: &quick_xml::events::BytesStart,
+    self_closing: bool,
+) -> Result<String, SpriteError> {
+    let mut out = String::new();
+    out.push('<');
+    out.push_str(&String::from_utf8_lossy(e.name().as_ref()));
+
+    for attr in e.attributes() {
+        let attr = attr.map_err(|err| SpriteError(format!("attribut XML invalide : {err}")))?;
+        let key = attr.key.as_ref();
+        if matches!(key, b"fill" | b"stroke") {
+            let value = attr.value.as_ref();
+            if value != b"currentColor" && value != b"none" {
+                continue; // purgé — codé en dur, ni currentColor ni none.
+            }
+        }
+        out.push(' ');
+        out.push_str(&String::from_utf8_lossy(key));
+        out.push_str("=\"");
+        out.push_str(&String::from_utf8_lossy(attr.value.as_ref()));
+        out.push('"');
+    }
+
+    out.push_str(if self_closing { " />" } else { ">" });
+    Ok(out)
+}
+
+/// Transforme un fichier SVG source en `<symbol id="...">...</symbol>` —
+/// entêtes `<?xml...?>`/`<!DOCTYPE...>` ignorés, seul le contenu À
+/// L'INTÉRIEUR de la balise racine `<svg>` est conservé.
+///
+/// Suivi de profondeur : `depth` compte les éléments ouverts DEPUIS la
+/// racine (elle-même exclue — jamais incrémentée pour son propre `Start`).
+/// La balise fermante rencontrée avec `depth == 0` est donc nécessairement
+/// celle de la racine elle-même : fin du contenu utile, sans qu'il soit
+/// besoin de mémoriser son nom pour la reconnaître.
+fn svg_file_to_symbol(id: &str, source: &str) -> Result<String, SpriteError> {
+    let mut reader = Reader::from_str(source);
+    let mut out = String::new();
+    out.push_str("<symbol id=\"");
+    out.push_str(id);
+    out.push_str("\">");
+
+    let mut root_found = false;
+    let mut depth: u32 = 0;
+
+    loop {
+        let event = reader
+            .read_event()
+            .map_err(|e| SpriteError(format!("{id} : XML invalide : {e}")))?;
+
+        match event {
+            // Entêtes explicitement ignorés — spec §3 de la mission.
+            Event::Decl(_) | Event::PI(_) | Event::DocType(_) | Event::Comment(_) => {}
+
+            Event::Start(e) => {
+                if !root_found {
+                    if e.local_name().as_ref() == b"svg" {
+                        root_found = true;
+                    } else {
+                        return Err(SpriteError(format!(
+                            "{id} : balise racine <svg> attendue, trouvé <{}>",
+                            String::from_utf8_lossy(e.name().as_ref())
+                        )));
+                    }
+                } else {
+                    depth += 1;
+                    out.push_str(&serialize_start(&e, false)?);
+                }
+            }
+
+            Event::Empty(e) => {
+                if !root_found {
+                    if e.local_name().as_ref() == b"svg" {
+                        // <svg ... /> — racine explicitement vide.
+                        break;
+                    }
+                    return Err(SpriteError(format!(
+                        "{id} : balise racine <svg> attendue, trouvé <{}>",
+                        String::from_utf8_lossy(e.name().as_ref())
+                    )));
+                }
+                out.push_str(&serialize_start(&e, true)?);
+            }
+
+            Event::End(e) => {
+                if !root_found {
+                    return Err(SpriteError(format!(
+                        "{id} : balise fermante inattendue avant la racine <svg>"
+                    )));
+                }
+                if depth == 0 {
+                    // Fermeture de la racine elle-même : fin du contenu utile.
+                    break;
+                }
+                depth -= 1;
+                out.push_str("</");
+                out.push_str(&String::from_utf8_lossy(e.name().as_ref()));
+                out.push('>');
+            }
+
+            Event::Text(e) => {
+                if root_found {
+                    out.push_str(&String::from_utf8_lossy(&e));
+                }
+            }
+
+            Event::CData(e) => {
+                if root_found {
+                    out.push_str("<![CDATA[");
+                    out.push_str(&String::from_utf8_lossy(&e));
+                    out.push_str("]]>");
+                }
+            }
+
+            // Référence générale (`&entity;`) — grammaire non rencontrée
+            // dans les SVG réels du thème à ce stade, ignorée sans erreur
+            // plutôt que de bloquer tout le pipeline pour un cas marginal.
+            Event::GeneralRef(_) => {}
+
+            Event::Eof => {
+                if !root_found {
+                    return Err(SpriteError(format!("{id} : aucune balise <svg> trouvée")));
+                }
+                break;
+            }
+        }
+    }
+
+    out.push_str("</symbol>");
+    Ok(out)
+}
+
+fn run_sprites_pipeline(
+    theme_dir: &Path,
+    build_root: &Path,
+    build_root_rel: &str,
+    sprites: &HashMap<String, String>,
+    manifest: &mut HashMap<String, AssetEntry>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // `theme.toml` désérialise `[sprites]` en HashMap — ordre d'itération
+    // non spécifié par le langage. Trier les clés n'est pas une question
+    // de style : le manifeste (et son hash indirect via le contenu émis)
+    // doit être reproductible d'un build à l'autre sur la même source.
+    let mut sprite_names: Vec<&String> = sprites.keys().collect();
+    sprite_names.sort();
+
+    for sprite_name in sprite_names {
+        let source_dir_rel = &sprites[sprite_name];
+        let source_dir = theme_dir.join(source_dir_rel);
+
+        let mut svg_files: Vec<PathBuf> = fs::read_dir(&source_dir)
+            .map_err(|e| {
+                format!(
+                    "sprites : dossier introuvable {} : {e}",
+                    source_dir.display()
+                )
+            })?
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("svg"))
+            .collect();
+        // Même raison que le tri des clés ci-dessus : `read_dir` ne
+        // garantit lui non plus aucun ordre — la reproductibilité du
+        // sprite maître (donc de son contenu et de son hash) en dépend.
+        svg_files.sort();
+
+        let mut symbols = String::new();
+        for svg_path in &svg_files {
+            let id = svg_path.file_stem().ok_or_else(|| {
+                format!("sprites : nom de fichier invalide : {}", svg_path.display())
+            })?;
+            let id = id.to_string_lossy();
+
+            let source = fs::read_to_string(svg_path).map_err(|e| {
+                format!(
+                    "sprites : lecture impossible de {} : {e}",
+                    svg_path.display()
+                )
+            })?;
+
+            let symbol = svg_file_to_symbol(&id, &source)
+                .map_err(|e| format!("sprites : {} : {e}", svg_path.display()))?;
+
+            symbols.push_str(&symbol);
+        }
+
+        let sprite_svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" style="display:none;">{symbols}</svg>"#
+        );
+        let bytes = sprite_svg.as_bytes();
+        let (full_hash, short_hash) = hash_content(bytes);
+
+        let hashed_filename = format!("{sprite_name}.{short_hash}.svg");
+        let output_rel = join_slash("sprites", &hashed_filename);
+        let output_abs = build_root.join(&output_rel);
+
+        if let Some(dir) = output_abs.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(&output_abs, bytes)?;
+
+        let logical_key = format!("{sprite_name}.svg");
+        manifest.insert(
+            logical_key,
+            AssetEntry {
+                url: format!("/{output_rel}"),
+                path: join_slash(build_root_rel, &output_rel),
+                mime: mime_for_extension("svg").to_string(),
+                size: bytes.len() as u64,
+                hash: full_hash,
+                version: String::new(), // rempli par l'appelant (theme.version)
+            },
+        );
+
+        println!(
+            "[marius-assets] sprites   {source_dir_rel} -> /{output_rel} ({} icônes)",
+            svg_files.len()
+        );
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // Pipeline [styles] — bundling + validation Fonts + minification (voir
 // transform_css ci-dessous), hachage du résultat
 // transformé (pas de la source : le hash doit refléter ce qui est
@@ -382,7 +659,17 @@ enum MvarError {
     /// `$nom` rencontré à la substitution mais absent du registre — échec
     /// dur, même politique que `FontResolutionError` : pas de passthrough
     /// silencieux d'un token non résolu vers le CSS final.
-    UndefinedVariable(String, PathBuf),
+    ///
+    /// `suggestion` est calculée UNE SEULE FOIS, au point de construction
+    /// de l'erreur (`substitute_line`, qui a déjà `&VariableRegistry` sous
+    /// la main) — pas au moment de l'affichage. Ce n'est pas un détail
+    /// cosmétique : l'erreur transporte déjà tout ce dont `Display` a
+    /// besoin, sans lui redonner accès au registre.
+    UndefinedVariable {
+        name: String,
+        file: PathBuf,
+        suggestion: Option<String>,
+    },
     /// Grammaire `@for` malformée (borne manquante, accolade non fermée,
     /// pas nul, etc.) — voir `ForLoopError` plus bas dans ce fichier.
     ForLoop(ForLoopError),
@@ -392,14 +679,82 @@ impl fmt::Display for MvarError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MvarError::Io(e) => write!(f, "styles (variables) : lecture impossible : {e}"),
-            MvarError::UndefinedVariable(name, file) => write!(
-                f,
-                "styles (variables) : ${name} utilisée mais jamais déclarée (fichier {})",
-                file.display()
-            ),
+            MvarError::UndefinedVariable {
+                name,
+                file,
+                suggestion,
+            } => {
+                write!(
+                    f,
+                    "styles (variables) : ${name} utilisée mais jamais déclarée (fichier {})",
+                    file.display()
+                )?;
+                match suggestion {
+                    Some(hint) => write!(f, " — {hint}"),
+                    None => write!(
+                        f,
+                        " — aucune variable proche dans le registre ; vérifiez l'orthographe \
+                         et la présence de la déclaration `${name}: valeur;`."
+                    ),
+                }
+            }
             MvarError::ForLoop(e) => write!(f, "{e}"),
         }
     }
+}
+
+/// Suggestion pour un `$nom` non résolu — deux niveaux de confiance,
+/// jamais mélangés dans le même message (une correspondance insensible à
+/// la casse est quasi certaine, une correspondance approchée par distance
+/// d'édition ne l'est pas, le message ne doit pas prétendre le contraire).
+///
+/// Priorité 1 — casse différente : le cas le plus probable en pratique
+/// (l'auteur du projet a confirmé ce comportement lors de la session
+/// précédente : `${name}` sensible à la casse est un choix assumé, pas un
+/// bug — mais une faute de casse reste l'erreur la plus fréquente pour
+/// autant, elle mérite un message qui la nomme explicitement plutôt qu'un
+/// "vouliez-vous dire" générique.
+///
+/// Priorité 2 — faute de frappe : plus proche voisin par distance de
+/// Levenshtein, borné à 2 pour éviter une suggestion trompeuse sur un nom
+/// sans rapport réel (mieux vaut aucune suggestion qu'une mauvaise piste).
+fn suggest_variable(name: &str, registry: &VariableRegistry) -> Option<String> {
+    if let Some(exact_ci) = registry.keys().find(|k| k.eq_ignore_ascii_case(name)) {
+        return Some(format!(
+            "la casse ne correspond pas : le registre contient ${exact_ci}, pas ${name} \
+             (la casse est sensible, comportement assumé)"
+        ));
+    }
+
+    registry
+        .keys()
+        .map(|k| (k, levenshtein(name, k)))
+        .filter(|(_, dist)| *dist <= 2)
+        .min_by_key(|(_, dist)| *dist)
+        .map(|(k, _)| format!("vouliez-vous dire ${k} ?"))
+}
+
+/// Distance de Levenshtein — classique, deux lignes de tableau roulées
+/// (`prev`/`curr`) plutôt qu'une matrice complète : le registre de
+/// $variables d'un thème compte au plus quelques dizaines d'entrées, la
+/// complexité O(n·m) par comparaison est hors de propos ici, seule
+/// l'empreinte mémoire (une matrice complète serait un gaspillage sans
+/// contrepartie) justifie ce choix.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr: Vec<usize> = vec![0; b.len() + 1];
+
+    for i in 1..=a.len() {
+        curr[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 impl std::error::Error for MvarError {}
@@ -444,8 +799,12 @@ fn walk_variable_graph(
         return Ok(());
     }
 
-    let text = fs::read_to_string(path)
-        .map_err(|e| format!("styles (variables) : lecture impossible de {} : {e}", path.display()))?;
+    let text = fs::read_to_string(path).map_err(|e| {
+        format!(
+            "styles (variables) : lecture impossible de {} : {e}",
+            path.display()
+        )
+    })?;
 
     extract_declarations(&text, registry);
 
@@ -539,7 +898,11 @@ fn substitute_and_purge(
 /// aucune allocation intermédiaire hors la chaîne de sortie elle-même.
 /// Opère sur `char_indices` (pas `bytes[i] as char`) : une valeur UTF-8
 /// multioctet dans un `$nom` de variable romprait un découpage par octet.
-fn substitute_line(line: &str, registry: &VariableRegistry, file: &Path) -> Result<String, MvarError> {
+fn substitute_line(
+    line: &str,
+    registry: &VariableRegistry,
+    file: &Path,
+) -> Result<String, MvarError> {
     let mut out = String::with_capacity(line.len());
     let mut chars = line.char_indices().peekable();
 
@@ -569,7 +932,13 @@ fn substitute_line(line: &str, registry: &VariableRegistry, file: &Path) -> Resu
         let name = &line[start..end];
         match registry.get(name) {
             Some(value) => out.push_str(value),
-            None => return Err(MvarError::UndefinedVariable(name.to_string(), file.to_path_buf())),
+            None => {
+                return Err(MvarError::UndefinedVariable {
+                    name: name.to_string(),
+                    file: file.to_path_buf(),
+                    suggestion: suggest_variable(name, registry),
+                });
+            }
         }
     }
 
@@ -640,8 +1009,9 @@ fn expand_for_loops(text: &str) -> Result<String, ForLoopError> {
 
         i = expect_byte(bytes, i, b'$')
             .ok_or_else(|| ForLoopError(format!("'$' attendu après @for (position {i})")))?;
-        let (var_name, next) = parse_ident(text, i)
-            .ok_or_else(|| ForLoopError(format!("nom de variable attendu après '$' (position {i})")))?;
+        let (var_name, next) = parse_ident(text, i).ok_or_else(|| {
+            ForLoopError(format!("nom de variable attendu après '$' (position {i})"))
+        })?;
         i = skip_ws(bytes, next);
 
         i = expect_literal(text, i, "from")
@@ -662,7 +1032,9 @@ fn expand_for_loops(text: &str) -> Result<String, ForLoopError> {
         if let Some(after_by) = expect_literal(text, i, "by") {
             let after_ws = skip_ws(bytes, after_by);
             let (s, next) = parse_int(text, after_ws).ok_or_else(|| {
-                ForLoopError(format!("pas entier attendu après 'by' (position {after_ws})"))
+                ForLoopError(format!(
+                    "pas entier attendu après 'by' (position {after_ws})"
+                ))
             })?;
             if s == 0 {
                 return Err(ForLoopError("pas ('by') ne peut pas être 0".to_string()));
@@ -688,7 +1060,11 @@ fn expand_for_loops(text: &str) -> Result<String, ForLoopError> {
 
         let mut i_iter = start;
         loop {
-            let done = if step > 0 { i_iter >= end } else { i_iter <= end };
+            let done = if step > 0 {
+                i_iter >= end
+            } else {
+                i_iter <= end
+            };
             if done {
                 break;
             }
@@ -794,7 +1170,11 @@ fn substitute_loop_variable(body: &str, var_name: &str, value: i64) -> String {
         }
 
         // Forme interpolée : $(nom)
-        if body.get(i + 1..).map(|s| s.starts_with('(')).unwrap_or(false) {
+        if body
+            .get(i + 1..)
+            .map(|s| s.starts_with('('))
+            .unwrap_or(false)
+        {
             let name_start = i + 2;
             if let Some(close_rel) = body[name_start..].find(')') {
                 let name_end = name_start + close_rel;
@@ -894,7 +1274,11 @@ impl SourceProvider for MvarProvider {
         Ok(unsafe { &*ptr })
     }
 
-    fn resolve(&self, specifier: &str, originating_file: &Path) -> Result<ResolveResult, Self::Error> {
+    fn resolve(
+        &self,
+        specifier: &str,
+        originating_file: &Path,
+    ) -> Result<ResolveResult, Self::Error> {
         // Résolution de chemin identique à `FileProvider::resolve` — la
         // Phase 3 ne change pas la convention de résolution des imports,
         // seulement le contenu texte renvoyé pour chaque fichier.
@@ -1117,6 +1501,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut manifest,
     )?;
 
+    // [sprites] (Phase 4) — aucune dépendance avec verbatim/styles, ordre
+    // libre. Placé ici à votre demande explicite, juste après verbatim.
+    run_sprites_pipeline(
+        &theme_dir,
+        &build_root,
+        &build_root_rel,
+        &theme.sprites,
+        &mut manifest,
+    )?;
+
     run_styles_pipeline(
         &theme_dir,
         &build_root,
@@ -1145,4 +1539,222 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     Ok(())
+}
+
+// =============================================================================
+// Tests — documentent les intentions autant qu'ils protègent des
+// régressions (voir échange de session : les trois familles de tests
+// ci-dessous correspondent exactement aux trois erreurs vécues en
+// intégration — variable en majuscule, boucle @for, purge fill/stroke —
+// pas une couverture générique décidée après coup.
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── suggest_variable / levenshtein (Phase 3, $variables) ────────────────
+
+    fn registry_with(pairs: &[(&str, &str)]) -> VariableRegistry {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn levenshtein_identical_strings_is_zero() {
+        assert_eq!(levenshtein("demoColorDeg", "demoColorDeg"), 0);
+    }
+
+    #[test]
+    fn levenshtein_classic_kitten_sitting_is_three() {
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+    }
+
+    /// Le cas réel qui a motivé cette fonctionnalité : une variable saisie
+    /// avec une casse différente de sa déclaration.
+    #[test]
+    fn suggest_variable_case_mismatch_takes_priority_over_levenshtein() {
+        let registry = registry_with(&[("demoColorDeg", "15")]);
+        let suggestion = suggest_variable("democolordeg", &registry)
+            .expect("une entrée ne différant que par la casse doit produire une suggestion");
+        assert!(
+            suggestion.contains("la casse est sensible"),
+            "message inattendu : {suggestion:?}"
+        );
+        assert!(
+            suggestion.contains("demoColorDeg"),
+            "message inattendu : {suggestion:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_variable_close_typo_suggests_nearest_key() {
+        let registry = registry_with(&[("brandPrimary", "#ff0000")]);
+        let suggestion = suggest_variable("brandPrimarry", &registry)
+            .expect("distance 1 : une suggestion est attendue");
+        assert_eq!(suggestion, "vouliez-vous dire $brandPrimary ?");
+    }
+
+    #[test]
+    fn suggest_variable_no_close_match_returns_none() {
+        let registry = registry_with(&[("brandPrimary", "#ff0000")]);
+        assert_eq!(suggest_variable("totallyUnrelatedName", &registry), None);
+    }
+
+    #[test]
+    fn suggest_variable_empty_registry_returns_none() {
+        let registry = VariableRegistry::new();
+        assert_eq!(suggest_variable("anything", &registry), None);
+    }
+
+    // ── expand_for_loops / substitute_loop_variable (Phase 3, @for) ─────────
+
+    #[test]
+    fn substitute_loop_variable_replaces_interpolated_form() {
+        assert_eq!(substitute_loop_variable("<a>$(i)</a>", "i", 5), "<a>5</a>");
+    }
+
+    #[test]
+    fn substitute_loop_variable_replaces_bare_form_at_word_boundary() {
+        assert_eq!(substitute_loop_variable("v$i", "i", 5), "v5");
+    }
+
+    /// Propriété de non-préfixe : `$i` ne doit jamais matcher à l'intérieur
+    /// de `$image` — sans cette frontière de mot stricte, toute variable
+    /// dont le nom est un préfixe d'une autre serait corrompue.
+    #[test]
+    fn substitute_loop_variable_does_not_match_variable_name_as_prefix() {
+        assert_eq!(substitute_loop_variable("$image", "i", 5), "$image");
+    }
+
+    #[test]
+    fn substitute_loop_variable_leaves_other_variables_untouched() {
+        assert_eq!(
+            substitute_loop_variable("$(other) stays, $other too", "i", 5),
+            "$(other) stays, $other too"
+        );
+    }
+
+    #[test]
+    fn substitute_loop_variable_lone_dollar_at_end_is_kept_as_is() {
+        assert_eq!(substitute_loop_variable("trailing $", "i", 5), "trailing $");
+    }
+
+    #[test]
+    fn expand_for_loops_default_step_unrolls_each_integer_exclusive_of_end() {
+        // `to` exclusif (convention Sass) : from 1 to 3 → i = 1, 2 seulement.
+        let out = expand_for_loops("@for $i from 1 to 3 {<a>$(i)</a>}").unwrap();
+        assert_eq!(out, "<a>1</a><a>2</a>");
+    }
+
+    #[test]
+    fn expand_for_loops_explicit_step_by_is_respected() {
+        let out = expand_for_loops("@for $i from 10 to 40 by 10 {<r>$(i)</r>}").unwrap();
+        assert_eq!(out, "<r>10</r><r>20</r><r>30</r>");
+    }
+
+    #[test]
+    fn expand_for_loops_bare_form_inside_calc_is_substituted() {
+        let out = expand_for_loops("@for $i from 1 to 3 {v$i}").unwrap();
+        assert_eq!(out, "v1v2");
+    }
+
+    /// Le bug exact observé en session : un `$nom` global (pas la variable
+    /// de boucle) présent dans le corps doit traverser le déroulage
+    /// intact — sa résolution est la responsabilité de
+    /// `substitute_and_purge`, pas d'`expand_for_loops`.
+    #[test]
+    fn expand_for_loops_leaves_global_variables_untouched_for_later_pass() {
+        let out = expand_for_loops("@for $i from 1 to 2 {a$i b$other c}").unwrap();
+        assert_eq!(out, "a1 b$other c");
+    }
+
+    /// Boucles imbriquées : l'intérieure doit être entièrement dépliée
+    /// avant que l'extérieure ne duplique son corps — sans quoi le texte
+    /// dupliqué contiendrait encore un `@for` littéral, jamais réexaminé.
+    #[test]
+    fn expand_for_loops_nested_loop_is_expanded_before_outer_duplication() {
+        let out = expand_for_loops("@for $i from 1 to 2 {@for $j from 1 to 3 {<b>$(i)-$(j)</b>}}")
+            .unwrap();
+        assert_eq!(out, "<b>1-1</b><b>1-2</b>");
+    }
+
+    #[test]
+    fn expand_for_loops_missing_to_keyword_is_an_error() {
+        assert!(expand_for_loops("@for $i from 1 through 3 {x}").is_err());
+    }
+
+    #[test]
+    fn expand_for_loops_zero_step_is_an_error() {
+        assert!(expand_for_loops("@for $i from 1 to 10 by 0 {x}").is_err());
+    }
+
+    #[test]
+    fn expand_for_loops_unclosed_brace_is_an_error() {
+        assert!(expand_for_loops("@for $i from 1 to 3 {x").is_err());
+    }
+
+    #[test]
+    fn expand_for_loops_text_without_any_loop_passes_through_unchanged() {
+        assert_eq!(
+            expand_for_loops(".foo { color: red; }").unwrap(),
+            ".foo { color: red; }"
+        );
+    }
+
+    // ── svg_file_to_symbol / serialize_start (Phase 4, [sprites]) ───────────
+
+    /// Le comportement central de la mission : `fill`/`stroke` codés en dur
+    /// sont purgés, la racine `<svg>` disparaît au profit de `<symbol>`.
+    #[test]
+    fn svg_file_to_symbol_purges_hardcoded_fill_and_wraps_in_symbol() {
+        let src =
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0" fill="#ff0000"/></svg>"##;
+        let out = svg_file_to_symbol("icon", src).unwrap();
+        assert_eq!(out, r#"<symbol id="icon"><path d="M0 0" /></symbol>"#);
+    }
+
+    /// Exception explicite de la mission : `currentColor`/`none` doivent
+    /// survivre intacts, ce ne sont pas des couleurs codées en dur.
+    #[test]
+    fn svg_file_to_symbol_keeps_current_color_and_none() {
+        let src = r#"<svg><path fill="currentColor" stroke="none" d="M1 1"/></svg>"#;
+        let out = svg_file_to_symbol("icon", src).unwrap();
+        assert_eq!(
+            out,
+            r#"<symbol id="icon"><path fill="currentColor" stroke="none" d="M1 1" /></symbol>"#
+        );
+    }
+
+    #[test]
+    fn svg_file_to_symbol_handles_nested_non_empty_elements() {
+        let src = r#"<svg><g><path d="M0 0"/></g></svg>"#;
+        let out = svg_file_to_symbol("g1", src).unwrap();
+        assert_eq!(out, r#"<symbol id="g1"><g><path d="M0 0" /></g></symbol>"#);
+    }
+
+    #[test]
+    fn svg_file_to_symbol_ignores_decl_doctype_and_comments() {
+        let src =
+            "<?xml version=\"1.0\"?>\n<!DOCTYPE svg>\n<!-- c --><svg><rect width=\"1\"/></svg>";
+        let out = svg_file_to_symbol("r", src).unwrap();
+        assert_eq!(out, r#"<symbol id="r"><rect width="1" /></symbol>"#);
+    }
+
+    #[test]
+    fn svg_file_to_symbol_empty_self_closing_root_yields_empty_symbol() {
+        let src = r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#;
+        let out = svg_file_to_symbol("empty", src).unwrap();
+        assert_eq!(out, r#"<symbol id="empty"></symbol>"#);
+    }
+
+    /// Fail-hard : un fichier sans balise racine `<svg>` doit échouer, pas
+    /// produire un `<symbol>` vide silencieusement.
+    #[test]
+    fn svg_file_to_symbol_missing_svg_root_is_an_error() {
+        let src = "<g><path/></g>";
+        assert!(svg_file_to_symbol("icon", src).is_err());
+    }
 }

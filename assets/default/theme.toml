@@ -34,6 +34,7 @@ players = "sprites/players"
 # Fichiers copiés bit-à-bit vers le build (favicons, polices, libs vendored).
 # Le compilateur préserve le type MIME et applique le hash, sans toucher au contenu.
 files = [
+    "app.webmanifest",
     "favicons/favicon.ico",
     "favicons/favicon.svg",
     "favicons/favicon.png",
@@ -41,5 +42,7 @@ files = [
     "favicons/safari-pinned-tab.svg",
     "fonts/notoSans-Regular.woff2",
     "fonts/notoSerif-Regular.woff2",
-    # "libraries/htmx.min.js"
+    "sprites/silos/195v.svg",
+    "images/logo.svg",
+    # "libraries/htmx.min.js",
 ]

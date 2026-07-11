@@ -34,6 +34,18 @@ blake3 = "1"
 # "visitor" active le trait Visitor/VisitTypes (parcours d'AST personnalisé).
 lightningcss = { version = "1.0.0-alpha.71", features = ["bundler", "visitor"] }
 
+# Pipeline [sprites] Phase 4 — parseur pull sur &str (aucun DOM construit),
+# vérifié sur crates.io le jour de cette session : `quick-xml` a une
+# release stable (0.41.0, contrairement à `lightningcss` ci-dessus) — pas
+# besoin d'épinglage exotique, un simple `"0.41"` suffit.
+# Aucune feature activée volontairement : "serialize" (intégration serde)
+# inutile — on ne dérive aucune struct SVG, on ré-émet du texte
+# directement ; "encoding" inutile — sources SVG supposées UTF-8 (même
+# hypothèse que `fs::read_to_string` ailleurs dans ce fichier) ;
+# "async-tokio" inutile — même discipline séquentielle que le reste de
+# cet outil de build (voir note en bas de fichier).
+quick-xml = "0.41"
+
 # Volontairement absent : aucune dépendance async/tokio (ce binaire est
 # séquentiel, DOD — un seul thread, un seul passage par fichier, buffers
 # réutilisés), aucun framework CLI (clap, etc. — un seul argument

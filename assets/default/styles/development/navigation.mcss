@@ -9,13 +9,13 @@
   @media (--to-nav) {
     grid-template-rows: 3em;
     grid-template-columns: 3em minmax(0, 1fr) 3em;
-    grid-template-areas: 'logo breadcrumb cmd';
+    grid-template-areas: "logo breadcrumb cmd";
   }
 
   @media (--from-nav) {
     grid-template-rows: repeat(2, 2.5em);
     grid-template-columns: 5em minmax(0, 1fr);
-    grid-template-areas: 'logo subnav' 'logo breadcrumb';
+    grid-template-areas: "logo subnav" "logo breadcrumb";
   }
 
   & .avatar {
@@ -25,7 +25,7 @@
     aspect-ratio: 1;
     margin-inline-end: 0.5em;
     background-color: var(--colorG27);
-    background-image: var(--img, '');
+    background-image: var(--img, "");
     background-size: cover;
     border-radius: 50%;
   }
@@ -38,11 +38,11 @@
   background-color: var(--color2);
 
   &::after {
-    content: '';
+    content: "";
     display: block;
     width: 100%;
     height: 100%;
-    background-image: url('../medias/images/logo/logo.svg'); /* '../medias/images/logo/195v.svg' */
+    background-image: url("../images/logo.svg");
     background-repeat: no-repeat;
     background-position: 50% 50%;
     background-size: auto 70%;
@@ -95,7 +95,7 @@
       z-index: 10;
 
       &::after {
-        content: '';
+        content: "";
         position: absolute;
         top: 100%;
         left: calc(50% - 1em);
@@ -201,7 +201,7 @@
 
   body.active {
     &::before {
-      content: '';
+      content: "";
       position: absolute;
       z-index: 1;
       inset: 0;
@@ -246,7 +246,7 @@
       }
     }
 
-    &:not(:focus-visible, :hover, [aria-expanded='true']) {
+    &:not(:focus-visible, :hover, [aria-expanded="true"]) {
       & svg {
         border-radius: 50%;
         background-color: var(--color2);
@@ -262,7 +262,7 @@
       background-color: var(--color2);
     }
 
-    &[aria-expanded='true'] svg {
+    &[aria-expanded="true"] svg {
       & :nth-child(1) {
         y: 47px;
         transform: rotate(45deg);

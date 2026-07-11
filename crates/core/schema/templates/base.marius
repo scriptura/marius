@@ -6,9 +6,7 @@
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
         <meta name="theme-color" content="#333">
         <title>{% block head_title %}Default title{% endblock %}</title>
-        <!--
-        <link rel="manifest" href="/app.webmanifest" crossorigin="use-credentials">
-        -->
+        <link rel="manifest" href="{% asset app.webmanifest %}" crossorigin="use-credentials">
         <link rel="shortcut icon" href="{% asset favicon.ico %}">
         <link rel="icon" type="image/svg+xml" href="{% asset favicon.svg %}">
         <link rel="icon" type="image/png" href="{% asset favicon.png %}">
@@ -32,8 +30,8 @@
                 <span class="sr-only">Menu</span>
             </button>
             <ul class="sub-nav" id="sub-nav" aria-labelledby="cmd-nav">
-                <li><a href="/content/5"><svg class="icon-inline" role="img" focusable="false"><use href="% asset util.svg %#ampersand"></use></svg>Home</a></li>
-                <li><a href="//github.com/scriptura/marius"><svg class="icon-inline" role="img" focusable="false"><use href="% asset util.svg %#github"></use></svg>Repository</a></li>
+                <li><a href="/content/5"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset utils.svg %}#ampersand"></use></svg>Home</a></li>
+                <li><a href="//github.com/scriptura/marius"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset utils.svg %}#github"></use></svg>Repository</a></li>
             </ul>
             <ol class="breadcrumb" aria-label="Breadcrumb">
                 <li><div>Sriptura <span>.&nbsp;Home page</span></div>
@@ -45,25 +43,24 @@
         </main>
         <footer class="footer" role="contentinfo">
             <div class="wrap">
+                <div class="logo">
+                    <svg>
+                        <use href="{% asset 195v.svg %}#a"></use>
+                    </svg>
+                </div>
                 <div>
-                    <div class="logo">
-                        <svg>
-                            <use href="/sprites/silos/195v.svg#a"></use>
-                        </svg>
-                    </div>
                     <p>Marius</p>
                 </div>
                 <p>Created by <a class="author" href="//www.linkedin.com/in/olivier-chavarin/">Olivier Chavarin</a></p>
                 <p>Since 2026</p>
             </div>
         </footer>
-        <!--
         <div class="alert">
             <template id="gdpr">
                 <div class="wrap" id="gdpr-see">
                     <div class="mm" role="alert">
                         <svg class="icon" role="img" focusable="false">
-                            <use href="/sprites/util.svg#cookie-bite"></use>
+                            <use href="{% asset utils.svg %}#cookie-bite"></use>
                         </svg>
                         <div>
                             <p>Ce site utilise des cookies et vous donne le contrôle sur ceux que vous souhaitez activer.</p>
@@ -72,19 +69,19 @@
                     <div class="flex gap">
                         <button class="button" id="gdpr-true-consent" style="background-color:tomato">
                             <svg class="icon-inline" role="img" focusable="false">
-                                <use href="/sprites/util.svg#checkmark"></use>
+                                <use href="{% asset utils.svg %}#checkmark"></use>
                             </svg>
                         Tout accepter
                         </button>
                         <button class="button" id="gdpr-false-consent" style="background-color:tomato">
                             <svg class="icon-inline" role="img" focusable="false">
-                                <use href="/sprites/util.svg#mark"></use>
+                                <use href="{% asset utils.svg %}#mark"></use>
                             </svg>
                         Tout refuser
                         </button>
                         <button class="button" style="background-color:tomato">
                             <svg class="icon-inline" role="img" focusable="false">
-                                <use href="/sprites/util.svg#quill"></use>
+                                <use href="{% asset utils.svg %}#quill"></use>
                             </svg>
                         Personnaliser
                         </button>
@@ -95,7 +92,7 @@
                 <div class="wrap">
                     <div class="mm" role="alert">
                         <svg class="icon" role="img" focusable="false">
-                            <use href="/sprites/util.svg#warning"></use>
+                            <use href="{% asset utils.svg %}#warning"></use>
                         </svg>
                         <p>Javascript est désactivé dans votre navigateur. Afin de bénéficier de toutes les fonctionnalités du site, réactivez cette option dans vos paramètres.</p>
                     </div>
@@ -103,6 +100,5 @@
             </noscript>
         </div>
         <script src="% asset main.js %" type="module"></script>
-        -->
     </body>
 </html>
