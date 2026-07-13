@@ -10,4 +10,8 @@
                 <h1>{{ record.headline }}</h1>
                 <h2>{{ record.alternative_headline }}</h2>
                 {% if record.is_readable %}<p class="description">{{ record.description }}</p>{% endif %}
+                <!-- TODO test -->
+                {% script %}<script src="{% asset map.js %}" type="module"></script>{% endscript %}
+                {% script %}<script src="{% asset map.js %}" type="module"></script>{% endscript %}
+                <!-- TODO test -->
             </article>{% endblock %}

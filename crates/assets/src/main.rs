@@ -7,10 +7,13 @@
 // marius-assets-HANDOFF.md pour le contexte complet.
 //
 // Étape 1 de la roadmap d'implémentation : pipelines [static.verbatim],
-// [styles] (variables `$`, boucles `@for`, Fonts↔CSS) et [sprites]
-// (Phase 4, cette session). [scripts.components] apparaît dans
-// theme.toml mais n'est pas encore traité ici — serde l'ignore
-// silencieusement, aucun champ ne le capture dans ThemeConfig.
+// [styles] (variables `$`, boucles `@for`, url() généralisée — Phase 5,
+// Roadmap §1.8 tranchée), [sprites] (Phase 4), [webmanifest] (Phase 6) et
+// [scripts.components] (Phase 7, ES Modules natifs, arène DOD).
+//
+// Le contenu de `build_root` est intégralement régénéré à chaque
+// invocation (voir `main`, purge avant tout pipeline) : aucun fichier de
+// build n'a de raison de survivre à un build dont il n'est plus issu.
 //
 // Invariant DOD respecté : traitement séquentiel, un seul passage par
 // fichier, aucune structure de données hiérarchique, aucun trait dynamique.
@@ -19,7 +22,7 @@
 // programme s'exécute une fois, sur la machine hôte, jamais par requête.
 // =============================================================================
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,11 +31,15 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use lightningcss::bundler::{Bundler, ResolveResult, SourceProvider};
-use lightningcss::rules::CssRule;
 use lightningcss::stylesheet::{MinifyOptions, ParserOptions, PrinterOptions};
 use lightningcss::values::url::Url;
 use lightningcss::visit_types;
 use lightningcss::visitor::{Visit, VisitTypes, Visitor};
+
+// Pipeline [webmanifest] (Phase 6) — mutation ciblée d'un arbre JSON
+// générique : seul icons[].src est muté, tout le reste du document W3C
+// (présent ou futur, connu ou non) traverse intact.
+use serde_json::Value;
 
 // Pipeline [sprites] (Phase 4) — parseur pull, aucun DOM construit : un
 // seul passage par fichier SVG, mémoire proportionnelle au buffer de
@@ -61,9 +68,31 @@ struct ThemeConfig {
     // à la représenter fidèlement sans couche superflue.
     #[serde(default)]
     sprites: HashMap<String, String>,
-    // [scripts.components] existe dans theme.toml, non traité cette
-    // session : absent de cette struct, serde l'ignore sans erreur tant
-    // qu'aucun #[serde(deny_unknown_fields)] n'est posé ici — délibéré.
+    // [webmanifest] — Phase 6, cette session : un seul point d'entrée (pas
+    // une liste comme [styles].entries — un site n'a qu'un seul manifeste
+    // PWA par construction W3C). `Option`, pas un champ requis : un thème
+    // sans PWA reste un thème valide, ne pas forcer une section vide.
+    #[serde(default)]
+    webmanifest: Option<WebManifestConfig>,
+    // [scripts.components] — Phase 7, cette session : table imbriquée
+    // (contrairement à [sprites], à plat) parce que la clé TOML porte deux
+    // niveaux (`scripts.components`), pas parce que la donnée elle-même
+    // est plus riche — `ScriptsConfig` n'existe que pour porter ce niveau
+    // d'imbrication, `components` reste un dictionnaire plat nom logique
+    // -> point d'entrée, exactement comme [sprites].
+    #[serde(default)]
+    scripts: ScriptsConfig,
+}
+
+#[derive(Deserialize, Default)]
+struct ScriptsConfig {
+    #[serde(default)]
+    components: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct WebManifestConfig {
+    entry: String,
 }
 
 #[derive(Deserialize)]
@@ -126,23 +155,37 @@ struct AssetEntry {
 }
 
 // =============================================================================
-// Registre des polices — spec §10.1 : deux exigences liées.
-//  1. Le build CSS doit échouer si une police référencée en `@font-face`
-//     est absente du registre effectivement copié par le pipeline verbatim.
+// Registre des URLs d'assets — spec §10.1 + Roadmap §1.8 (désormais
+// tranchée : tout `url()` du CSS est résolu, pas seulement `@font-face`).
+// Deux exigences liées :
+//  1. Le build CSS doit échouer si une ressource référencée par un `url()`
+//     (que ce soit `@font-face`, `background-image`, ou autre) est absente
+//     du registre effectivement copié par le pipeline verbatim.
 //  2. Ce même registre sert de résolveur d'URL : le `url(...)` littéral
-//     écrit par le développeur dans `@font-face` doit être réécrit vers
-//     l'URL publique versionnée avant écriture du CSS final.
+//     écrit par le développeur doit être réécrit vers l'URL publique
+//     versionnée avant écriture du CSS final.
 //
 // Conséquence d'ordonnancement (spec, même §) : le pipeline verbatim doit
 // avoir résolu ce registre AVANT que le pipeline styles ne s'exécute — d'où
 // le passage explicite par valeur de retour, pas une variable globale ni un
 // champ mutable partagé.
 //
-// Portée volontairement limitée aux polices (woff2/woff/ttf), pas à tout
-// [static.verbatim] : le favicon n'a aucune raison d'être résolu par un
-// `url(...)` CSS, l'inclure gonflerait le registre sans usage réel.
+// Portée désormais élargie à TOUT [static.verbatim] (Phase 5 — c'était
+// auparavant limité aux polices woff2/woff/ttf, cf. Handoff Phase 2 : un
+// favicon n'a alors aucune raison d'être référencé par un `url()` CSS,
+// mais une image de fond en a une, exactement le cas signalé en session).
+//
+// Clé = nom de fichier seul (pas le chemin complet), hérité tel quel de la
+// conception Fonts d'origine — une collision entre deux fichiers homonymes
+// dans des sous-dossiers différents de [static.verbatim] n'est pas
+// détectée (dernière écriture gagne, silencieusement). Limitation
+// préexistante, pas introduite par cette généralisation ; la corriger
+// demanderait de résoudre par chemin relatif complet plutôt que par nom de
+// fichier seul — portée plus large que ce qui a été demandé ici, à
+// reprendre explicitement si une vraie collision se présente (même
+// remarque que Roadmap §1.6 pour les SVG).
 // =============================================================================
-type FontRegistry = HashMap<String, String>;
+type AssetUrlRegistry = HashMap<String, String>;
 
 // =============================================================================
 // Table MIME — correspondance plate, pas de crate de detection générique
@@ -162,6 +205,9 @@ fn mime_for_extension(ext: &str) -> &'static str {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
+        // W3C Web App Manifest — spec : "application/manifest+json", pas
+        // "application/json" générique (Phase 6, [webmanifest]).
+        "webmanifest" => "application/manifest+json",
         _ => "application/octet-stream",
     }
 }
@@ -193,8 +239,8 @@ fn run_verbatim_pipeline(
     build_root_rel: &str,
     files: &[String],
     manifest: &mut HashMap<String, AssetEntry>,
-) -> Result<FontRegistry, Box<dyn std::error::Error>> {
-    let mut font_registry = FontRegistry::new();
+) -> Result<AssetUrlRegistry, Box<dyn std::error::Error>> {
+    let mut asset_url_registry = AssetUrlRegistry::new();
 
     for rel_path in files {
         let source_path = theme_dir.join(rel_path);
@@ -242,11 +288,12 @@ fn run_verbatim_pipeline(
 
         let url = format!("/{output_rel}");
 
-        // Alimentation du registre Fonts — seulement les extensions de
-        // police, pas tout [static.verbatim] (voir doc du type ci-dessus).
-        if matches!(ext.as_str(), "woff2" | "woff" | "ttf") {
-            font_registry.insert(logical_key.clone(), url.clone());
-        }
+        // Alimentation du registre d'URLs — désormais TOUT [static.verbatim]
+        // (Phase 5), pas seulement les extensions de police : n'importe quel
+        // fichier copié verbatim est potentiellement référencé par un
+        // `url()` CSS (background-image, favicon en CSS custom, etc.), pas
+        // seulement les polices via `@font-face`.
+        asset_url_registry.insert(logical_key.clone(), url.clone());
 
         manifest.insert(
             logical_key,
@@ -263,7 +310,137 @@ fn run_verbatim_pipeline(
         println!("[marius-assets] verbatim  {rel_path} -> /{output_rel}");
     }
 
-    Ok(font_registry)
+    Ok(asset_url_registry)
+}
+
+// =============================================================================
+// Pipeline [webmanifest] — Phase 6. Dépend UNIQUEMENT de `AssetUrlRegistry`
+// (résolu par [static.verbatim], donc placé juste après lui — aucune
+// dépendance avec [sprites]/[styles], ordre libre vis-à-vis d'eux).
+//
+// Écart assumé par rapport au prompt suggestif reçu en session : il
+// proposait soit `serde_json::Value` soit une struct typée avec
+// `#[serde(flatten)]`. J'ai tranché pour `Value` sans hésitation — un Web
+// App Manifest W3C a des dizaines de clés optionnelles possibles (`name`,
+// `screenshots`, `shortcuts`, `share_target`, `protocol_handlers`,
+// extensions spécifiques aux navigateurs...), dont certaines pas encore
+// stables ou pas encore nées au moment de l'écriture. Une struct avec
+// `#[serde(flatten)]` demanderait quand même de lister explicitement tout
+// ce qu'on veut préserver de façon typée ; oublier une seule clé future la
+// ferait passer dans le fourre-tout `flatten` avec un risque de
+// réordonnancement ou de perte de nuance de type. `Value` ne fait
+// AUCUNE hypothèse sur la forme du document au-delà de ce qu'on mute
+// explicitement (`icons[].src`) — c'est la seule garantie honnête de
+// non-destruction pour un format dont le sur-ensemble de clés n'est pas
+// fermé, contrairement à `theme.toml` (grammaire interne, fermée, que
+// NOUS contrôlons) qui justifie au contraire des structs typées ailleurs
+// dans ce fichier.
+// =============================================================================
+
+#[derive(Debug)]
+struct WebManifestError(String);
+
+impl fmt::Display for WebManifestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AssetNotFound (webmanifest icons[].src) : {}", self.0)
+    }
+}
+
+impl std::error::Error for WebManifestError {}
+
+fn run_webmanifest_pipeline(
+    theme_dir: &Path,
+    build_root: &Path,
+    build_root_rel: &str,
+    config: &WebManifestConfig,
+    asset_url_registry: &AssetUrlRegistry,
+    manifest: &mut HashMap<String, AssetEntry>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let source_path = theme_dir.join(&config.entry);
+    let source_text = fs::read_to_string(&source_path).map_err(|e| {
+        format!(
+            "webmanifest : lecture impossible de {} : {e}",
+            source_path.display()
+        )
+    })?;
+
+    let mut document: Value = serde_json::from_str(&source_text).map_err(|e| {
+        format!(
+            "webmanifest : JSON invalide dans {} : {e}",
+            source_path.display()
+        )
+    })?;
+
+    // Mutation ciblée : SEUL `icons[].src` est touché. `document["icons"]`
+    // absent ou de forme inattendue n'est pas une erreur — un manifeste
+    // sans `icons` (ou avec une forme que ce pipeline ne reconnaît pas)
+    // traverse simplement intact, aucune icône à résoudre.
+    if let Some(icons) = document.get_mut("icons").and_then(Value::as_array_mut) {
+        for icon in icons.iter_mut() {
+            let Some(src) = icon.get("src").and_then(Value::as_str) else {
+                continue;
+            };
+
+            match resolve_asset_reference(src, asset_url_registry) {
+                Ok(Some(resolved)) => {
+                    icon["src"] = Value::String(resolved);
+                }
+                Ok(None) => {
+                    // Externe ou fragment pur — rare pour une icône PWA,
+                    // mais le W3C ne l'interdit pas (ex. icône hébergée
+                    // sur un CDN dédié). Laissé strictement inchangé.
+                }
+                Err(filename) => return Err(Box::new(WebManifestError(filename))),
+            }
+        }
+    }
+
+    // Re-sérialisation : la mise en forme (indentation, ordre des clés)
+    // n'est PAS préservée à l'octet près — `serde_json` réémet sa propre
+    // forme canonique. Sans conséquence : c'est un document JSON, pas un
+    // CSS où l'ordre des règles a une sémantique de cascade. Compact
+    // (`to_string`, pas `to_string_pretty`) : ce fichier est servi au
+    // runtime, jamais lu par un humain une fois buildé.
+    let serialized = serde_json::to_string(&document).map_err(|e| {
+        format!(
+            "webmanifest : sérialisation échouée pour {} : {e}",
+            source_path.display()
+        )
+    })?;
+    let bytes = serialized.as_bytes();
+    let (full_hash, short_hash) = hash_content(bytes);
+
+    let extension = Path::new(&config.entry)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("webmanifest");
+    let hashed_filename = format!("manifest.{short_hash}.{extension}");
+    let output_abs = build_root.join(&hashed_filename);
+    fs::write(&output_abs, bytes)?;
+
+    // Clé logique fixe `manifest.webmanifest`, indépendante du nom de
+    // fichier source réel (`config.entry`) — c'est cette clé stable que
+    // `<link rel="manifest" href="{% asset manifest.webmanifest %}">`
+    // référencera côté template, jamais le nom de fichier source, qui
+    // peut changer sans casser les templates.
+    manifest.insert(
+        "manifest.webmanifest".to_string(),
+        AssetEntry {
+            url: format!("/{hashed_filename}"),
+            path: join_slash(build_root_rel, &hashed_filename),
+            mime: mime_for_extension(extension).to_string(),
+            size: bytes.len() as u64,
+            hash: full_hash,
+            version: String::new(), // rempli par l'appelant (theme.version)
+        },
+    );
+
+    println!(
+        "[marius-assets] webmanifest {} -> /{hashed_filename}",
+        config.entry
+    );
+
+    Ok(())
 }
 
 // =============================================================================
@@ -538,70 +715,122 @@ fn run_sprites_pipeline(
 // délibérément absorbé : la sortie ne connaît qu'un seul niveau `styles/`.
 // =============================================================================
 
-/// Erreur de résolution Fonts↔CSS (spec §10.1) — police référencée en
-/// `@font-face` absente du registre. Échec dur volontaire : pas de valeur
-/// par défaut, pas de passthrough silencieux vers une URL non versionnée.
+/// Erreur de résolution d'URL CSS (spec §10.1, Roadmap §1.8) — ressource
+/// référencée par un `url()` absente du registre verbatim. Échec dur
+/// volontaire : pas de valeur par défaut, pas de passthrough silencieux
+/// vers une URL non versionnée.
 #[derive(Debug)]
-struct FontResolutionError(String);
+struct CssUrlResolutionError(String);
 
-impl fmt::Display for FontResolutionError {
+impl fmt::Display for CssUrlResolutionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "AssetNotFound (Fonts↔CSS, spec §10.1) : {}", self.0)
+        write!(
+            f,
+            "AssetNotFound (CSS url(), spec §10.1 / Roadmap §1.8) : {}",
+            self.0
+        )
     }
 }
 
-impl std::error::Error for FontResolutionError {}
+impl std::error::Error for CssUrlResolutionError {}
 
-/// Visiteur AST — spec §10.1, scope strictement limité aux `url(...)`
-/// rencontrés à l'intérieur d'une règle `@font-face`. `in_font_face` est le
-/// mécanisme de scoping : `visit_url` est déclenché pour TOUT `url()` du
-/// document (background-image compris), mais ne touche et ne valide que
-/// ceux visités pendant que ce drapeau est vrai — cf. Roadmap §1.8, encore
-/// ouverte pour les `url()` hors `@font-face` : ce visiteur ne tranche pas
-/// cette question, il l'évite en ignorant tout le reste.
-struct FontFaceUrlVisitor<'a> {
-    font_registry: &'a FontRegistry,
-    in_font_face: bool,
+/// Sépare un `url()`/`src` en (chemin, fragment) — `"sprites/utils.svg#icon"`
+/// → `("sprites/utils.svg", "#icon")`, `"sprites/utils.svg"` → (inchangé,
+/// `""`). Fonction pure, testable indépendamment de tout AST CSS ou JSON.
+fn split_url_fragment(source: &str) -> (&str, &str) {
+    match source.find('#') {
+        Some(idx) => (&source[..idx], &source[idx..]),
+        None => (source, ""),
+    }
 }
 
-impl<'i> Visitor<'i> for FontFaceUrlVisitor<'_> {
-    type Error = FontResolutionError;
+/// Résolution d'une référence de chemin contre `AssetUrlRegistry` — logique
+/// PARTAGÉE entre le pipeline `[styles]` (`url()` CSS) et
+/// `run_webmanifest_pipeline` (`icons[].src` JSON, Phase 6) : même notion
+/// d'URL externe/fragment à ignorer, même extraction de nom de fichier,
+/// même échec dur si absent. Un seul point de vérité pour ce
+/// comportement — pas deux implémentations qui pourraient un jour diverger
+/// silencieusement sur un cas limite (fragment, URL externe...).
+///
+/// `Ok(None)` : `source` est externe ou un fragment pur, rien à résoudre,
+/// ce n'est PAS une erreur. `Err(nom_de_fichier)` : référence locale
+/// absente du registre — c'est à l'appelant de l'envelopper dans son
+/// propre type d'erreur (`CssUrlResolutionError`, `WebManifestError`...),
+/// cette fonction reste agnostique du contexte appelant.
+fn resolve_asset_reference(
+    source: &str,
+    registry: &AssetUrlRegistry,
+) -> Result<Option<String>, String> {
+    if is_external_url(source) {
+        return Ok(None);
+    }
+
+    // Sépare un éventuel fragment (`sprites/utils.svg#icon` — un `url()`
+    // pointant vers UN symbole précis d'un sprite fusionné, cf. Phase 4) :
+    // seul le chemin AVANT `#` est un vrai nom de fichier à chercher dans
+    // le registre. Le fragment n'est ni cherché ni interprété ici,
+    // seulement réattaché tel quel à l'URL résolue — bug réel rencontré en
+    // session : `Path::file_name()` seul traite `#icon` comme faisant
+    // partie du nom de fichier, ce qui ne correspond jamais à une clé de
+    // registre.
+    let (path_part, fragment) = split_url_fragment(source);
+
+    let filename = Path::new(path_part)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path_part.to_string());
+
+    match registry.get(&filename) {
+        Some(resolved) => Ok(Some(format!("{resolved}{fragment}"))),
+        None => Err(filename),
+    }
+}
+
+/// URL jamais résolue contre `AssetUrlRegistry`, jamais une erreur si
+/// absente — deux familles bien distinctes, toutes deux hors du périmètre
+/// de ce pipeline :
+///  - ressource véritablement externe (schéma explicite, protocole-relatif
+///    `//`, ou `data:` — un URI de données n'a pas de "nom de fichier" à
+///    chercher dans le registre) ;
+///  - référence de FRAGMENT PUR (`url(#mask-id)`) — motif très courant en
+///    CSS (`mask`, `clip-path`, `filter`, `fill` référençant un élément
+///    `<defs>` SVG inline dans le même document). Il n'y a alors aucun
+///    fichier à résoudre, seulement un identifiant d'élément. Bug réel
+///    rencontré en session : sans cette exclusion, la généralisation de
+///    `url()` (Phase 5) faisait échouer le build sur ce pattern pourtant
+///    parfaitement légitime.
+///
+/// Détection volontairement simple (préfixe/sous-chaîne) — suffisant pour
+/// distinguer un chemin de thème relatif (`../images/logo.svg`) de ces
+/// deux familles, pas une validation d'URI complète (hors périmètre ici).
+fn is_external_url(url: &str) -> bool {
+    url.starts_with('#') || url.starts_with("//") || url.starts_with("data:") || url.contains("://")
+}
+
+/// Visiteur AST — résout TOUT `url()` du document contre
+/// `AssetUrlRegistry` (Phase 5 : Roadmap §1.8 tranchée — `background-image`,
+/// `mask`, `cursor`, etc., pas seulement `@font-face`). La validation dure
+/// (échec si absent du registre) s'applique désormais uniformément, pas
+/// seulement aux polices.
+struct CssUrlVisitor<'a> {
+    registry: &'a AssetUrlRegistry,
+}
+
+impl<'i> Visitor<'i> for CssUrlVisitor<'_> {
+    type Error = CssUrlResolutionError;
 
     fn visit_types(&self) -> VisitTypes {
-        // RULES : nécessaire pour que visit_rule() soit appelé (scoping
-        // @font-face). URLS : nécessaire pour que visit_url() le soit.
-        visit_types!(RULES | URLS)
-    }
-
-    fn visit_rule(&mut self, rule: &mut CssRule<'i>) -> Result<(), Self::Error> {
-        let was_in_font_face = self.in_font_face;
-        if matches!(rule, CssRule::FontFace(_)) {
-            self.in_font_face = true;
-        }
-        let result = rule.visit_children(self);
-        self.in_font_face = was_in_font_face;
-        result
+        visit_types!(URLS)
     }
 
     fn visit_url(&mut self, url: &mut Url<'i>) -> Result<(), Self::Error> {
-        if !self.in_font_face {
-            // Hors @font-face : hors périmètre v1 (Roadmap §1.8), url
-            // laissée strictement inchangée.
-            return Ok(());
-        }
-
-        let source = url.url.as_ref();
-        let filename = Path::new(source)
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| source.to_string());
-
-        match self.font_registry.get(&filename) {
-            Some(resolved_url) => {
-                url.url = resolved_url.clone().into();
+        match resolve_asset_reference(url.url.as_ref(), self.registry) {
+            Ok(Some(resolved)) => {
+                url.url = resolved.into();
                 Ok(())
             }
-            None => Err(FontResolutionError(filename)),
+            Ok(None) => Ok(()),
+            Err(filename) => Err(CssUrlResolutionError(filename)),
         }
     }
 }
@@ -657,7 +886,7 @@ type VariableRegistry = HashMap<String, String>;
 enum MvarError {
     Io(std::io::Error),
     /// `$nom` rencontré à la substitution mais absent du registre — échec
-    /// dur, même politique que `FontResolutionError` : pas de passthrough
+    /// dur, même politique que `CssUrlResolutionError` : pas de passthrough
     /// silencieux d'un token non résolu vers le CSS final.
     ///
     /// `suggestion` est calculée UNE SEULE FOIS, au point de construction
@@ -673,6 +902,11 @@ enum MvarError {
     /// Grammaire `@for` malformée (borne manquante, accolade non fermée,
     /// pas nul, etc.) — voir `ForLoopError` plus bas dans ce fichier.
     ForLoop(ForLoopError),
+    /// Chaîne ou commentaire CSS non fermé — voir `CssCommentError`,
+    /// `strip_css_comments` plus bas. Détecté avant même la recherche de
+    /// `$variables`/`@for`, donc toujours la première erreur possible sur
+    /// un fichier donné.
+    Comment(CssCommentError),
 }
 
 impl fmt::Display for MvarError {
@@ -699,6 +933,7 @@ impl fmt::Display for MvarError {
                 }
             }
             MvarError::ForLoop(e) => write!(f, "{e}"),
+            MvarError::Comment(e) => write!(f, "{e}"),
         }
     }
 }
@@ -765,6 +1000,135 @@ impl From<std::io::Error> for MvarError {
     }
 }
 
+// =============================================================================
+// Phase 3 (préambule) — Purge des commentaires CSS AVANT tout le reste.
+//
+// Bug signalé en session : une `$variable` indéfinie ou mal formatée à
+// l'intérieur d'un commentaire (`/* $old-var: 10; */`) faisait échouer le
+// build alors que ce texte est de la donnée morte — jamais vue par
+// `lightningcss`, elle ne devrait jamais être vue par nos pré-passes non
+// plus. Principe DOD direct : éliminer la donnée morte le plus tôt
+// possible dans le pipeline, avant que quoi que ce soit d'autre n'ait la
+// moindre chance de trébucher dessus.
+//
+// Piège écarté explicitement (celui qui rend une regex ou un
+// `.replace("/*", ...)` naïf incorrects) : `/*` et `*/` sont des
+// caractères de contenu parfaitement légaux à l'intérieur d'une chaîne
+// CSS — `content: "/*";` ne doit jamais être tronqué. Un automate à trois
+// états (Normal / DansChaîne / DansCommentaire) est nécessaire, pas une
+// recherche de sous-chaîne.
+//
+// Branchement : appelé dans LES DEUX passes, pas une seule —
+//   - Passe A (`walk_variable_graph`) : sans ça, un `$nom: valeur;` ou un
+//     `@import "...";` écrit à l'intérieur d'un commentaire multi-lignes
+//     serait toujours capturé par `extract_declarations`/
+//     `extract_import_targets` (ni l'un ni l'autre ne connaît la notion
+//     de commentaire) — un import commenté ferait planter tout le build
+//     sur un fichier "manquant" qui n'a jamais eu vocation à exister.
+//   - Passe B (`MvarProvider::read`) : corrige directement le bug
+//     rapporté (usage de `$var` dans un commentaire).
+// Même cause racine dans les deux cas (scan textuel naïf, aveugle aux
+// commentaires) : un seul correctif, appliqué aux deux points d'entrée du
+// texte source, pas un correctif ponctuel sur le seul symptôme observé.
+// =============================================================================
+
+#[derive(Debug)]
+struct CssCommentError(String);
+
+impl fmt::Display for CssCommentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "styles (commentaires) : {}", self.0)
+    }
+}
+
+impl std::error::Error for CssCommentError {}
+
+/// Purge les commentaires CSS `/* ... */` d'un texte source — automate à
+/// trois états, un seul passage O(N) sur les octets, aucune regex.
+///
+/// États : `Normal` (copie tout), `InString(quote)` (une chaîne CSS est en
+/// cours — `/*`/`*/` y sont des caractères ordinaires, jamais des
+/// délimiteurs), `InComment` (tout est ignoré jusqu'à `*/`, y compris tout
+/// ce qui ressemblerait à une chaîne — CSS n'a pas de commentaires
+/// imbriqués, le premier `*/` rencontré ferme, point final).
+///
+/// Copie par segments (`segment_start..i`), jamais octet par octet : les
+/// limites de coupe ne tombent QUE sur des octets ASCII à un seul octet
+/// (`/`, `*`, `"`, `'`, `\`), donc toujours des frontières de caractère
+/// UTF-8 valides — un contenu non-ASCII (accents dans un commentaire ou
+/// une chaîne) traverse la fonction sans risque de corruption, puisqu'il
+/// n'est jamais reconstruit octet par octet.
+///
+/// Échec dur sur chaîne ou commentaire non fermé en fin de fichier — un
+/// tel fichier est de toute façon invalide, mieux vaut le signaler ici
+/// qu'obtenir un message d'erreur incompréhensible plus loin dans le
+/// pipeline.
+fn strip_css_comments(input: &str) -> Result<String, CssCommentError> {
+    enum State {
+        Normal,
+        InString(u8),
+        InComment,
+    }
+
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut state = State::Normal;
+    let mut i = 0usize;
+    let mut segment_start = 0usize;
+
+    while i < bytes.len() {
+        match state {
+            State::Normal => {
+                if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                    out.push_str(&input[segment_start..i]);
+                    state = State::InComment;
+                    i += 2;
+                } else if bytes[i] == b'"' || bytes[i] == b'\'' {
+                    state = State::InString(bytes[i]);
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            State::InString(quote) => {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    // Paire échappée (ex. `\"`) : avancée ensemble, jamais
+                    // interprétée séparément — un guillemet échappé ne
+                    // ferme jamais la chaîne prématurément.
+                    i += 2;
+                } else if bytes[i] == quote {
+                    state = State::Normal;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            State::InComment => {
+                if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    i += 2;
+                    state = State::Normal;
+                    segment_start = i; // reprise de la copie après le commentaire
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    match state {
+        State::Normal => {
+            out.push_str(&input[segment_start..]);
+            Ok(out)
+        }
+        State::InString(_) => Err(CssCommentError(
+            "chaîne non fermée (guillemet manquant avant la fin du fichier)".to_string(),
+        )),
+        State::InComment => Err(CssCommentError(
+            "commentaire non fermé ('*/' manquant avant la fin du fichier)".to_string(),
+        )),
+    }
+}
+
 /// Passe A — walk textuel minimal du graphe `@import`, lecture seule.
 ///
 /// Ne passe jamais par `lightningcss` : un scan ligne-à-ligne suffit, la
@@ -805,6 +1169,13 @@ fn walk_variable_graph(
             path.display()
         )
     })?;
+
+    // Purge des commentaires AVANT toute recherche de déclaration ou
+    // d'import — voir bloc de commentaires "Phase 3 (préambule)" plus
+    // haut : sans ça, un `@import` commenté ferait planter le build sur
+    // un fichier qui n'a jamais eu vocation à être lu.
+    let text = strip_css_comments(&text)
+        .map_err(|e| format!("styles (variables) : {} : {e}", path.display()))?;
 
     extract_declarations(&text, registry);
 
@@ -1261,10 +1632,14 @@ impl SourceProvider for MvarProvider {
 
     fn read<'a>(&'a self, file: &Path) -> Result<&'a str, Self::Error> {
         let raw = fs::read_to_string(file)?;
-        // Ordre impératif : déroulage des @for D'ABORD (élimine $i / $(i)
-        // sans toucher aux $vars globales), résolution du registre global
-        // ENSUITE (voir commentaire "Phase 3 (suite)" plus haut).
-        let unrolled = expand_for_loops(&raw).map_err(MvarError::ForLoop)?;
+        // Ordre impératif, trois étapes : purge des commentaires D'ABORD
+        // (donnée morte éliminée avant que quoi que ce soit d'autre ne la
+        // voie — voir "Phase 3 (préambule)" plus haut), déroulage des @for
+        // ENSUITE (élimine $i / $(i) sans toucher aux $vars globales),
+        // résolution du registre global EN DERNIER (voir "Phase 3
+        // (suite)" plus haut).
+        let stripped = strip_css_comments(&raw).map_err(MvarError::Comment)?;
+        let unrolled = expand_for_loops(&stripped).map_err(MvarError::ForLoop)?;
         let transformed = substitute_and_purge(&unrolled, &self.registry, file)?;
         let ptr = Box::into_raw(Box::new(transformed));
         self.outputs.lock().unwrap().push(ptr);
@@ -1294,9 +1669,9 @@ impl Drop for MvarProvider {
     }
 }
 
-/// Pipeline `[styles]` réel — spec §10.1 et §10.3.
+/// Pipeline `[styles]` réel — spec §10.1, §10.3, Roadmap §1.8 (tranchée).
 ///
-/// 1. Bundling (`Bundler` + `FileProvider`) : résout et inline les
+/// 1. Bundling (`Bundler` + `MvarProvider`) : résout et inline les
 ///    `@import`, y compris ceux qualifiés `layer(...)`. **Écart assumé par
 ///    rapport à la demande initiale** : je n'ai pas implémenté de logique
 ///    séparée pour "préserver" les imports en couche sans les inliner — un
@@ -1307,18 +1682,38 @@ impl Drop for MvarProvider {
 ///    conforme à la spec CSS Cascade Layers inline le contenu et
 ///    l'enveloppe dans le `@layer` nommé, il ne le laisse pas non résolu.
 ///    Le `Bundler` standard fait déjà cela — aucun traitement spécial requis.
-/// 2. Visiteur AST scopé `@font-face` (`FontFaceUrlVisitor` ci-dessus) :
-///    validation dure + réécriture d'URL, spec §10.1.
+/// 2. Visiteur AST (`CssUrlVisitor` ci-dessus) : validation dure +
+///    réécriture d'URL pour TOUT `url()` du document — plus seulement
+///    `@font-face` (Roadmap §1.8, désormais tranchée par la demande de
+///    session : `background-image` doit être réécrit exactement comme
+///    `@font-face` l'était déjà).
 /// 3. Minification, puis émission du CSS final.
 ///
-/// Pré-passe lexicale des variables `$` et des boucles `@for` (Phase 3,
-/// cette session) : dans `MvarProvider::read`, `expand_for_loops` d'abord
-/// (élimine `@for`, local à chaque fichier, pas de piège d'ordre), puis
-/// résolution des `$nom` globaux via le `VariableRegistry` construit en
-/// amont par `build_variable_registry` (walk textuel du graphe `@import`,
-/// AVANT que `Bundler` ne lise quoi que ce soit — piège d'ordre inter-
-/// fichiers, celui-là bien réel, évité par cette séparation). Voir les
-/// deux blocs de commentaires "Phase 3" plus haut dans ce fichier pour le
+/// **Pourquoi la réécriture d'URL se fait ICI, avant minification/hash, et
+/// pas "en toute fin de build"** (question explicitement posée en
+/// session) : le hash du fichier CSS produit (`run_styles_pipeline`, juste
+/// après l'appel à cette fonction) doit refléter EXACTEMENT ce qui est
+/// servi — invariant déjà en place pour `@font-face` avant cette session,
+/// pas une nouveauté. Réécrire après coup (sur le fichier déjà écrit et
+/// haché) obligerait soit à re-hacher après coup (passe supplémentaire,
+/// aucun bénéfice sur la première option), soit à accepter un hash
+/// obsolète (romprait l'invariant). Faire la réécriture ICI, avant
+/// `minify`/`to_css`, ne coûte rien de plus qu'un second passage du même
+/// visiteur déjà en place — la seule différence est la portée
+/// (`in_font_face` retiré), pas le moment.
+///
+/// Pré-passe lexicale des commentaires, des variables `$` et des boucles
+/// `@for` (Phase 3) : dans `MvarProvider::read`, `strip_css_comments`
+/// d'abord (donnée morte éliminée avant tout le reste — un `$var`
+/// indéfinie ou un `@for` malformé À L'INTÉRIEUR d'un commentaire ne doit
+/// jamais faire échouer le build), puis `expand_for_loops` (élimine
+/// `@for`, local à chaque fichier, pas de piège d'ordre), puis résolution
+/// des `$nom` globaux via le `VariableRegistry` construit en amont par
+/// `build_variable_registry` (walk textuel du graphe `@import`, AVANT que
+/// `Bundler` ne lise quoi que ce soit — piège d'ordre inter-fichiers,
+/// celui-là bien réel, évité par cette séparation ; cette Passe A
+/// applique elle aussi `strip_css_comments` en premier, même raison). Voir
+/// les blocs de commentaires "Phase 3" plus haut dans ce fichier pour le
 /// raisonnement complet.
 ///
 /// Note de version — confirmé par compilation réelle (retour de session,
@@ -1329,7 +1724,7 @@ impl Drop for MvarProvider {
 /// environnement — l'ambiguïté est levée, plus un avertissement.
 fn transform_css(
     entry_path: &Path,
-    font_registry: &FontRegistry,
+    asset_url_registry: &AssetUrlRegistry,
 ) -> Result<String, Box<dyn std::error::Error>> {
     // Passe A — walk textuel complet du graphe AVANT toute chose : le
     // registre doit être figé pour tout le graphe avant que `Bundler` ne
@@ -1351,9 +1746,8 @@ fn transform_css(
         )
     })?;
 
-    let mut visitor = FontFaceUrlVisitor {
-        font_registry,
-        in_font_face: false,
+    let mut visitor = CssUrlVisitor {
+        registry: asset_url_registry,
     };
     stylesheet
         .visit(&mut visitor)
@@ -1386,7 +1780,7 @@ fn run_styles_pipeline(
     build_root: &Path,
     build_root_rel: &str,
     entries: &[String],
-    font_registry: &FontRegistry,
+    asset_url_registry: &AssetUrlRegistry,
     manifest: &mut HashMap<String, AssetEntry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for rel_path in entries {
@@ -1395,7 +1789,7 @@ fn run_styles_pipeline(
             return Err(format!("styles : fichier introuvable : {}", source_path.display()).into());
         }
 
-        let transformed = transform_css(&source_path, font_registry)?;
+        let transformed = transform_css(&source_path, asset_url_registry)?;
         let bytes = transformed.as_bytes();
         let (full_hash, short_hash) = hash_content(bytes);
 
@@ -1455,6 +1849,608 @@ fn join_slash(a: &str, b: &str) -> String {
 }
 
 // =============================================================================
+// Pipeline [scripts.components] — Phase 7. ES Modules natifs, pas de
+// bundling par concaténation : chaque module source devient un fichier
+// `.js` haché indépendant, les `import ... from '...'` sont réécrits pour
+// pointer vers les URLs publiques des autres modules déjà hachés — le
+// navigateur assemble le graphe lui-même via ESM natif au runtime, ce
+// pipeline ne fait QUE renommer les chemins et garantir l'ordre de hachage
+// (une dépendance doit être hachée avant le module qui l'importe, puisque
+// son URL finale doit apparaître dans le texte patché de ce dernier).
+//
+// Aucune nouvelle dépendance Cargo : lexer fait main (octets), arène plate
+// (Vec + indices), BLAKE3 déjà présent pour le hash — rien à ajouter au
+// Cargo.toml pour cette Phase.
+//
+// Trois passes séparées, dans cet ordre strict, jamais fusionnées :
+//   1. `build_module_arena`          — exploration (I/O + lex), construit
+//                                       le graphe.
+//   2. `topological_order_leaves_first` — tri topologique pur (aucune I/O,
+//                                       aucune allocation de contenu),
+//                                       détecte les cycles.
+//   3. `patch_and_hash_modules`      — écrit sur disque, dans l'ordre
+//                                       feuilles → racines imposé par (2).
+// Même discipline que la séparation Passe A / Passe B déjà en place pour
+// `[styles]` (Phase 3) : chaque passe a une seule responsabilité, aucune
+// ne mélange "lire le graphe" et "l'ordonner" et "le matérialiser".
+// =============================================================================
+
+/// Position (octet, longueur) d'un chemin d'import littéral dans son texte
+/// source — guillemets exclus. Alias nommé pour la lisibilité et pour
+/// satisfaire `clippy::type_complexity` sur les signatures qui l'imbriquent
+/// (`Option<(ImportSpan, usize)>`) ; la structure reste un simple tuple,
+/// aucune sémantique supplémentaire par rapport à `(usize, usize)`.
+type ImportSpan = (usize, usize);
+
+#[derive(Debug)]
+enum JsPipelineError {
+    Io(PathBuf, std::io::Error),
+    Lex(PathBuf, String),
+    /// Import non-relatif (`/libs/leaflet.js`, un nom de paquet nu, etc.)
+    /// absent du registre d'assets verbatim — même politique fail-hard que
+    /// `CssUrlResolutionError`/`WebManifestError` : ce n'est pas un module
+    /// de CE pipeline (voir doc `ImportTarget::ExternalAsset`), mais son
+    /// absence est quand même fatale, pas un `console.error` runtime.
+    AssetNotFound {
+        specifier: String,
+        filename: String,
+        in_file: PathBuf,
+    },
+    /// Cycle d'imports détecté pendant le tri topologique — mission §3 :
+    /// erreur fatale immédiate, jamais une résolution partielle.
+    CyclicImport(Vec<PathBuf>),
+}
+
+impl fmt::Display for JsPipelineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JsPipelineError::Io(path, e) => {
+                write!(
+                    f,
+                    "scripts : lecture impossible de {} : {e}",
+                    path.display()
+                )
+            }
+            JsPipelineError::Lex(path, msg) => {
+                write!(f, "scripts : {} : {msg}", path.display())
+            }
+            JsPipelineError::AssetNotFound {
+                specifier,
+                filename,
+                in_file,
+            } => write!(
+                f,
+                "scripts : AssetNotFound '{specifier}' (fichier '{filename}' absent du registre) \
+                 référencé dans {}",
+                in_file.display()
+            ),
+            JsPipelineError::CyclicImport(paths) => {
+                let list = paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "scripts : cycle d'imports détecté impliquant : {list}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for JsPipelineError {}
+
+// ── Lexer — un seul passage sur &[u8], aucune regex, aucun AST ─────────────
+
+/// Un octet appartient-il à un identifiant JS (partiel : suffisant pour la
+/// détection de frontière de mot autour de `import`/`from`, pas une
+/// validation complète des identifiants Unicode JS).
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// `source[i..]` commence-t-il par `word`, à une frontière de mot stricte
+/// des deux côtés (ni précédé ni suivi d'un octet d'identifiant) ?
+fn starts_with_word(source: &[u8], i: usize, word: &[u8]) -> bool {
+    if !source[i..].starts_with(word) {
+        return false;
+    }
+    let before_ok = i == 0 || !is_ident_byte(source[i - 1]);
+    let after_ok = source
+        .get(i + word.len())
+        .map(|&b| !is_ident_byte(b))
+        .unwrap_or(true);
+    before_ok && after_ok
+}
+
+fn skip_line_comment(source: &[u8], i: usize) -> usize {
+    // S'arrête AU newline sans le consommer — le newline reste un
+    // caractère significatif pour l'appelant (fin de déclaration `import`
+    // sans `from`, cf. `lex_import_statement`).
+    source[i..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|rel| i + rel)
+        .unwrap_or(source.len())
+}
+
+fn skip_block_comment(source: &[u8], i: usize, ctx: &Path) -> Result<usize, JsPipelineError> {
+    let mut j = i + 2;
+    while j < source.len() {
+        if source[j] == b'*' && source.get(j + 1) == Some(&b'/') {
+            return Ok(j + 2);
+        }
+        j += 1;
+    }
+    Err(JsPipelineError::Lex(
+        ctx.to_path_buf(),
+        "commentaire bloc /* non fermé".to_string(),
+    ))
+}
+
+/// Retourne l'indice du guillemet FERMANT non échappé — même discipline
+/// d'échappement que `strip_css_comments`/`MvarProvider` : une paire
+/// échappée (`\'`, `\"`, `` \` ``) avance de deux octets ensemble, jamais
+/// interprétée séparément.
+fn find_unescaped_quote(
+    source: &[u8],
+    mut i: usize,
+    quote: u8,
+    ctx: &Path,
+) -> Result<usize, JsPipelineError> {
+    while i < source.len() {
+        if source[i] == b'\\' && i + 1 < source.len() {
+            i += 2;
+        } else if source[i] == quote {
+            return Ok(i);
+        } else {
+            i += 1;
+        }
+    }
+    Err(JsPipelineError::Lex(
+        ctx.to_path_buf(),
+        format!(
+            "chaîne ou gabarit non fermé (guillemet '{}' manquant)",
+            quote as char
+        ),
+    ))
+}
+
+/// Saute une chaîne (`'`/`"`) ou un littéral gabarit (`` ` ``) traité comme
+/// une région opaque. Limite connue et documentée, pas un oubli : les
+/// interpolations `${...}` d'un gabarit ne sont pas analysées — un import
+/// écrit à l'intérieur d'une interpolation de gabarit (cas extrêmement
+/// rare, non idiomatique) ne serait pas détecté. Hors grammaire fermée v1.
+fn skip_string_like(
+    source: &[u8],
+    i: usize,
+    quote: u8,
+    ctx: &Path,
+) -> Result<usize, JsPipelineError> {
+    Ok(find_unescaped_quote(source, i + 1, quote, ctx)? + 1)
+}
+
+fn skip_ws_and_comments(source: &[u8], mut i: usize, ctx: &Path) -> Result<usize, JsPipelineError> {
+    loop {
+        while i < source.len() && source[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if source.get(i) == Some(&b'/') && source.get(i + 1) == Some(&b'/') {
+            i = skip_line_comment(source, i);
+        } else if source.get(i) == Some(&b'/') && source.get(i + 1) == Some(&b'*') {
+            i = skip_block_comment(source, i, ctx)?;
+        } else {
+            break;
+        }
+    }
+    Ok(i)
+}
+
+/// Analyse le contenu d'UNE déclaration `import`, immédiatement après le
+/// mot-clé — cherche `from '<chemin>'`/`from "<chemin>"`, bornée par `;`,
+/// un saut de ligne, ou l'EOF. Retourne `((offset, len), position_après)`
+/// du contenu du chemin (guillemets exclus), ou `None` si :
+///  - c'est un `import(...)` dynamique (mission §4, ignoré délibérément) ;
+///  - c'est un import sans `from` (`import './x.js';` — effet de bord pur,
+///    hors grammaire v1, cf. doc de `lex_imports`) ;
+///  - la déclaration est incomplète/malformée avant tout `from`.
+fn lex_import_statement(
+    source: &[u8],
+    start: usize,
+    ctx: &Path,
+) -> Result<Option<(ImportSpan, usize)>, JsPipelineError> {
+    let mut i = skip_ws_and_comments(source, start, ctx)?;
+
+    if source.get(i) == Some(&b'(') {
+        return Ok(None); // import(...) dynamique — grammaire fermée.
+    }
+
+    while i < source.len() {
+        match source[i] {
+            b';' | b'\n' => return Ok(None),
+            b'/' if source.get(i + 1) == Some(&b'/') => i = skip_line_comment(source, i),
+            b'/' if source.get(i + 1) == Some(&b'*') => i = skip_block_comment(source, i, ctx)?,
+            // Bug réel identifié à la relecture : un import SANS `from`
+            // (`import './from-server.js';`) présente son chemin AVANT
+            // toute occurrence légitime de 'from'. Sans cette ligne, le
+            // mot "from" à l'intérieur même de ce chemin littéral serait
+            // pris pour le vrai mot-clé, et la recherche de guillemet
+            // qui suit repartirait d'un point arbitraire à l'intérieur de
+            // la chaîne — extraction silencieusement fausse, pas une
+            // erreur franche. Aucune grammaire JS valide ne place une
+            // chaîne AVANT un `from` réel : sauter toute chaîne rencontrée
+            // ici est donc sûr pour le cas légitime, et corrige le cas
+            // illégitime.
+            b'\'' | b'"' | b'`' => i = skip_string_like(source, i, source[i], ctx)?,
+            _ if starts_with_word(source, i, b"from") => {
+                let quote_pos = skip_ws_and_comments(source, i + "from".len(), ctx)?;
+                let quote = match source.get(quote_pos) {
+                    Some(&q @ (b'\'' | b'"')) => q,
+                    _ => return Ok(None), // 'from' pas suivi d'une chaîne littérale
+                };
+                let content_start = quote_pos + 1;
+                let end = find_unescaped_quote(source, content_start, quote, ctx)?;
+                return Ok(Some(((content_start, end - content_start), end + 1)));
+            }
+            _ => i += 1,
+        }
+    }
+
+    Ok(None)
+}
+
+/// Lexer principal — un seul passage sur `source`, retourne les positions
+/// (octet, longueur) du contenu de chaque chemin d'import statique de
+/// premier niveau détecté (guillemets exclus, zéro allocation de `String`
+/// intermédiaire : chaque span est une sous-tranche empruntée à `source`
+/// au moment du patch, jamais copiée ici).
+///
+/// Le scan de plus haut niveau reste conscient des chaînes/gabarits/
+/// commentaires (même nécessité que `strip_css_comments` pour le CSS) :
+/// sans ça, le mot `import` pourrait être détecté à tort à l'intérieur
+/// d'une chaîne ou d'un commentaire.
+///
+/// Limite connue, non résolue ici (documentée, pas silencieuse) :
+/// aucune distinction division `/` vs littéral regex `/.../ `. Un
+/// commentaire `//` à l'intérieur d'un littéral regex (`/foo\/\/bar/`)
+/// serait à tort traité comme un début de commentaire de ligne. La
+/// désambiguïsation complète division/regex est l'un des problèmes
+/// classiques les plus coûteux du lexing JS (elle dépend du token
+/// précédent) — hors périmètre de cette grammaire fermée v1.
+fn lex_imports(source: &[u8], ctx: &Path) -> Result<Vec<ImportSpan>, JsPipelineError> {
+    let mut spans = Vec::new();
+    let mut i = 0usize;
+
+    while i < source.len() {
+        match source[i] {
+            b'/' if source.get(i + 1) == Some(&b'/') => {
+                i = skip_line_comment(source, i);
+            }
+            b'/' if source.get(i + 1) == Some(&b'*') => {
+                i = skip_block_comment(source, i, ctx)?;
+            }
+            b'\'' | b'"' | b'`' => {
+                i = skip_string_like(source, i, source[i], ctx)?;
+            }
+            _ if starts_with_word(source, i, b"import") => {
+                let after_keyword = i + "import".len();
+                match lex_import_statement(source, after_keyword, ctx)? {
+                    Some((span, next)) => {
+                        spans.push(span);
+                        i = next;
+                    }
+                    None => i = after_keyword,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    Ok(spans)
+}
+
+// ── Arène DOD — Vec<JsModule> plat, arêtes = indices ────────────────────────
+
+/// Cible d'un import détecté — deux familles disjointes, jamais confondues :
+///  - `Module` : import relatif (`./`, `../`), un AUTRE nœud de CETTE
+///    arène — arête réelle du DAG, soumise au tri topologique.
+///  - `ExternalAsset` : tout le reste (`/libs/leaflet.js`, un nom de
+///    paquet nu, une URL externe) — déjà résolu contre `AssetUrlRegistry`
+///    au moment de l'EXPLORATION (Passe 1), jamais une arête du DAG : ce
+///    pipeline ne possède pas ce fichier, ne le parse jamais, n'a aucune
+///    contrainte d'ordre de hachage à son sujet — sa valeur finale est
+///    déjà connue avant même que le tri topologique ne commence.
+enum ImportTarget {
+    Module(usize),
+    ExternalAsset(String),
+}
+
+struct ImportEdge {
+    /// Position (octet, longueur) du chemin littéral dans
+    /// `JsModule::source` — guillemets exclus, réutilisée telle quelle
+    /// par la passe de patch (Passe 3), jamais recalculée.
+    span: ImportSpan,
+    target: ImportTarget,
+}
+
+struct JsModule {
+    /// Chemin absolu canonique — clé de dédoublonnage à l'exploration (un
+    /// diamant d'imports ne doit produire qu'un seul nœud).
+    path: PathBuf,
+    /// Rempli au moment où ce nœud est dépilé du worklist d'exploration —
+    /// vide (`String::new()`) entre sa réservation et son traitement,
+    /// jamais lu avant (voir `build_module_arena`).
+    source: String,
+    imports: Vec<ImportEdge>,
+}
+
+/// Réserve un index d'arène pour `path` s'il n'en a pas déjà un — ne lit
+/// JAMAIS le fichier ici (seule `build_module_arena` le fait, au moment où
+/// l'index est dépilé du worklist). Idempotent : un diamant d'imports
+/// (deux modules important le même troisième) obtient le même index sans
+/// second passage ; un cycle ne boucle jamais à l'infini pour la même
+/// raison — la détection du cycle lui-même est le travail de la Passe 2,
+/// pas de cette fonction.
+fn reserve_module_index(
+    path: &Path,
+    arena: &mut Vec<JsModule>,
+    index_by_path: &mut HashMap<PathBuf, usize>,
+    worklist: &mut VecDeque<usize>,
+) -> usize {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if let Some(&idx) = index_by_path.get(&canonical) {
+        return idx;
+    }
+    let idx = arena.len();
+    arena.push(JsModule {
+        path: canonical.clone(),
+        source: String::new(),
+        imports: Vec::new(),
+    });
+    index_by_path.insert(canonical, idx);
+    worklist.push_back(idx);
+    idx
+}
+
+/// Passe 1 — exploration. Worklist (BFS), pas de récursion : un appel
+/// récursif aurait exigé un emprunt vivant sur `arena[idx].source`
+/// pendant un appel qui pousse lui-même dans `arena` (réallocation
+/// possible du `Vec`) — conflit d'emprunt structurel, pas contournable
+/// sans `unsafe`. Le worklist élimine le problème par construction :
+/// aucun emprunt ne traverse jamais un point de mutation du `Vec`.
+///
+/// Seule allocation de chemin en dehors du lexer lui-même : le
+/// `path.clone()` en tête de boucle, nécessaire pour la même raison
+/// (`fs::read_to_string` emprunte `path`, puis `arena[idx].source = ...`
+/// emprunte `arena` en mutable — les deux emprunts ne peuvent pas
+/// coexister si `path` est lui-même emprunté depuis `arena[idx]`).
+fn build_module_arena(
+    entry_paths: &[PathBuf],
+    asset_url_registry: &AssetUrlRegistry,
+) -> Result<(Vec<JsModule>, Vec<usize>), JsPipelineError> {
+    let mut arena: Vec<JsModule> = Vec::new();
+    let mut index_by_path: HashMap<PathBuf, usize> = HashMap::new();
+    let mut worklist: VecDeque<usize> = VecDeque::new();
+
+    let entry_indices: Vec<usize> = entry_paths
+        .iter()
+        .map(|p| reserve_module_index(p, &mut arena, &mut index_by_path, &mut worklist))
+        .collect();
+
+    while let Some(idx) = worklist.pop_front() {
+        let path = arena[idx].path.clone();
+        let source = fs::read_to_string(&path).map_err(|e| JsPipelineError::Io(path.clone(), e))?;
+        let raw_spans = lex_imports(source.as_bytes(), &path)?;
+
+        let mut imports = Vec::with_capacity(raw_spans.len());
+        for (start, len) in raw_spans {
+            let specifier = &source[start..start + len];
+            let target = if specifier.starts_with('.') {
+                let dep_path = path.with_file_name(specifier);
+                let dep_idx =
+                    reserve_module_index(&dep_path, &mut arena, &mut index_by_path, &mut worklist);
+                ImportTarget::Module(dep_idx)
+            } else {
+                match resolve_asset_reference(specifier, asset_url_registry) {
+                    Ok(Some(resolved)) => ImportTarget::ExternalAsset(resolved),
+                    Ok(None) => ImportTarget::ExternalAsset(specifier.to_string()),
+                    Err(filename) => {
+                        return Err(JsPipelineError::AssetNotFound {
+                            specifier: specifier.to_string(),
+                            filename,
+                            in_file: path.clone(),
+                        });
+                    }
+                }
+            };
+            imports.push(ImportEdge {
+                span: (start, len),
+                target,
+            });
+        }
+
+        arena[idx].source = source;
+        arena[idx].imports = imports;
+    }
+
+    Ok((arena, entry_indices))
+}
+
+// ── Tri topologique — Kahn, feuilles → racines, détection de cycle ────────
+
+/// Ordonne les indices de l'arène pour que toute dépendance-MODULE d'un
+/// nœud apparaisse AVANT lui — condition nécessaire et suffisante pour
+/// que la Passe 3 (patch) connaisse toujours déjà l'URL finale de chaque
+/// dépendance au moment de traiter un module. Algorithme de Kahn sur le
+/// graphe des dépendances (arêtes `Module` uniquement — `ExternalAsset`
+/// n'est jamais une arête, déjà résolu à l'exploration) : un nœud entre
+/// dans la file dès que toutes ses dépendances en sont sorties.
+///
+/// Cycle détecté ⟺ au moins un nœud n'atteint jamais `out_degree == 0` :
+/// erreur fatale immédiate (mission §3), aucune tentative de résolution
+/// partielle.
+fn topological_order_leaves_first(arena: &[JsModule]) -> Result<Vec<usize>, JsPipelineError> {
+    let n = arena.len();
+    let mut out_degree = vec![0usize; n];
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+    for (i, module) in arena.iter().enumerate() {
+        for edge in &module.imports {
+            if let ImportTarget::Module(dep_idx) = edge.target {
+                out_degree[i] += 1;
+                dependents[dep_idx].push(i);
+            }
+        }
+    }
+
+    let mut queue: VecDeque<usize> = (0..n).filter(|&i| out_degree[i] == 0).collect();
+    let mut order = Vec::with_capacity(n);
+
+    while let Some(i) = queue.pop_front() {
+        order.push(i);
+        for &dependent in &dependents[i] {
+            out_degree[dependent] -= 1;
+            if out_degree[dependent] == 0 {
+                queue.push_back(dependent);
+            }
+        }
+    }
+
+    if order.len() != n {
+        let stuck = (0..n)
+            .filter(|&i| out_degree[i] > 0)
+            .map(|i| arena[i].path.clone())
+            .collect();
+        return Err(JsPipelineError::CyclicImport(stuck));
+    }
+
+    Ok(order)
+}
+
+// ── Patch + hash — bottom-up, dans l'ordre de la Passe 2 ───────────────────
+
+/// Métadonnées d'un module patché, retournées à l'appelant pour qu'il
+/// décide lui-même lesquelles entrent dans le manifeste (seuls les points
+/// d'entrée logiques de `[scripts.components]` y entrent — un module
+/// intermédiaire comme `navigation.js` est un artefact de build, jamais
+/// référencé directement par `{% asset %}` côté template).
+struct PatchedModule {
+    url: String,
+    output_rel: String,
+    full_hash: String,
+    size: u64,
+}
+
+/// Passe 3 — pour chaque nœud, DANS L'ORDRE `order` (feuilles → racines) :
+/// recopie `source` en substituant chaque span d'import par l'URL publique
+/// finale de sa cible (déjà connue par construction — soit calculée à une
+/// itération précédente de CETTE boucle pour une `Module`, soit déjà
+/// résolue à l'exploration pour une `ExternalAsset`), hache le résultat,
+/// écrit sur disque.
+fn patch_and_hash_modules(
+    arena: &[JsModule],
+    order: &[usize],
+    build_root: &Path,
+) -> Result<Vec<Option<PatchedModule>>, Box<dyn std::error::Error>> {
+    let mut resolved: Vec<Option<PatchedModule>> = (0..arena.len()).map(|_| None).collect();
+
+    let scripts_dir = build_root.join("scripts");
+    fs::create_dir_all(&scripts_dir)?;
+
+    for &idx in order {
+        let module = &arena[idx];
+        let mut patched = String::with_capacity(module.source.len());
+        let mut cursor = 0usize;
+
+        for edge in &module.imports {
+            let (start, len) = edge.span;
+            patched.push_str(&module.source[cursor..start]);
+
+            let replacement: &str = match &edge.target {
+                ImportTarget::Module(dep_idx) => {
+                    resolved[*dep_idx].as_ref().map(|p| p.url.as_str()).expect(
+                        "dépendance déjà patchée par construction — garanti par l'ordre \
+                         topologique de la Passe 2",
+                    )
+                }
+                ImportTarget::ExternalAsset(url) => url.as_str(),
+            };
+            patched.push_str(replacement);
+
+            cursor = start + len;
+        }
+        patched.push_str(&module.source[cursor..]);
+
+        let bytes = patched.into_bytes();
+        let (full_hash, short_hash) = hash_content(&bytes);
+
+        let stem = module
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("module-{idx}"));
+        let hashed_filename = format!("{stem}.{short_hash}.js");
+        let output_rel = join_slash("scripts", &hashed_filename);
+        fs::write(scripts_dir.join(&hashed_filename), &bytes)?;
+
+        resolved[idx] = Some(PatchedModule {
+            url: format!("/{output_rel}"),
+            output_rel,
+            full_hash,
+            size: bytes.len() as u64,
+        });
+    }
+
+    Ok(resolved)
+}
+
+fn run_scripts_pipeline(
+    theme_dir: &Path,
+    build_root: &Path,
+    build_root_rel: &str,
+    components: &HashMap<String, String>,
+    asset_url_registry: &AssetUrlRegistry,
+    manifest: &mut HashMap<String, AssetEntry>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Même raison que [sprites]/[webmanifest] : HashMap n'a pas d'ordre
+    // d'itération garanti, le manifeste doit être reproductible.
+    let mut target_names: Vec<&String> = components.keys().collect();
+    target_names.sort();
+
+    let entry_paths: Vec<PathBuf> = target_names
+        .iter()
+        .map(|name| theme_dir.join(&components[*name]))
+        .collect();
+
+    let (arena, entry_indices) = build_module_arena(&entry_paths, asset_url_registry)?;
+    let order = topological_order_leaves_first(&arena)?;
+    let resolved = patch_and_hash_modules(&arena, &order, build_root)?;
+
+    for (target_name, &entry_idx) in target_names.iter().zip(entry_indices.iter()) {
+        let patched = resolved[entry_idx]
+            .as_ref()
+            .expect("chaque point d'entrée est traité par la Passe 3");
+
+        manifest.insert(
+            format!("{target_name}.js"),
+            AssetEntry {
+                url: patched.url.clone(),
+                path: join_slash(build_root_rel, &patched.output_rel),
+                mime: mime_for_extension("js").to_string(),
+                size: patched.size,
+                hash: patched.full_hash.clone(),
+                version: String::new(), // rempli par l'appelant (theme.version)
+            },
+        );
+
+        println!(
+            "[marius-assets] scripts   {} -> {}",
+            components[*target_name], patched.url
+        );
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // main
 // =============================================================================
 
@@ -1487,19 +2483,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // même remède : toujours invoquer depuis la racine.
     let build_root_rel = join_slash("build", &theme.theme.name);
     let build_root = PathBuf::from(&build_root_rel);
+
+    // Purge intégrale avant tout pipeline — Phase 5, en réponse à
+    // l'accumulation de fichiers hachés observée en session
+    // (`main.0e03e.css`, `main.42e0b.css`, ... jamais nettoyés d'un build
+    // à l'autre). Arbitrage : nettoyage global ICI plutôt que trois
+    // nettoyages partiels distincts (un par pipeline — styles/, sprites/,
+    // chaque sous-dossier verbatim). `build_root` est un répertoire
+    // ENTIÈREMENT généré (rien n'y est jamais écrit à la main — même
+    // convention que l'en-tête `GÉNÉRÉ... NE PAS MODIFIER MANUELLEMENT`
+    // déjà en usage ailleurs dans ce workspace) : le vider puis le
+    // reconstruire de zéro à chaque invocation est donc strictement sûr,
+    // et élimine toute la classe de bugs "un pipeline oublie de nettoyer
+    // son propre sous-dossier" plutôt que de la déplacer vers trois
+    // implémentations à maintenir en synchronisation. Pas besoin
+    // d'atomicité (suppression puis recréation, pas de bascule
+    // symlink) : ce binaire est séquentiel, personne ne lit `build_root`
+    // pendant son exécution.
+    if build_root.exists() {
+        fs::remove_dir_all(&build_root)
+            .map_err(|e| format!("nettoyage impossible de {} : {e}", build_root.display()))?;
+    }
     fs::create_dir_all(&build_root)?;
 
     let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
 
     // Ordonnancement obligatoire (spec §10.1) : verbatim (résout le
-    // registre Fonts) AVANT styles (le consomme) — jamais l'inverse.
-    let font_registry = run_verbatim_pipeline(
+    // registre d'URLs) AVANT styles (le consomme) — jamais l'inverse.
+    let asset_url_registry = run_verbatim_pipeline(
         &theme_dir,
         &build_root,
         &build_root_rel,
         &theme.static_.verbatim.files,
         &mut manifest,
     )?;
+
+    // [webmanifest] (Phase 6) — dépend uniquement du registre d'URLs
+    // (icons[].src pointe vers des favicons déjà hachés par verbatim ci-
+    // dessus), aucune dépendance avec sprites/styles. `Option` : un thème
+    // sans PWA (pas de section [webmanifest] dans theme.toml) est valide,
+    // on saute silencieusement ce pipeline plutôt que de forcer sa
+    // présence.
+    if let Some(webmanifest_config) = &theme.webmanifest {
+        run_webmanifest_pipeline(
+            &theme_dir,
+            &build_root,
+            &build_root_rel,
+            webmanifest_config,
+            &asset_url_registry,
+            &mut manifest,
+        )?;
+    }
 
     // [sprites] (Phase 4) — aucune dépendance avec verbatim/styles, ordre
     // libre. Placé ici à votre demande explicite, juste après verbatim.
@@ -1516,7 +2550,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &build_root,
         &build_root_rel,
         &theme.styles.entries,
-        &font_registry,
+        &asset_url_registry,
+        &mut manifest,
+    )?;
+
+    // [scripts.components] (Phase 7) — dépend uniquement du registre
+    // d'URLs (les imports non-relatifs comme `/libs/leaflet.js` doivent
+    // déjà être hachés par verbatim), aucune dépendance avec
+    // sprites/styles/webmanifest. Placé en dernier des pipelines de
+    // contenu par simple cohérence de lecture (ordre d'apparition dans
+    // theme.toml), pas par nécessité d'ordonnancement.
+    run_scripts_pipeline(
+        &theme_dir,
+        &build_root,
+        &build_root_rel,
+        &theme.scripts.components,
+        &asset_url_registry,
         &mut manifest,
     )?;
 
@@ -1552,6 +2601,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── strip_css_comments (Phase 3, préambule) ─────────────────────────────
+
+    #[test]
+    fn strip_css_comments_removes_simple_comment() {
+        let input = ".a { color: red; /* comment */ }";
+        assert_eq!(strip_css_comments(input).unwrap(), ".a { color: red;  }");
+    }
+
+    #[test]
+    fn strip_css_comments_multiline_comment_is_removed_entirely() {
+        let input = "before\n/*\nmulti\nline\n*/\nafter";
+        assert_eq!(strip_css_comments(input).unwrap(), "before\n\nafter");
+    }
+
+    /// Exemple exact de la mission : `/*` à l'intérieur d'une chaîne CSS
+    /// n'est pas un délimiteur de commentaire, cette propriété ne doit
+    /// jamais être altérée.
+    #[test]
+    fn strip_css_comments_preserves_slash_star_inside_double_quoted_string() {
+        let input = r#".icon::before { content: "/*"; }"#;
+        assert_eq!(strip_css_comments(input).unwrap(), input);
+    }
+
+    #[test]
+    fn strip_css_comments_preserves_slash_star_inside_single_quoted_string() {
+        let input = ".icon::before { content: '/*'; }";
+        assert_eq!(strip_css_comments(input).unwrap(), input);
+    }
+
+    /// Un guillemet échappé à l'intérieur de la chaîne ne doit jamais être
+    /// vu comme sa fermeture — sinon le `/*` qui suit serait interprété
+    /// hors chaîne et supprimerait à tort le reste du fichier.
+    #[test]
+    fn strip_css_comments_escaped_quote_does_not_close_string_early() {
+        let input = "content: \"a\\\" /* b\"; ";
+        assert_eq!(strip_css_comments(input).unwrap(), input);
+    }
+
+    /// Le bug exact rapporté en session : une `$variable` indéfinie à
+    /// l'intérieur d'un commentaire ne doit plus jamais atteindre
+    /// `substitute_line` — la preuve la plus directe est qu'elle a
+    /// entièrement disparu du texte après cette passe.
+    #[test]
+    fn strip_css_comments_hides_undefined_variable_usage_inside_comment() {
+        let input = ".a { color: red; /* $old-var: 10; */ }";
+        let stripped = strip_css_comments(input).unwrap();
+        assert!(!stripped.contains('$'));
+    }
+
+    #[test]
+    fn strip_css_comments_unterminated_comment_is_an_error() {
+        assert!(strip_css_comments(".a { /* never closed").is_err());
+    }
+
+    #[test]
+    fn strip_css_comments_unterminated_string_is_an_error() {
+        assert!(strip_css_comments("content: \"never closed").is_err());
+    }
 
     // ── suggest_variable / levenshtein (Phase 3, $variables) ────────────────
 
@@ -1756,5 +2864,517 @@ mod tests {
     fn svg_file_to_symbol_missing_svg_root_is_an_error() {
         let src = "<g><path/></g>";
         assert!(svg_file_to_symbol("icon", src).is_err());
+    }
+
+    // ── is_external_url (Phase 5, url() généralisée) ────────────────────────
+
+    #[test]
+    fn is_external_url_detects_absolute_schemes() {
+        assert!(is_external_url("https://cdn.example.com/logo.svg"));
+        assert!(is_external_url("http://cdn.example.com/logo.svg"));
+    }
+
+    #[test]
+    fn is_external_url_detects_protocol_relative() {
+        assert!(is_external_url("//cdn.example.com/logo.svg"));
+    }
+
+    #[test]
+    fn is_external_url_detects_data_uri() {
+        assert!(is_external_url("data:image/png;base64,AAAA"));
+    }
+
+    /// Le cas réel de la mission : un chemin relatif de thème n'est jamais
+    /// externe, il doit passer par la résolution du registre.
+    #[test]
+    fn is_external_url_relative_theme_path_is_not_external() {
+        assert!(!is_external_url("../images/logo.svg"));
+        assert!(!is_external_url("logo.svg"));
+    }
+
+    /// Bug réel rencontré en session : `url(#mask-id)` (référence pure à un
+    /// élément `<defs>` SVG inline, motif courant pour `mask`/`clip-path`/
+    /// `filter`/`fill`) n'a aucun fichier à résoudre — sans cette exclusion,
+    /// la généralisation de `url()` (Phase 5) faisait échouer le build.
+    #[test]
+    fn is_external_url_detects_pure_fragment_reference() {
+        assert!(is_external_url("#mask-id"));
+    }
+
+    // ── split_url_fragment (Phase 5, url() avec fragment) ───────────────────
+
+    #[test]
+    fn split_url_fragment_no_fragment_returns_path_unchanged() {
+        assert_eq!(
+            split_url_fragment("sprites/utils.svg"),
+            ("sprites/utils.svg", "")
+        );
+    }
+
+    /// Le second bug réel rencontré en session : `url("sprites/utils.svg#icon")`
+    /// référence UN symbole précis d'un sprite fusionné (Phase 4) — seul le
+    /// chemin avant `#` doit être cherché dans le registre, le fragment doit
+    /// être préservé tel quel pour être réattaché à l'URL résolue.
+    #[test]
+    fn split_url_fragment_splits_path_and_fragment() {
+        assert_eq!(
+            split_url_fragment("sprites/utils.svg#icon"),
+            ("sprites/utils.svg", "#icon")
+        );
+    }
+
+    #[test]
+    fn split_url_fragment_empty_path_before_fragment() {
+        assert_eq!(split_url_fragment("#icon"), ("", "#icon"));
+    }
+
+    // ── resolve_asset_reference (Phase 5/6, partagé CSS + webmanifest) ──────
+
+    #[test]
+    fn resolve_asset_reference_found_returns_resolved_url() {
+        let mut registry = AssetUrlRegistry::new();
+        registry.insert("logo.svg".to_string(), "/images/logo.12452.svg".to_string());
+        assert_eq!(
+            resolve_asset_reference("../images/logo.svg", &registry),
+            Ok(Some("/images/logo.12452.svg".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_asset_reference_external_returns_ok_none() {
+        let registry = AssetUrlRegistry::new();
+        assert_eq!(
+            resolve_asset_reference("https://cdn.example.com/icon.png", &registry),
+            Ok(None)
+        );
+    }
+
+    /// Le second bug de session, vu depuis l'API partagée : le fragment
+    /// doit survivre à la résolution, pas seulement au niveau CSS.
+    #[test]
+    fn resolve_asset_reference_preserves_fragment_on_resolved_url() {
+        let mut registry = AssetUrlRegistry::new();
+        registry.insert(
+            "utils.svg".to_string(),
+            "/sprites/utils.4c4e9.svg".to_string(),
+        );
+        assert_eq!(
+            resolve_asset_reference("sprites/utils.svg#icon", &registry),
+            Ok(Some("/sprites/utils.4c4e9.svg#icon".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_asset_reference_missing_key_returns_err_with_filename() {
+        let registry = AssetUrlRegistry::new();
+        assert_eq!(
+            resolve_asset_reference("favicons/logo.svg", &registry),
+            Err("logo.svg".to_string())
+        );
+    }
+
+    // ── run_webmanifest_pipeline (Phase 6) ───────────────────────────────────
+    //
+    // Seuls tests de ce fichier à toucher le disque — nécessaire ici : la
+    // propriété centrale à prouver (non-destruction du reste du document,
+    // spec §3 de la mission) ne peut pas se vérifier sur une fonction pure,
+    // `run_webmanifest_pipeline` lit et écrit réellement des fichiers.
+    // Chaque test utilise un sous-répertoire de nom unique sous le
+    // répertoire temporaire du système, pour rester sûr en cas
+    // d'exécution parallèle des tests (le harnais `cargo test` parallélise
+    // par défaut).
+
+    #[test]
+    fn run_webmanifest_pipeline_rewrites_icons_and_preserves_rest_of_document() {
+        let sandbox = std::env::temp_dir().join("marius-assets-test-webmanifest-ok");
+        let theme_dir = sandbox.join("theme");
+        let build_root = sandbox.join("build");
+        fs::create_dir_all(&theme_dir).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        fs::write(
+            theme_dir.join("manifest.webmanifest"),
+            r##"{
+                "name": "Marius",
+                "theme_color": "#ff6347",
+                "icons": [
+                    { "src": "/favicons/logoAny.svg", "sizes": "any", "type": "image/svg+xml" },
+                    { "src": "/favicons/logo192.png", "sizes": "192x192", "type": "image/png" }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let mut registry = AssetUrlRegistry::new();
+        registry.insert(
+            "logoAny.svg".to_string(),
+            "/favicons/logoAny.12452.svg".to_string(),
+        );
+        registry.insert(
+            "logo192.png".to_string(),
+            "/favicons/logo192.53aea.png".to_string(),
+        );
+
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+        let config = WebManifestConfig {
+            entry: "manifest.webmanifest".to_string(),
+        };
+
+        run_webmanifest_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &config,
+            &registry,
+            &mut manifest,
+        )
+        .unwrap();
+
+        let entry = manifest
+            .get("manifest.webmanifest")
+            .expect("la clé logique manifest.webmanifest doit être enregistrée");
+
+        let written_filename = Path::new(&entry.url).file_name().unwrap();
+        let written = fs::read_to_string(build_root.join(written_filename)).unwrap();
+        let parsed: Value = serde_json::from_str(&written).unwrap();
+
+        // Non-destruction (spec §3 de la mission) : les clés hors icons[]
+        // traversent intactes.
+        assert_eq!(parsed["name"], "Marius");
+        assert_eq!(parsed["theme_color"], "#ff6347");
+        // Mutation ciblée : seul src est réécrit.
+        assert_eq!(parsed["icons"][0]["src"], "/favicons/logoAny.12452.svg");
+        assert_eq!(parsed["icons"][0]["sizes"], "any");
+        assert_eq!(parsed["icons"][1]["src"], "/favicons/logo192.53aea.png");
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    /// Fail-hard (spec §2 de la mission) : une icône absente du registre
+    /// doit faire échouer tout le pipeline, jamais produire un manifeste
+    /// avec une URL non versionnée ou une ressource orpheline.
+    #[test]
+    fn run_webmanifest_pipeline_fails_hard_on_missing_icon_asset() {
+        let sandbox = std::env::temp_dir().join("marius-assets-test-webmanifest-missing");
+        let theme_dir = sandbox.join("theme");
+        let build_root = sandbox.join("build");
+        fs::create_dir_all(&theme_dir).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        fs::write(
+            theme_dir.join("manifest.webmanifest"),
+            r#"{"icons": [{"src": "/favicons/ghost.png"}]}"#,
+        )
+        .unwrap();
+
+        let registry = AssetUrlRegistry::new(); // vide : rien ne peut être trouvé
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+        let config = WebManifestConfig {
+            entry: "manifest.webmanifest".to_string(),
+        };
+
+        let result = run_webmanifest_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &config,
+            &registry,
+            &mut manifest,
+        );
+        assert!(result.is_err());
+        assert!(
+            manifest.get("manifest.webmanifest").is_none(),
+            "aucune entrée ne doit être enregistrée si la résolution échoue"
+        );
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    // ── lex_imports (Phase 7, scripts) ───────────────────────────────────────
+
+    fn lex(source: &str) -> Vec<ImportSpan> {
+        lex_imports(source.as_bytes(), Path::new("test.js")).unwrap()
+    }
+
+    fn lexed_specifiers(source: &str) -> Vec<&str> {
+        lex(source)
+            .into_iter()
+            .map(|(start, len)| &source[start..start + len])
+            .collect()
+    }
+
+    #[test]
+    fn lex_imports_named_import() {
+        let src = "import { initNavigation } from './navigation.js';\ninitNavigation();";
+        assert_eq!(lexed_specifiers(src), vec!["./navigation.js"]);
+    }
+
+    #[test]
+    fn lex_imports_default_import() {
+        let src = "import L from '/libs/leaflet.js';";
+        assert_eq!(lexed_specifiers(src), vec!["/libs/leaflet.js"]);
+    }
+
+    /// Mission §4 : grammaire fermée, ignoré délibérément (404 légitime au
+    /// runtime si enfreint), pas une erreur de ce lexer.
+    #[test]
+    fn lex_imports_dynamic_import_is_ignored() {
+        let src = "const mod = import('./lazy.js');";
+        assert!(lex(src).is_empty());
+    }
+
+    /// Hors grammaire v1 (documenté dans `lex_imports`), pas un oubli
+    /// silencieux : un import à but d'effet de bord seul, sans `from`.
+    #[test]
+    fn lex_imports_side_effect_import_without_from_is_ignored() {
+        let src = "import './polyfill.js';";
+        assert!(lex(src).is_empty());
+    }
+
+    /// Bug réel corrigé à la relecture : le chemin lui-même contient le
+    /// mot "from" — sans le correctif (sauter les chaînes rencontrées
+    /// avant tout `from` légitime), ce mot aurait été pris pour le
+    /// mot-clé, avec une extraction de chemin silencieusement fausse à la
+    /// clé.
+    #[test]
+    fn lex_imports_path_containing_the_word_from_is_still_ignored_without_real_from() {
+        let src = "import './from-server.js';\nimport { y } from './real.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./real.js"]);
+    }
+
+    #[test]
+    fn lex_imports_ignores_import_keyword_inside_line_comment() {
+        let src = "// import { x } from './ghost.js';\nimport { y } from './real.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./real.js"]);
+    }
+
+    #[test]
+    fn lex_imports_ignores_import_keyword_inside_block_comment() {
+        let src = "/* import { x } from './ghost.js'; */\nimport { y } from './real.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./real.js"]);
+    }
+
+    #[test]
+    fn lex_imports_ignores_import_keyword_inside_string() {
+        let src = "const s = \"import { x } from './ghost.js';\";\nimport { y } from './real.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./real.js"]);
+    }
+
+    /// Limite connue et assumée (documentée sur `lex_imports`) : un
+    /// gabarit est une région opaque, pas d'interpolation `${...}`
+    /// analysée. Ce test prouve seulement que l'opacité fonctionne, pas
+    /// qu'une interpolation serait gérée.
+    #[test]
+    fn lex_imports_skips_template_literal_as_opaque() {
+        let src = "const s = `import fake from './ghost.js'`;\nimport { y } from './real.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./real.js"]);
+    }
+
+    #[test]
+    fn lex_imports_multiple_statements_in_order() {
+        let src = "import a from './a.js';\nimport b from './b.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./a.js", "./b.js"]);
+    }
+
+    #[test]
+    fn lex_imports_unterminated_string_is_an_error() {
+        assert!(lex_imports(b"import x from './a.js", Path::new("test.js")).is_err());
+    }
+
+    #[test]
+    fn lex_imports_unterminated_block_comment_is_an_error() {
+        assert!(lex_imports(b"/* never closed", Path::new("test.js")).is_err());
+    }
+
+    // ── topological_order_leaves_first (Phase 7) ─────────────────────────────
+
+    /// Construit une arène minimale à partir d'une liste d'arêtes
+    /// `Module` (pas de vrai fichier, pas de vrai lexer) — suffisant pour
+    /// tester le tri topologique isolément de l'exploration disque.
+    fn arena_from_edges(edges: &[&[usize]]) -> Vec<JsModule> {
+        edges
+            .iter()
+            .enumerate()
+            .map(|(i, deps)| JsModule {
+                path: PathBuf::from(format!("mod{i}.js")),
+                source: String::new(),
+                imports: deps
+                    .iter()
+                    .map(|&d| ImportEdge {
+                        span: (0, 0),
+                        target: ImportTarget::Module(d),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn topological_order_linear_chain_leaves_first() {
+        // 0 importe 1, 1 importe 2 : ordre attendu 2, 1, 0 (feuille d'abord).
+        let arena = arena_from_edges(&[&[1], &[2], &[]]);
+        assert_eq!(
+            topological_order_leaves_first(&arena).unwrap(),
+            vec![2, 1, 0]
+        );
+    }
+
+    #[test]
+    fn topological_order_diamond_dependency_processes_shared_leaf_once() {
+        // 0 importe 1 et 2 ; 1 et 2 importent tous deux 3 (diamant).
+        let arena = arena_from_edges(&[&[1, 2], &[3], &[3], &[]]);
+        let order = topological_order_leaves_first(&arena).unwrap();
+        assert_eq!(order.len(), 4);
+        // 3 doit précéder 1 et 2, qui doivent tous deux précéder 0.
+        let pos = |i: usize| order.iter().position(|&x| x == i).unwrap();
+        assert!(pos(3) < pos(1));
+        assert!(pos(3) < pos(2));
+        assert!(pos(1) < pos(0));
+        assert!(pos(2) < pos(0));
+    }
+
+    /// Mission §3 : un cycle doit être une erreur fatale immédiate.
+    #[test]
+    fn topological_order_detects_cycle() {
+        let arena = arena_from_edges(&[&[1], &[0]]); // 0 -> 1 -> 0
+        assert!(topological_order_leaves_first(&arena).is_err());
+    }
+
+    #[test]
+    fn topological_order_empty_arena_is_empty_order() {
+        let arena: Vec<JsModule> = Vec::new();
+        assert_eq!(
+            topological_order_leaves_first(&arena).unwrap(),
+            Vec::<usize>::new()
+        );
+    }
+
+    // ── run_scripts_pipeline — intégration bout-en-bout (Phase 7) ────────────
+    //
+    // Reprend le scaffolding exact fourni en session : deux cibles
+    // (`main`, `more`), un import relatif intra-thème (`navigation.js`) et
+    // un import non-relatif vers une ressource verbatim déjà hachée
+    // (`/libs/leaflet.js`).
+
+    #[test]
+    fn run_scripts_pipeline_resolves_relative_and_external_imports() {
+        let sandbox = std::env::temp_dir().join("marius-assets-test-scripts-ok");
+        let theme_dir = sandbox.join("theme");
+        let build_root = sandbox.join("build");
+        let main_dir = theme_dir.join("scripts/development/main");
+        let more_dir = theme_dir.join("scripts/development/more");
+        fs::create_dir_all(&main_dir).unwrap();
+        fs::create_dir_all(&more_dir).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        fs::write(
+            main_dir.join("navigation.js"),
+            "export const initNavigation = () => { console.log(\"Nav\"); };",
+        )
+        .unwrap();
+        fs::write(
+            main_dir.join("index.js"),
+            "import { initNavigation } from './navigation.js';\ninitNavigation();",
+        )
+        .unwrap();
+        fs::write(
+            more_dir.join("index.js"),
+            "// /libs/leaflet.js est une ressource [static.verbatim] hachée en amont.\n\
+             import L from '/libs/leaflet.js';",
+        )
+        .unwrap();
+
+        let mut registry = AssetUrlRegistry::new();
+        registry.insert(
+            "leaflet.js".to_string(),
+            "/libs/leaflet.9f8e7.js".to_string(),
+        );
+
+        let mut components = HashMap::new();
+        components.insert(
+            "main".to_string(),
+            "scripts/development/main/index.js".to_string(),
+        );
+        components.insert(
+            "more".to_string(),
+            "scripts/development/more/index.js".to_string(),
+        );
+
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+
+        run_scripts_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &components,
+            &registry,
+            &mut manifest,
+        )
+        .unwrap();
+
+        // Seules les cibles logiques entrent dans le manifeste — jamais
+        // navigation.js, artefact de build intermédiaire.
+        assert!(manifest.contains_key("main.js"));
+        assert!(manifest.contains_key("more.js"));
+        assert!(!manifest.contains_key("navigation.js"));
+
+        let main_url = &manifest["main.js"].url;
+        let main_filename = Path::new(main_url).file_name().unwrap();
+        let main_written =
+            fs::read_to_string(build_root.join("scripts").join(main_filename)).unwrap();
+
+        // L'import relatif doit pointer vers l'URL hachée RÉELLE de
+        // navigation.js — pas vers './navigation.js' ni vers un
+        // placeholder : on retrouve son hash effectif en resolvant depuis
+        // le même dossier scripts/ produit par CE run.
+        assert!(!main_written.contains("./navigation.js"));
+        assert!(main_written.contains("initNavigation();"));
+
+        let more_url = &manifest["more.js"].url;
+        let more_filename = Path::new(more_url).file_name().unwrap();
+        let more_written =
+            fs::read_to_string(build_root.join("scripts").join(more_filename)).unwrap();
+
+        // L'import non-relatif est réécrit vers l'URL exacte du registre.
+        assert!(more_written.contains("/libs/leaflet.9f8e7.js"));
+        assert!(!more_written.contains("/libs/leaflet.js'"));
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    /// Fail-hard (même politique que CSS/webmanifest) : un import
+    /// non-relatif absent du registre doit faire échouer tout le
+    /// pipeline.
+    #[test]
+    fn run_scripts_pipeline_fails_hard_on_missing_external_asset() {
+        let sandbox = std::env::temp_dir().join("marius-assets-test-scripts-missing");
+        let theme_dir = sandbox.join("theme");
+        let build_root = sandbox.join("build");
+        let dir = theme_dir.join("scripts/development/main");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        fs::write(dir.join("index.js"), "import L from '/libs/leaflet.js';").unwrap();
+
+        let registry = AssetUrlRegistry::new(); // vide : rien à trouver
+        let mut components = HashMap::new();
+        components.insert(
+            "main".to_string(),
+            "scripts/development/main/index.js".to_string(),
+        );
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+
+        let result = run_scripts_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &components,
+            &registry,
+            &mut manifest,
+        );
+        assert!(result.is_err());
+        assert!(manifest.is_empty());
+
+        let _ = fs::remove_dir_all(&sandbox);
     }
 }

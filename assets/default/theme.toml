@@ -17,14 +17,17 @@ entries = ["styles/development/main.mcss", "styles/development/print.mcss"]
 # Dictionnaire (HashMap) : Cible -> Dossier Source.
 # Spécification §10.4.1 : un dossier = une cible de concaténation.
 # Le compilateur concatène le contenu du dossier et génère /scripts/<cible>.<hash>.js.
-main = "scripts/development/main"
-more = "scripts/development/more"
+main = "scripts/development/index.js"
+map = "scripts/development/map.js"
 
 [sprites]
 # Dictionnaire (HashMap) : Nom du Sprite -> Dossier Source.
 # Spécification §10.2 : SVG groupés dans un fichier `<cible>.<hash>.svg`.
 utils = "sprites/utils"
 players = "sprites/players"
+
+[webmanifest]
+entry = "manifest.webmanifest"
 
 # ==========================================
 # Pipelines de copie (Zéro-Transformation)
@@ -34,15 +37,17 @@ players = "sprites/players"
 # Fichiers copiés bit-à-bit vers le build (favicons, polices, libs vendored).
 # Le compilateur préserve le type MIME et applique le hash, sans toucher au contenu.
 files = [
-    "app.webmanifest",
     "favicons/favicon.ico",
     "favicons/favicon.svg",
-    "favicons/favicon.png",
     "favicons/apple-touch-icon.png",
-    "favicons/safari-pinned-tab.svg",
+    "favicons/logoAny.svg",
+    "favicons/logo192.png",
+    "favicons/logo512.png",
     "fonts/notoSans-Regular.woff2",
     "fonts/notoSerif-Regular.woff2",
+    "sprites/filter.svg",
     "sprites/silos/195v.svg",
     "images/logo.svg",
+    "libraries/leaflet/leaflet.js",
     # "libraries/htmx.min.js",
 ]

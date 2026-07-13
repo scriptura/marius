@@ -15,6 +15,13 @@ path = "src/main.rs"
 # indépendant, pas une dépendance du workspace runtime.
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# Pipeline [webmanifest] Phase 6 — mutation ciblée d'un arbre JSON
+# générique (icons[].src), reste du document préservé intact. Vérifié sur
+# crates.io le jour de cette session : série 1.x stable depuis des années
+# (1.0.150 au moment de l'écriture), pas d'épinglage particulier nécessaire
+# — contrairement à `lightningcss` plus bas, ce n'est pas un crate en
+# alpha perpétuelle.
+serde_json = "1"
 # Hachage de contenu pour le cache-busting des URLs publiques (§9 de la
 # spec marius-assets). Aucune dépendance cryptographique plus lourde
 # n'est nécessaire : BLAKE3 est déjà le choix acté ailleurs dans Marius

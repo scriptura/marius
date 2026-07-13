@@ -25,10 +25,21 @@ use marius_db_forge::{
 };
 
 use marius_fragment_forge::{
-    AssetLookup, PageArena, SchemaIndex, TemplateMetrics, VarlenField, collect_blocks,
-    collect_static_refs, detect_extends, generate_aot_snippet, link, lower, parse_page_tokens,
-    parse_tokens, relative_path_for_include_str, resolve_and_measure, scan, validate_ast,
+    AssetLookup, FlatPageToken, PageArena, SchemaIndex, TemplateMetrics, VarlenField,
+    collect_blocks, collect_static_refs, detect_extends, generate_aot_snippet,
+    hoist_and_dedupe_scripts, link, lower, parse_page_tokens, parse_tokens,
+    relative_path_for_include_str, resolve_and_measure, scan, splice_hoisted_scripts, validate_ast,
 };
+
+/// Marqueur textuel du point d'injection des `<script>` hissés — décision
+/// actée en session : pas de nouveau token dans l'AST gelé de
+/// `fragment-forge`, une simple constante de chaîne recherchée comme
+/// SOUS-CHAÎNE parmi les `FlatPageToken::Static` du layout PARENT (Mode
+/// Page), après `lower`. Un commentaire HTML, jamais interprété par ce
+/// moteur de template (`{% %}`/`{{ }}` sont les seules syntaxes actives) :
+/// à écrire tel quel dans le `<head>` du layout de base, où les scripts
+/// doivent apparaître.
+const SCRIPTS_PLACEHOLDER: &str = "<!--MARIUS_SCRIPTS-->";
 
 // =============================================================================
 // Manifeste d'assets — marius-assets-specification.md §7, Roadmap §1.4 (clos).
@@ -399,6 +410,126 @@ fn read_template_file(path: &Path) -> Result<String, ()> {
     })
 }
 
+/// Cherche `marker` comme SOUS-CHAÎNE d'un `FlatPageToken::Static` du flux
+/// — pas une correspondance de token entier : en pratique, le marqueur est
+/// noyé dans un bloc HTML statique plus large (`<head>...<!--MARIUS_
+/// SCRIPTS-->...</head>` forme un seul `Static` tant qu'aucune directive
+/// `{% %}`/`{{ }}` ne le coupe). Si trouvé, scinde ce token en (avant,
+/// après) — en omettant la moitié vide s'il y en a une (le marqueur en
+/// tout début ou toute fin de bloc ne doit pas produire un `Static("")`
+/// inutile — pas une simplification cosmétique : `generate_aot_snippet`
+/// émettrait un `buf.push_str("")` mort dans le code généré, un `Static`
+/// vide n'a aucune raison structurelle d'exister dans ce flux.
+///
+/// Retourne `(flux_modifié, indice_où_insérer_le_bloc_de_scripts)` — cet
+/// indice tombe exactement entre les deux moitiés, prêt pour
+/// `splice_hoisted_scripts`. `None` si le marqueur n'apparaît dans aucun
+/// `Static` du flux.
+fn split_static_at_marker<'src>(
+    mut tokens: Vec<FlatPageToken<'src>>,
+    marker: &str,
+) -> Option<(Vec<FlatPageToken<'src>>, usize)> {
+    let (index, pos) = tokens.iter().enumerate().find_map(|(i, t)| match t {
+        FlatPageToken::Static(s) => s.find(marker).map(|pos| (i, pos)),
+        _ => None,
+    })?;
+
+    let mut tail = tokens.split_off(index + 1);
+    let marked = tokens
+        .pop()
+        .expect("index provient de tokens.iter(), non vide ici");
+    let full = match marked {
+        FlatPageToken::Static(s) => s,
+        _ => unreachable!("le filtre ci-dessus ne retient que des Static"),
+    };
+    let before = &full[..pos];
+    let after = &full[pos + marker.len()..];
+
+    if !before.is_empty() {
+        tokens.push(FlatPageToken::Static(before));
+    }
+    let splice_index = tokens.len();
+    if !after.is_empty() {
+        tokens.push(FlatPageToken::Static(after));
+    }
+    tokens.append(&mut tail);
+
+    Some((tokens, splice_index))
+}
+
+#[cfg(test)]
+mod tests_split_static_at_marker {
+    use super::split_static_at_marker;
+    use marius_fragment_forge::FlatPageToken;
+
+    #[test]
+    fn marker_embedded_in_larger_static_splits_around_it() {
+        let tokens = vec![FlatPageToken::Static(
+            "<head><title>x</title><!--MARIUS_SCRIPTS--></head>",
+        )];
+
+        let (result, splice_index) =
+            split_static_at_marker(tokens, "<!--MARIUS_SCRIPTS-->").unwrap();
+
+        assert_eq!(
+            result,
+            vec![
+                FlatPageToken::Static("<head><title>x</title>"),
+                FlatPageToken::Static("</head>"),
+            ]
+        );
+        assert_eq!(splice_index, 1); // entre les deux moitiés
+    }
+
+    /// Pas de `Static("")` mort dans le flux quand le marqueur est en
+    /// tout début ou toute fin d'un bloc — voir doc de la fonction.
+    #[test]
+    fn marker_at_start_omits_empty_before_half() {
+        let tokens = vec![FlatPageToken::Static("<!--MARIUS_SCRIPTS--></head>")];
+        let (result, splice_index) =
+            split_static_at_marker(tokens, "<!--MARIUS_SCRIPTS-->").unwrap();
+        assert_eq!(result, vec![FlatPageToken::Static("</head>")]);
+        assert_eq!(splice_index, 0);
+    }
+
+    #[test]
+    fn marker_at_end_omits_empty_after_half() {
+        let tokens = vec![FlatPageToken::Static("<head><!--MARIUS_SCRIPTS-->")];
+        let (result, splice_index) =
+            split_static_at_marker(tokens, "<!--MARIUS_SCRIPTS-->").unwrap();
+        assert_eq!(result, vec![FlatPageToken::Static("<head>")]);
+        assert_eq!(splice_index, 1);
+    }
+
+    #[test]
+    fn preserves_tokens_before_and_after_the_marked_one() {
+        let tokens = vec![
+            FlatPageToken::Static("<head>"),
+            FlatPageToken::Static("<title>x</title><!--MARIUS_SCRIPTS-->"),
+            FlatPageToken::Static("</head><body>"),
+        ];
+
+        let (result, splice_index) =
+            split_static_at_marker(tokens, "<!--MARIUS_SCRIPTS-->").unwrap();
+
+        assert_eq!(
+            result,
+            vec![
+                FlatPageToken::Static("<head>"),
+                FlatPageToken::Static("<title>x</title>"),
+                FlatPageToken::Static("</head><body>"),
+            ]
+        );
+        assert_eq!(splice_index, 2);
+    }
+
+    #[test]
+    fn marker_absent_returns_none() {
+        let tokens = vec![FlatPageToken::Static("<head></head>")];
+        assert!(split_static_at_marker(tokens, "<!--MARIUS_SCRIPTS-->").is_none());
+    }
+}
+
 /// Sous-orchestration Mode Page — pipeline complet : E/S parent, garde
 /// single-level, admission en arène, `LinkPlan`, Lowering, jonction avec le
 /// pipeline gelé (`validate_ast` → `resolve_and_measure` →
@@ -522,7 +653,7 @@ fn resolve_page_template<'src>(
     // d'exister à partir d'ici. Fonction totale (pas de `Result`) : par
     // construction, `plan` provient d'un `link` réussi, donc toute
     // référence de composition est déjà résolue.
-    let mut tokens = lower(&arena.get(parent_id).tokens, &plan, &arena);
+    let tokens = lower(&arena.get(parent_id).tokens, &plan, &arena);
 
     // Point de jonction unique (Document 3 §2) : à partir d'ici, identique
     // au chemin Mode Fragment de `resolve_template` — mêmes fonctions,
@@ -532,6 +663,38 @@ fn resolve_page_template<'src>(
             "cargo:error=DB-Forge [{schema}.{table}] : Mode Page sémantiquement invalide : {errors:?}"
         );
     })?;
+
+    // Hoisting + déduplication des <script> (session dédiée, révisée :
+    // capture de bloc {% script %}/{% endscript %}, plus une simple clé
+    // AssetRef) — exécuté APRÈS validate_ast : la passe de hoisting
+    // suppose un flux IfBool/EndIf ET ScriptStart/ScriptEnd bien formés,
+    // une garantie que seule validate_ast établit. Après validate_ast,
+    // jamais avant.
+    let (tokens, hoisted_blocks) = hoist_and_dedupe_scripts(tokens).map_err(|e| {
+        println!("cargo:error=DB-Forge [{schema}.{table}] : hoisting des scripts échoué : {e}");
+    })?;
+
+    let mut tokens = if hoisted_blocks.is_empty() {
+        // Rien à hisser — le marqueur, présent ou non dans le layout,
+        // n'exige aucun traitement : s'il est là sans jamais être utilisé,
+        // il reste un commentaire HTML inoffensif dans la sortie.
+        tokens
+    } else {
+        match split_static_at_marker(tokens, SCRIPTS_PLACEHOLDER) {
+            Some((tokens, splice_index)) => {
+                splice_hoisted_scripts(tokens, &hoisted_blocks, splice_index)
+            }
+            None => {
+                println!(
+                    "cargo:error=DB-Forge [{schema}.{table}] : {} bloc(s) {{% script %}} à \
+                     hisser mais aucun marqueur {SCRIPTS_PLACEHOLDER} trouvé dans le layout {}",
+                    hoisted_blocks.len(),
+                    parent_path.display()
+                );
+                return Err(());
+            }
+        }
+    };
 
     let schema_index = SchemaIndex { fixed, varlena };
 
