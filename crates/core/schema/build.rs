@@ -39,7 +39,7 @@ use marius_fragment_forge::{
 /// moteur de template (`{% %}`/`{{ }}` sont les seules syntaxes actives) :
 /// à écrire tel quel dans le `<head>` du layout de base, où les scripts
 /// doivent apparaître.
-const SCRIPTS_PLACEHOLDER: &str = "<!--MARIUS_SCRIPTS-->";
+const SCRIPTS_PLACEHOLDER: &str = "<!-- MARIUS_SCRIPTS -->";
 
 // =============================================================================
 // Manifeste d'assets — marius-assets-specification.md §7, Roadmap §1.4 (clos).
@@ -465,11 +465,11 @@ mod tests_split_static_at_marker {
     #[test]
     fn marker_embedded_in_larger_static_splits_around_it() {
         let tokens = vec![FlatPageToken::Static(
-            "<head><title>x</title><!--MARIUS_SCRIPTS--></head>",
+            "<head><title>x</title><!-- MARIUS_SCRIPTS --></head>",
         )];
 
         let (result, splice_index) =
-            split_static_at_marker(tokens, "<!--MARIUS_SCRIPTS-->").unwrap();
+            split_static_at_marker(tokens, "<!-- MARIUS_SCRIPTS -->").unwrap();
 
         assert_eq!(
             result,
@@ -485,18 +485,18 @@ mod tests_split_static_at_marker {
     /// tout début ou toute fin d'un bloc — voir doc de la fonction.
     #[test]
     fn marker_at_start_omits_empty_before_half() {
-        let tokens = vec![FlatPageToken::Static("<!--MARIUS_SCRIPTS--></head>")];
+        let tokens = vec![FlatPageToken::Static("<!-- MARIUS_SCRIPTS --></head>")];
         let (result, splice_index) =
-            split_static_at_marker(tokens, "<!--MARIUS_SCRIPTS-->").unwrap();
+            split_static_at_marker(tokens, "<!-- MARIUS_SCRIPTS -->").unwrap();
         assert_eq!(result, vec![FlatPageToken::Static("</head>")]);
         assert_eq!(splice_index, 0);
     }
 
     #[test]
     fn marker_at_end_omits_empty_after_half() {
-        let tokens = vec![FlatPageToken::Static("<head><!--MARIUS_SCRIPTS-->")];
+        let tokens = vec![FlatPageToken::Static("<head><!-- MARIUS_SCRIPTS -->")];
         let (result, splice_index) =
-            split_static_at_marker(tokens, "<!--MARIUS_SCRIPTS-->").unwrap();
+            split_static_at_marker(tokens, "<!-- MARIUS_SCRIPTS -->").unwrap();
         assert_eq!(result, vec![FlatPageToken::Static("<head>")]);
         assert_eq!(splice_index, 1);
     }
@@ -505,12 +505,12 @@ mod tests_split_static_at_marker {
     fn preserves_tokens_before_and_after_the_marked_one() {
         let tokens = vec![
             FlatPageToken::Static("<head>"),
-            FlatPageToken::Static("<title>x</title><!--MARIUS_SCRIPTS-->"),
+            FlatPageToken::Static("<title>x</title><!-- MARIUS_SCRIPTS -->"),
             FlatPageToken::Static("</head><body>"),
         ];
 
         let (result, splice_index) =
-            split_static_at_marker(tokens, "<!--MARIUS_SCRIPTS-->").unwrap();
+            split_static_at_marker(tokens, "<!-- MARIUS_SCRIPTS -->").unwrap();
 
         assert_eq!(
             result,
@@ -526,7 +526,7 @@ mod tests_split_static_at_marker {
     #[test]
     fn marker_absent_returns_none() {
         let tokens = vec![FlatPageToken::Static("<head></head>")];
-        assert!(split_static_at_marker(tokens, "<!--MARIUS_SCRIPTS-->").is_none());
+        assert!(split_static_at_marker(tokens, "<!-- MARIUS_SCRIPTS -->").is_none());
     }
 }
 

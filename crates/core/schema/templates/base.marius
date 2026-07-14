@@ -15,7 +15,7 @@
         <link rel="shortcut icon" href="{% asset favicon.ico %}">
         <link rel="apple-touch-icon" sizes="180x180" href="{% asset apple-touch-icon.png %}">
         {% script %}<script src="{% asset main.js %}" type="module"></script>{% endscript %}
-        <!--MARIUS_SCRIPTS-->
+        <!-- MARIUS_SCRIPTS -->
     </head>
     <body>
         <a class="sr-only" href="#main">Aller au contenu</a>
