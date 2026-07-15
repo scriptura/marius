@@ -15,14 +15,14 @@
   box-shadow: var(--shadow1);
   gap: 0 1em;
 
-  @media (--to-xs) {
+  @media ($to-xs) {
     grid-template-columns: minmax(0, 1fr) 2em;
-    grid-template-areas: 'ttt ttt' 'uuu aaa';
+    grid-template-areas: "ttt ttt" "uuu aaa";
   }
 
-  @media (--from-xs) {
+  @media ($from-xs) {
     grid-template-columns: 4em minmax(0, 1fr);
-    grid-template-areas: 'aaa ttt' 'aaa uuu';
+    grid-template-areas: "aaa ttt" "aaa uuu";
   }
 
   & .topic-link {
@@ -128,7 +128,7 @@
   position: relative;
   margin: auto;
 
-  @media (--to-xs) {
+  @media ($to-xs) {
     /* @note Valeur obtenue de manière un peu empirique, liée à la propriété font-size définie ci après. */
     margin-block-end: 2em;
     font-size: 0.5em;
@@ -138,7 +138,7 @@
   & > * {
     width: 3.5em;
     height: 3.5em;
-    background-image: var(--img, '');
+    background-image: var(--img, "");
     background-color: var(--colorG13);
     background-size: cover;
     border-radius: 50%;

@@ -1,5 +1,8 @@
 /* Dictionnaire des macros de configuration globale (media queries level 5) */
 
+/* @custom-media est intéressant à terme, mais non encore supporté par les navigateurs,
+ * et de toute façon non supporté par @container, uniquement par @media. */
+
 /* Vecteurs ascendants (Mobile First) */
 /*
 @custom-media --from-xs (width > 35em);

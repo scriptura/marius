@@ -18,7 +18,7 @@
   }
 
   & > :where(.comment, form) {
-    @media (--from-s) {
+    @media ($from-s) {
       &:nth-child(even) {
         /* @note Limitation à 2 rangées car impression visuelle d'un désordre à partir de 3 rangées. */
         margin-inline-start: auto;
@@ -27,32 +27,32 @@
   }
 
   & > :where(.wrapper, .comment) {
-    @media (--from-xs) {
+    @media ($from-xs) {
       border-radius: var(--r1);
       box-shadow: var(--shadow3);
     }
   }
 
   & > .wrapper {
-    @media (--to-xs) {
+    @media ($to-xs) {
       padding-block-start: 1em;
     }
 
-    @media (--from-xs-to-s) {
+    @media ($from-xs-to-s) {
       padding: 4em;
     }
 
-    @media (--from-s) {
+    @media ($from-s) {
       padding: 4em 6em;
     }
   }
 
   & > .comment {
-    @media (--from-xs-to-s) {
+    @media ($from-xs-to-s) {
       padding: 2.5em 4em;
     }
 
-    @media (--from-s) {
+    @media ($from-s) {
       padding: 4em 6em 2.5em;
     }
   }
@@ -61,7 +61,7 @@
   & .comment header {
     display: grid;
     grid-template-columns: 3.5em minmax(0, 1fr);
-    grid-template-areas: 'aa tt' 'aa uu';
+    grid-template-areas: "aa tt" "aa uu";
   }
 
   & .comment header {
@@ -79,7 +79,7 @@
     position: relative;
     width: 100%;
 
-    @media (--to-xs) {
+    @media ($to-xs) {
       padding-block: var(--gap);
     }
   }
@@ -91,7 +91,7 @@
     grid-area: aa;
     width: 3em;
     aspect-ratio: 1;
-    background: var(--colorG13) var(--img, '');
+    background: var(--colorG13) var(--img, "");
     background-size: cover;
     border-radius: 50%;
   }
@@ -164,23 +164,23 @@
     gap: var(--gap);
     max-width: 55em;
 
-    @media (--from-xs-to-s) {
+    @media ($from-xs-to-s) {
       padding-inline: 4em;
     }
 
-    @media (--from-s) {
+    @media ($from-s) {
       padding-inline: 6em;
     }
   }
 
-  @media (--to-xs) {
+  @media ($to-xs) {
     & .wrapper {
       margin-block-start: calc(var(--gap) * -1);
     }
   }
 }
 
-@media (--from-xs) {
+@media ($from-xs) {
   .boxx {
     padding: 4em 6em;
     border-radius: var(--r1);

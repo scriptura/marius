@@ -1,11 +1,11 @@
-@media (--to-s) {
+@media ($to-s) {
   .line-mark {
     /* @note Un match media javascript peutconditionner le script, mais cette solution est moins modulable et surtout moins robuste que la solution CSS. */
     display: none;
   }
 }
 
-@media (--from-s) {
+@media ($from-s) {
   .add-line-marks > * {
     position: relative;
   }
@@ -34,11 +34,11 @@
     }
 
     &::before {
-      content: '- ';
+      content: "- ";
     }
 
     &::after {
-      content: ' -';
+      content: " -";
     }
   }
 

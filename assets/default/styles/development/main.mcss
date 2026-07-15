@@ -7,6 +7,7 @@
 
 /* 1. COUCHE TOKENS (Variables de Runtime & Déclarations de ressources) */
 /* Ingestion globale (Hors-couche pour résolution globale par l'AST) */
+@import "media.mcss";
 @import "variable.mcss";
 @import "font.mcss" layer(tokens);
 

@@ -43,7 +43,7 @@ figure {
   margin: 0;
 }
 
-[class*='figure-image'] {
+[class*="figure-image"] {
   width: 100%;
   padding: 0.5em;
   color: var(--colorT);
@@ -51,21 +51,21 @@ figure {
   box-shadow: var(--shadow5);
   user-select: none;
 
-  &[class*='-thumbnail'] {
+  &[class*="-thumbnail"] {
     /* @note Important à appliquer pour le responsive si le width n'est pas définit préalablement. */
     width: 100%;
     max-width: calc(50% - var(--gap) / 2);
 
-    @media (--to-s) {
+    @media ($to-s) {
       max-width: 20em;
       margin-inline: auto;
     }
   }
 
-  &[class*='-rounded'] {
+  &[class*="-rounded"] {
     border-radius: 50%;
 
-    &[class*='-focus'] button {
+    &[class*="-focus"] button {
       display: none;
     }
 
@@ -76,22 +76,23 @@ figure {
     }
   }
 
-  @media (--from-s) {
-    &[class*='-alignleft'] {
+  @media ($from-s) {
+    &[class*="-alignleft"] {
       float: left;
       margin-inline-end: var(--gap);
     }
 
-    &[class*='-alignright'] {
+    &[class*="-alignright"] {
       float: right;
       margin-inline-start: var(--gap);
     }
 
-    &:where([class*='-alignleft'], [class*='-alignright']) ~ :where(h2, h3, hr, aside) {
+    &:where([class*="-alignleft"], [class*="-alignright"])
+      ~ :where(h2, h3, hr, aside) {
       clear: both;
     }
 
-    &:where([class*='-alignleft'], [class*='-alignright']) + hr {
+    &:where([class*="-alignleft"], [class*="-alignright"]) + hr {
       /* @todo Solution temporaire à réévaluer */
       padding-block-start: 2em;
     }
@@ -103,7 +104,7 @@ figure {
 }
 
 @media (scripting: enabled) {
-  [class*='-focus'] {
+  [class*="-focus"] {
     position: relative;
     /* @note Évite un conflit avec d'autres éléments HTML positionnés en relatifs dans la mise en page, tel que les ancres line-mark. */
     z-index: 1;
@@ -116,7 +117,7 @@ figure {
   }
 }
 @media (hover: hover) and (pointer: fine) {
-  [class*='-focus']:focus-within {
+  [class*="-focus"]:focus-within {
     background-color: var(--color5);
 
     & button {
@@ -125,7 +126,7 @@ figure {
   }
 }
 
-[class*='-focus'] button,
+[class*="-focus"] button,
 .picture-area button {
   all: unset;
   position: absolute;
@@ -140,7 +141,7 @@ figure {
   }
 }
 
-[class*='-focus'] button {
+[class*="-focus"] button {
   top: 1em;
   right: 1em;
   width: 1.2em;
@@ -201,7 +202,7 @@ figure {
     padding: 0.2em;
     transition: background-color 0.2s ease-in-out;
 
-    &:has([src$='.svg']) {
+    &:has([src$=".svg"]) {
       padding: 1em;
     }
   }
@@ -211,7 +212,7 @@ figure {
     aspect-ratio: 1/1;
     object-fit: cover;
 
-    &[src$='.svg'] {
+    &[src$=".svg"] {
       object-fit: contain;
     }
   }
@@ -228,11 +229,11 @@ figure {
   display: grid;
   background-color: #222;
 
-  &:has([src$='.svg']) {
+  &:has([src$=".svg"]) {
     padding: 2em;
   }
 
-  &[data-input-id='input-file'] {
+  &[data-input-id="input-file"] {
     /* @todo A supprimer si l'on change la manière d'afficher l'image dans `/media-editor/:id` */
     cursor: pointer;
   }
@@ -252,7 +253,7 @@ figure {
     object-fit: contain;
   }
 
-  @media (--to-s) {
+  @media ($to-s) {
     &,
     & img {
       max-width: 20em;

@@ -213,8 +213,7 @@ fn mime_for_extension(ext: &str) -> &'static str {
 }
 
 // =============================================================================
-// Hachage — BLAKE3, 5 premiers caractères hex pour le suffixe de nom de
-// fichier (convention déjà en production — cf. main.a81f9.css observé).
+// Hachage — BLAKE3, 5 premiers caractères hex pour le suffixe de nom de fichier.
 // Le hash complet (64 caractères) est conservé dans le manifeste (§7).
 // =============================================================================
 
@@ -509,9 +508,55 @@ fn serialize_start(
     Ok(out)
 }
 
+/// Extrait la valeur de l'attribut `viewBox` de la balise racine `<svg>`
+/// source, si présent.
+///
+/// Correctif pipeline sprites : la racine `<svg>` est entièrement purgée
+/// au profit de `<symbol>` (cf. doc de `svg_file_to_symbol`), mais son
+/// `viewBox` porte le système de coordonnées interne du dessin — sans
+/// lui, un `<use>` référençant ce symbole retombe sur les dimensions par
+/// défaut du navigateur (300×150) au lieu du repère `0 0 W H` d'origine.
+/// Seul cet attribut est reporté ; le reste de la racine (`width`,
+/// `height`, `xmlns` du fragment, etc.) reste volontairement perdu — ces
+/// dimensions-là sont dictées par le contexte d'utilisation du symbole
+/// (CSS), pas par le fichier source.
+///
+/// Nom d'attribut sensible à la casse (XML) : uniquement `viewBox`
+/// (camelCase exact) — `viewbox` ou `VIEWBOX` ne matcheraient pas, ce
+/// qui est correct : ce ne serait de toute façon pas l'attribut SVG
+/// standard.
+fn extract_view_box(e: &quick_xml::events::BytesStart) -> Result<Option<String>, SpriteError> {
+    for attr in e.attributes() {
+        let attr = attr.map_err(|err| SpriteError(format!("attribut XML invalide : {err}")))?;
+        if attr.key.as_ref() == b"viewBox" {
+            return Ok(Some(
+                String::from_utf8_lossy(attr.value.as_ref()).into_owned(),
+            ));
+        }
+    }
+    Ok(None)
+}
+
+/// Construit l'étiquette d'ouverture `<symbol id="...">`, avec `viewBox`
+/// reporté si la racine source en portait un.
+fn build_symbol_header(id: &str, view_box: Option<&str>) -> String {
+    let mut out = String::new();
+    out.push_str("<symbol id=\"");
+    out.push_str(id);
+    out.push('"');
+    if let Some(vb) = view_box {
+        out.push_str(" viewBox=\"");
+        out.push_str(vb);
+        out.push('"');
+    }
+    out.push('>');
+    out
+}
+
 /// Transforme un fichier SVG source en `<symbol id="...">...</symbol>` —
 /// entêtes `<?xml...?>`/`<!DOCTYPE...>` ignorés, seul le contenu À
-/// L'INTÉRIEUR de la balise racine `<svg>` est conservé.
+/// L'INTÉRIEUR de la balise racine `<svg>` est conservé (plus son
+/// `viewBox`, reporté sur `<symbol>` lui-même, cf. `extract_view_box`).
 ///
 /// Suivi de profondeur : `depth` compte les éléments ouverts DEPUIS la
 /// racine (elle-même exclue — jamais incrémentée pour son propre `Start`).
@@ -521,9 +566,6 @@ fn serialize_start(
 fn svg_file_to_symbol(id: &str, source: &str) -> Result<String, SpriteError> {
     let mut reader = Reader::from_str(source);
     let mut out = String::new();
-    out.push_str("<symbol id=\"");
-    out.push_str(id);
-    out.push_str("\">");
 
     let mut root_found = false;
     let mut depth: u32 = 0;
@@ -541,6 +583,8 @@ fn svg_file_to_symbol(id: &str, source: &str) -> Result<String, SpriteError> {
                 if !root_found {
                     if e.local_name().as_ref() == b"svg" {
                         root_found = true;
+                        let view_box = extract_view_box(&e)?;
+                        out.push_str(&build_symbol_header(id, view_box.as_deref()));
                     } else {
                         return Err(SpriteError(format!(
                             "{id} : balise racine <svg> attendue, trouvé <{}>",
@@ -556,7 +600,12 @@ fn svg_file_to_symbol(id: &str, source: &str) -> Result<String, SpriteError> {
             Event::Empty(e) => {
                 if !root_found {
                     if e.local_name().as_ref() == b"svg" {
-                        // <svg ... /> — racine explicitement vide.
+                        // <svg ... /> — racine explicitement vide, mais son
+                        // éventuel viewBox reste sémantiquement valide : un
+                        // symbole vide n'est pas la même chose qu'un symbole
+                        // sans repère de coordonnées défini.
+                        let view_box = extract_view_box(&e)?;
+                        out.push_str(&build_symbol_header(id, view_box.as_deref()));
                         break;
                     }
                     return Err(SpriteError(format!(
@@ -1213,8 +1262,72 @@ fn extract_declarations(text: &str, registry: &mut VariableRegistry) {
         if name.is_empty() {
             continue;
         }
-        registry.insert(name.to_string(), value.trim().to_string());
+        let value = value.trim();
+        registry.insert(name.to_string(), strip_enclosing_parens(value));
     }
+}
+
+/// Dépouille un bloc parenthésé englobant sur la valeur brute d'une
+/// déclaration `$var` (Handoff §2 — décision actée : application
+/// systématique, pas de nouvelle syntaxe de déclaration). Permet
+/// d'écrire `$breakpoint: (35em < width <= 50em);` et de le référencer
+/// nu dans `@custom-media`/`@container` via `($breakpoint)`.
+///
+/// Sûr par absence de collision grammaticale réelle, pas seulement par
+/// fiabilité de l'algorithme de comptage : en CSS, une valeur qui
+/// commence *littéralement* par `(` — sans nom de fonction juste devant,
+/// donc ni `calc(`, ni `rgb(`, ni `repeat(`, ni aucune fonction CSS
+/// existante ou probable — n'a essentiellement qu'un seul emplacement
+/// légitime dans la grammaire : les conditions de feature-query. Aucune
+/// propriété CSS standard n'a de valeur parenthésée nue.
+///
+/// Un seul niveau de dépouillement, jamais récursif : `((a))` devient
+/// `(a)`, pas `a` — aucun cas d'usage fourni ne demande un double
+/// enrobage, ne pas résoudre un problème non posé.
+fn strip_enclosing_parens(value: &str) -> String {
+    if !(value.starts_with('(') && value.ends_with(')')) {
+        return value.to_string();
+    }
+    let bytes = value.as_bytes();
+    // Comptage de profondeur, même idiome que `find_matching_brace` : la
+    // profondeur ne doit retomber à 0 qu'au tout dernier caractère. Un
+    // retour à 0 avant la fin (`(a) + (b)`) signifie que la parenthèse
+    // ouvrante en tête et la parenthèse fermante en queue ne sont PAS
+    // appariées l'une à l'autre — ne pas strip dans ce cas, la valeur
+    // traverse inchangée (sans risque réel : ce cas n'a de toute façon
+    // jamais été rencontré dans les `.mcss` fournis à ce jour).
+    match find_matching_paren(bytes, 0) {
+        Some(close_idx) if close_idx == bytes.len() - 1 => {
+            // Sous-chaîne interne, parenthèses exclues, re-trim pour
+            // absorber un éventuel `( 35em < width <= 50em )` avec
+            // espaces internes.
+            value[1..close_idx].trim().to_string()
+        }
+        _ => value.to_string(),
+    }
+}
+
+/// Comptage de parenthèses — même principe que `find_matching_brace`
+/// (plus bas dans ce fichier) mais sur `(`/`)` au lieu de `{`/`}`.
+/// `open_pos` pointe sur la '(' d'ouverture ; retourne l'indice de la
+/// ')' fermante correspondante (profondeur 0).
+fn find_matching_paren(bytes: &[u8], open_pos: usize) -> Option<usize> {
+    let mut depth: i32 = 1;
+    let mut i = open_pos + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Extrait les cibles `@import "chemin";` (ou `@import url("chemin");`)
@@ -1609,13 +1722,23 @@ fn substitute_loop_variable(body: &str, var_name: &str, value: i64) -> String {
 struct MvarProvider {
     registry: VariableRegistry,
     outputs: Mutex<Vec<*mut String>>,
+    // §1.A — contenu de remplacement pour le fichier d'entrée exclusivement
+    // (chemin canonique + texte avec `@charset` déjà extrait par
+    // `transform_css` avant l'appel à `Bundler::bundle()`). `None` si le
+    // fichier d'entrée ne portait pas de `@charset` en tête — dans ce cas
+    // `read()` retombe sur la lecture disque normale, aucun comportement
+    // différent. Ne s'applique jamais aux imports (partials) : seule la
+    // clé `entry_path` peut matcher, cf. Handoff §1.A, "Ne pas chercher le
+    // @charset dans les fichiers importés".
+    entry_override: Option<(PathBuf, String)>,
 }
 
 impl MvarProvider {
-    fn new(registry: VariableRegistry) -> Self {
+    fn new(registry: VariableRegistry, entry_override: Option<(PathBuf, String)>) -> Self {
         MvarProvider {
             registry,
             outputs: Mutex::new(Vec::new()),
+            entry_override,
         }
     }
 }
@@ -1631,7 +1754,20 @@ impl SourceProvider for MvarProvider {
     type Error = MvarError;
 
     fn read<'a>(&'a self, file: &Path) -> Result<&'a str, Self::Error> {
-        let raw = fs::read_to_string(file)?;
+        // §1.A — seul le fichier d'entrée peut matcher `entry_override`
+        // (comparaison directe, sans canonicalisation : `file` est ici
+        // exactement le `Path` transmis à `Bundler::bundle()` lors du
+        // premier appel de ce cycle de bundling, donc bit-identique à la
+        // clé stockée — aucun risque de non-appariement par forme de
+        // chemin différente, contrairement à `walk_variable_graph` qui,
+        // lui, canonicalise explicitement pour dédupliquer un graphe
+        // d'imports). Les imports résolus par `resolve()` ci-dessous ne
+        // passeront jamais ce test, par construction : ce ne sont jamais
+        // le même `Path` que `entry_path`.
+        let raw = match &self.entry_override {
+            Some((entry, content)) if entry == file => content.clone(),
+            _ => fs::read_to_string(file)?,
+        };
         // Ordre impératif, trois étapes : purge des commentaires D'ABORD
         // (donnée morte éliminée avant que quoi que ce soit d'autre ne la
         // voie — voir "Phase 3 (préambule)" plus haut), déroulage des @for
@@ -1666,6 +1802,39 @@ impl Drop for MvarProvider {
         for ptr in self.outputs.lock().unwrap().iter() {
             drop(unsafe { Box::from_raw(*ptr) });
         }
+    }
+}
+
+/// Extrait un `@charset "...";` en tout début de fichier (Handoff §1.A).
+///
+/// Détection strictement alignée sur la contrainte W3C (octet 0 exact,
+/// aucun BOM/espace/commentaire avant) : après un simple `trim_start`
+/// (pas de recherche en profondeur), si le premier caractère non-blanc
+/// du fichier n'est pas littéralement `@charset`, ce n'est de toute
+/// façon pas un `@charset` valide au sens de la spec — dans ce cas
+/// aucune extraction n'a lieu, et le texte original est renvoyé
+/// inchangé (`None`, texte original).
+///
+/// Si trouvé : retourne `(Some(règle_avec_point_virgule), reste_du_texte)`.
+/// `@charset` est une règle simple, sans bloc imbriqué (`{`/`}` ou `(`/`)`)
+/// — un scan naïf du premier `;` suffit, pas besoin de comptage de
+/// profondeur ici (contrairement à `find_matching_brace`/
+/// `find_matching_paren` ailleurs dans ce fichier).
+fn extract_charset(text: &str) -> (Option<String>, String) {
+    let trimmed_start = text.trim_start();
+    if !trimmed_start.starts_with("@charset") {
+        return (None, text.to_string());
+    }
+    match trimmed_start.find(';') {
+        Some(semi_idx) => {
+            let rule = trimmed_start[..=semi_idx].to_string();
+            let remainder = trimmed_start[semi_idx + 1..].to_string();
+            (Some(rule), remainder)
+        }
+        // `@charset` sans `;` terminal : @-rule malformée. On ne
+        // spécialise rien — laisser `lightningcss` produire son propre
+        // diagnostic de parsing plutôt que de deviner une intention.
+        None => (None, text.to_string()),
     }
 }
 
@@ -1733,10 +1902,30 @@ fn transform_css(
     // lecture individuelle de chaque fichier).
     let var_registry = build_variable_registry(entry_path)?;
 
+    // §1.A — extraction du `@charset` du fichier d'entrée AVANT tout
+    // passage dans `Bundler`/`lightningcss`. Cause confirmée par lecture
+    // directe du source du crate (`lightningcss-1.0.0-alpha.71/src/parser.rs`,
+    // commentaire du mainteneur) : `@charset` est systématiquement
+    // supprimé par `rust-cssparser`, qu'il soit en tête de fichier ou
+    // ailleurs — aucun comportement interne de `lightningcss` à ce sujet
+    // n'est fiable, donc la solution retenue l'évite complètement en ne
+    // lui laissant jamais voir la règle. Réinjection en toute fin de
+    // cette fonction, en texte brut, avant le `Ok(...)` final.
+    let raw_entry = fs::read_to_string(entry_path).map_err(|e| {
+        format!(
+            "styles : lecture impossible du point d'entrée {} : {e}",
+            entry_path.display()
+        )
+    })?;
+    let (charset_rule, entry_without_charset) = extract_charset(&raw_entry);
+    let entry_override = charset_rule
+        .as_ref()
+        .map(|_| (entry_path.to_path_buf(), entry_without_charset));
+
     // Passe B — `Bundler` s'exécute normalement, mais chaque lecture de
     // fichier passe par `MvarProvider` : substitution + purge transparentes,
     // `Bundler` ne voit jamais un seul token `$`.
-    let provider = MvarProvider::new(var_registry);
+    let provider = MvarProvider::new(var_registry, entry_override);
     let parser_options = ParserOptions::default();
     let mut bundler = Bundler::new(&provider, None, parser_options);
     let mut stylesheet = bundler.bundle(entry_path).map_err(|e| {
@@ -1772,7 +1961,15 @@ fn transform_css(
             )
         })?;
 
-    Ok(result.code)
+    // §1.A — dernière étape : réinjection en tête, en texte brut, du
+    // `@charset` capturé plus haut. `lightningcss` ne l'a jamais vu, donc
+    // ne peut pas l'avoir supprimé ; il occupe ici l'octet 0 exact du
+    // fichier réellement écrit sur disque, conformément à la contrainte
+    // W3C.
+    match charset_rule {
+        Some(rule) => Ok(format!("{rule}{}", result.code)),
+        None => Ok(result.code),
+    }
 }
 
 fn run_styles_pipeline(
@@ -2864,6 +3061,41 @@ mod tests {
     fn svg_file_to_symbol_missing_svg_root_is_an_error() {
         let src = "<g><path/></g>";
         assert!(svg_file_to_symbol("icon", src).is_err());
+    }
+
+    /// Correctif pipeline sprites — le `viewBox` de la racine source doit
+    /// être reporté sur `<symbol>`, sinon le repère de coordonnées du
+    /// dessin est perdu et un `<use>` retombe sur les dimensions par
+    /// défaut du navigateur.
+    #[test]
+    fn svg_file_to_symbol_reports_view_box_from_start_root() {
+        let src = r#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><path d="M0 0"/></svg>"#;
+        let out = svg_file_to_symbol("ampersand", src).unwrap();
+        assert_eq!(
+            out,
+            r#"<symbol id="ampersand" viewBox="0 0 1024 1024"><path d="M0 0" /></symbol>"#
+        );
+    }
+
+    /// Même correctif, racine auto-fermante (`<svg ... />`) : un symbole
+    /// vide n'est pas la même chose qu'un symbole sans repère défini, le
+    /// viewBox doit survivre même sans contenu.
+    #[test]
+    fn svg_file_to_symbol_reports_view_box_from_empty_root() {
+        let src = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"/>"#;
+        let out = svg_file_to_symbol("empty", src).unwrap();
+        assert_eq!(out, r#"<symbol id="empty" viewBox="0 0 24 24"></symbol>"#);
+    }
+
+    /// Confirmation explicite de la non-régression : une racine sans
+    /// `viewBox` ne doit toujours rien ajouter (comportement des tests
+    /// existants ci-dessus, `xmlns` seul ne doit pas être confondu avec
+    /// `viewBox`).
+    #[test]
+    fn svg_file_to_symbol_omits_view_box_attribute_when_absent_from_source() {
+        let src = r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>"#;
+        let out = svg_file_to_symbol("icon", src).unwrap();
+        assert!(!out.contains("viewBox"));
     }
 
     // ── is_external_url (Phase 5, url() généralisée) ────────────────────────

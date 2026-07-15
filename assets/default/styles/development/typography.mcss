@@ -117,7 +117,7 @@ hr[data-hr],
     text-align: start;
   }
 
-  @media (--from-xs) {
+  @media ($from-xs) {
     text-align: justify;
   }
 }

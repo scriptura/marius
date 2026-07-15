@@ -1,27 +1,27 @@
 .hidden,
-[hidden]:not([hidden='until-found']) {
+[hidden]:not([hidden="until-found"]) {
   display: none !important;
 }
 
-@container grid (--to-xs) {
+@container grid ($to-xs) {
   .xs-hidden {
     display: none !important;
   }
 }
 
-@container grid (--from-xs-to-s) {
+@container grid ($from-xs-to-s) {
   .s-hidden {
     display: none !important;
   }
 }
 
-@container grid (--from-s--to-m) {
+@container grid ($from-s-to-m) {
   .m-hidden {
     display: none !important;
   }
 }
 
-@container grid (--from-m-to-l) {
+@container grid ($from-m-to-l) {
   .l-hidden {
     display: none !important;
   }
@@ -32,7 +32,7 @@
   visibility: hidden;
 }
 
-a[aria-disabled='true'] {
+a[aria-disabled="true"] {
   /* @todo En expérimentation. */
   cursor: default; /* not-allowed */
 
@@ -96,7 +96,7 @@ a[aria-disabled='true'] {
   */
 }
 
-@container grid (--to-xs) {
+@container grid ($to-xs) {
   .xs-center {
     display: grid;
     place-items: center;
@@ -139,25 +139,25 @@ a[aria-disabled='true'] {
   font-size: var(--scale, 100%);
 }
 
-@container grid (--to-xs) {
+@container grid ($to-xs) {
   .xs-scale {
     font-size: var(--xs-scale, 100%);
   }
 }
 
-@container grid (--from-xs) {
+@container grid ($from-xs) {
   .s-scale {
     font-size: var(--s-scale, 100%);
   }
 }
 
-@container grid (--from-s) {
+@container grid ($from-s) {
   .m-scale {
     font-size: var(--m-scale, 100%);
   }
 }
 
-@container grid (--from-m) {
+@container grid ($from-m) {
   .l-scale {
     font-size: var(--l-scale, 100%);
   }

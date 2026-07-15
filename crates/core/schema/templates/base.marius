@@ -30,7 +30,13 @@
                 <span class="sr-only">Menu</span>
             </button>
             <ul class="sub-nav" id="sub-nav" aria-labelledby="cmd-nav">
-                <li><a href="/content/5"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset utils.svg %}#ampersand"></use></svg>Home</a></li>
+                <li><a href="/content/1"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset utils.svg %}#ampersand"></use></svg>Content 1</a></li>
+                <li><a href="/content/2"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset utils.svg %}#border-none"></use></svg>Content 2</a></li>
+                <li><a href="/content/3"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset utils.svg %}#border-none"></use></svg>Content 3</a></li>
+                <li><a href="/content/4"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset utils.svg %}#border-none"></use></svg>Content 4</a></li>
+                <li><a href="/content/5"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset utils.svg %}#border-none"></use></svg>Content 5</a></li>
+                <li><a href="/content/6"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset utils.svg %}#border-none"></use></svg>Content 6</a></li>
+                <li><a href="/content/7"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset utils.svg %}#border-none"></use></svg>Content 7</a></li>
                 <li><a href="//github.com/scriptura/marius"><svg class="icon-inline" role="img" focusable="false"><use href="{% asset utils.svg %}#github"></use></svg>Repository</a></li>
             </ul>
             <ol class="breadcrumb" aria-label="Breadcrumb">

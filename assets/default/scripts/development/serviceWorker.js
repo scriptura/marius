@@ -88,47 +88,44 @@
  * navigator.serviceWorker.addEventListener('message', handler)
  */
 
-const CACHE_NAME = 'v110'
-const MEDIA_CACHE_NAME = `media-${CACHE_NAME}`
-const OFFLINE_URL = '/offline.html'
+const CACHE_NAME = "MARIUS_CACHE_HASH";
+const MEDIA_CACHE_NAME = `media-${CACHE_NAME}`;
+const OFFLINE_URL = "/offline.html";
 
 const resourcesToCache = [
-  '/',
-  '/styles/main.css',
-  '/styles/print.css',
-  '/scripts/main.js',
-  '/scripts/more.js',
-  '/fonts/notoSans-Regular.woff2',
-  '/fonts/notoSerif-Regular.woff2',
-  '/sprites/util.svg',
-  '/sprites/player.svg',
-  '/medias/images/logo/logo.svg',
-  '/sprites/silos/195v.svg#a',
-  '/sprites/various/MonogrammeTULivreDeKellsTEST.svg#a',
+  "/",
+  "/styles/main.css",
+  "/styles/print.css",
+  "/scripts/index.js",
+  "/fonts/notoSans-Regular.woff2",
+  "/fonts/notoSerif-Regular.woff2",
+  "/sprites/utils.svg",
+  "/sprites/players.svg",
+  "/images/logo.svg",
   OFFLINE_URL,
-]
+];
 
 // Module-level Set : lookup O(1), zéro allocation par appel.
-const STATIC_DESTINATIONS = new Set(['style', 'script', 'font', 'image'])
+const STATIC_DESTINATIONS = new Set(["style", "script", "font", "image"]);
 
 function isStaticAsset(request) {
   // Propriété native pré-calculée — couvre css, js, woff2, images.
-  if (STATIC_DESTINATIONS.has(request.destination)) return true
+  if (STATIC_DESTINATIONS.has(request.destination)) return true;
   // Fallback pour destination '' (fetch(), SVG via <use>, etc.) : regex sur string native, sans new URL().
-  return /\.(css|js|woff2|svg)$/.test(request.url)
+  return /\.(css|js|woff2|svg)$/.test(request.url);
 }
 
 // --- Debounce state ---
-let lastNotifyTime = 0
-const NOTIFY_DEBOUNCE_MS = 5000
+let lastNotifyTime = 0;
+const NOTIFY_DEBOUNCE_MS = 5000;
 
 // --- I/O helpers ---
 async function addResourcesToCache(resources) {
   try {
-    const cache = await caches.open(CACHE_NAME)
-    await cache.addAll(resources)
+    const cache = await caches.open(CACHE_NAME);
+    await cache.addAll(resources);
   } catch (error) {
-    console.error(`Erreur cache.addAll: ${error}`)
+    console.error(`Erreur cache.addAll: ${error}`);
   }
 }
 
@@ -136,81 +133,87 @@ async function addResourcesToCache(resources) {
 function putInCache(request, response) {
   return caches
     .open(CACHE_NAME)
-    .then(cache => cache.put(request, response))
-    .catch(error => console.error(`Erreur putInCache: ${error}`))
+    .then((cache) => cache.put(request, response))
+    .catch((error) => console.error(`Erreur putInCache: ${error}`));
 }
 
 async function notifyServiceUnavailable() {
-  const now = Date.now()
-  if (now - lastNotifyTime < NOTIFY_DEBOUNCE_MS) return
-  lastNotifyTime = now
+  const now = Date.now();
+  if (now - lastNotifyTime < NOTIFY_DEBOUNCE_MS) return;
+  lastNotifyTime = now;
   try {
-    const allClients = await clients.matchAll()
-    allClients.forEach(client => client.postMessage({ action: 'service-unavailable' }))
+    const allClients = await clients.matchAll();
+    allClients.forEach((client) =>
+      client.postMessage({ action: "service-unavailable" }),
+    );
   } catch (error) {
-    console.error(`Erreur notification: ${error}`)
+    console.error(`Erreur notification: ${error}`);
   }
 }
 
 // --- Strategies ---
 async function networkFirst(event) {
-  const { request } = event
+  const { request } = event;
 
   try {
-    const networkResponse = await fetch(request)
+    const networkResponse = await fetch(request);
     // Extraction stricte : évite l'interception et le clonage des fragments 206
     if (networkResponse && networkResponse.status === 200) {
-      event.waitUntil(putInCache(request, networkResponse.clone()))
+      event.waitUntil(putInCache(request, networkResponse.clone()));
     }
-    return networkResponse
+    return networkResponse;
   } catch {
-    await notifyServiceUnavailable()
-    const cache = await caches.open(CACHE_NAME)
-    return (await cache.match(request)) ?? cache.match(OFFLINE_URL)
+    await notifyServiceUnavailable();
+    const cache = await caches.open(CACHE_NAME);
+    return (await cache.match(request)) ?? cache.match(OFFLINE_URL);
   }
 }
 
 async function cacheFirst(event) {
-  const { request } = event
-  const cache = await caches.open(CACHE_NAME)
-  const cached = await cache.match(request)
-  if (cached) return cached
+  const { request } = event;
+  const cache = await caches.open(CACHE_NAME);
+  const cached = await cache.match(request);
+  if (cached) return cached;
 
   try {
-    const networkResponse = await fetch(request)
+    const networkResponse = await fetch(request);
     // Extraction stricte : évite l'interception et le clonage des fragments 206
     if (networkResponse && networkResponse.status === 200) {
-      event.waitUntil(putInCache(request, networkResponse.clone()))
+      event.waitUntil(putInCache(request, networkResponse.clone()));
     }
-    return networkResponse
+    return networkResponse;
   } catch {
-    return cache.match(OFFLINE_URL)
+    return cache.match(OFFLINE_URL);
   }
 }
 
 // --- Lifecycle ---
-self.addEventListener('install', event => {
-  self.skipWaiting()
-  event.waitUntil(addResourcesToCache(resourcesToCache))
-})
+self.addEventListener("install", (event) => {
+  self.skipWaiting();
+  event.waitUntil(addResourcesToCache(resourcesToCache));
+});
 
-self.addEventListener('activate', event => {
+self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
       try {
-        const cacheNames = await caches.keys()
-        await Promise.all(cacheNames.filter(name => name !== CACHE_NAME && name !== MEDIA_CACHE_NAME).map(name => caches.delete(name)))
-        await self.clients.claim()
+        const cacheNames = await caches.keys();
+        await Promise.all(
+          cacheNames
+            .filter((name) => name !== CACHE_NAME && name !== MEDIA_CACHE_NAME)
+            .map((name) => caches.delete(name)),
+        );
+        await self.clients.claim();
       } catch (error) {
-        console.error(`Erreur activation: ${error}`)
+        console.error(`Erreur activation: ${error}`);
       }
     })(),
-  )
-})
+  );
+});
 
-self.addEventListener('fetch', event => {
-  if (event.request.method !== 'GET') return
+self.addEventListener("fetch", (event) => {
+  if (event.request.method !== "GET") return;
 
-  const strategy = isStaticAsset(event.request) ? cacheFirst : networkFirst
-  event.respondWith(strategy(event))
-})
+  const strategy = isStaticAsset(event.request) ? cacheFirst : networkFirst;
+  event.respondWith(strategy(event));
+});
