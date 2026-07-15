@@ -1,5 +1,3 @@
-'use strict'
-
 /**
  * @file map.js
  * @description Gestionnaire de cartes Leaflet orienté Data-First.
@@ -27,7 +25,7 @@
 // ─── Constantes immuables ────────────────────────────────────────────────────
 
 /** @type {string} URL du serveur OSM public, utilisée comme fallback garanti. */
-const TILE_DEFAULT = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+const TILE_DEFAULT = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 
 /**
  * Coordonnées d'une tuile existante et stable, utilisée pour les sondes HEAD.
@@ -36,7 +34,7 @@ const TILE_DEFAULT = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
  *
  * @type {{ z: string, x: string, y: string }}
  */
-const TILE_PROBE = Object.freeze({ z: '16', x: '33440', y: '23491' })
+const TILE_PROBE = Object.freeze({ z: "16", x: "33440", y: "23491" });
 
 /**
  * Markup SVG du marqueur de carte, déclaré comme constante module-level.
@@ -49,13 +47,13 @@ const TILE_PROBE = Object.freeze({ z: '16', x: '33440', y: '23491' })
  * @type {string}
  */
 const SVG_ICON =
-  '<svg class="marker-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">' +
-  '<path d="M256 14C146 14 57 102 57 211c0 172 199 295 199 295s199-120 199-295c0-109-89-197-199-197zm0 281a94 94 0 1 1 0-187 94 94 0 0 1 0 187z"/>' +
-  '<path d="M256 14v94a94 94 0 0 1 0 187v211s199-120 199-295c0-109-89-197-199-197z"/>' +
-  '</svg>'
+	'<svg class="marker-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">' +
+	'<path d="M256 14C146 14 57 102 57 211c0 172 199 295 199 295s199-120 199-295c0-109-89-197-199-197zm0 281a94 94 0 1 1 0-187 94 94 0 0 1 0 187z"/>' +
+	'<path d="M256 14v94a94 94 0 0 1 0 187v211s199-120 199-295c0-109-89-197-199-197z"/>' +
+	"</svg>";
 
 /** @type {string} Classe CSS déclenchant l'animation d'entrée des marqueurs. */
-const ANIM_CLASS = 'start-map'
+const ANIM_CLASS = "start-map";
 
 /**
  * Durée de l'animation d'entrée en millisecondes.
@@ -67,18 +65,18 @@ const ANIM_CLASS = 'start-map'
  *
  * @type {number}
  */
-const ANIM_DURATION = 1500
+const ANIM_DURATION = 1500;
 
 /**
  * Sous-domaines à sonder pour les serveurs de tuiles avec template `{s}`.
  * @type {ReadonlyArray<string>}
  */
-const SUBDOMAINS = Object.freeze(['a', 'b', 'c'])
+const SUBDOMAINS = Object.freeze(["a", "b", "c"]);
 
 // ─── Lazy singleton divIcon ──────────────────────────────────────────────────
 
 /** @type {L.DivIcon|null} Instance unique partagée entre tous les marqueurs. */
-let _divIcon = null
+let _divIcon = null;
 
 /**
  * Retourne le `L.DivIcon` partagé, en le créant à la première invocation.
@@ -95,13 +93,13 @@ let _divIcon = null
  * @returns {L.DivIcon}
  */
 const getDivIcon = () =>
-  (_divIcon ??= L.divIcon({
-    className:   'leaflet-data-marker',
-    html:        SVG_ICON,
-    iconAnchor:  [20, 40],
-    iconSize:    [40, 40],
-    popupAnchor: [0, -60],
-  }))
+	(_divIcon ??= L.divIcon({
+		className: "leaflet-data-marker",
+		html: SVG_ICON,
+		iconAnchor: [20, 40],
+		iconSize: [40, 40],
+		popupAnchor: [0, -60],
+	}));
 
 // ─── Single-pass DOM extraction ──────────────────────────────────────────────
 
@@ -133,19 +131,19 @@ const getDivIcon = () =>
  * @returns {MapConfig[]}
  */
 const collectMapConfigs = () =>
-  Array.from(document.querySelectorAll('.map'), (el, i) => {
-    el.id = 'map' + i
-    return {
-      el,
-      id:          'map' + i,
-      tileServer:  el.dataset.tileserver  || null,
-      minZoom:     el.dataset.minzoom     || 2,
-      maxZoom:     el.dataset.maxzoom     || 18,
-      zoom:        el.dataset.zoom        || null,
-      attribution: el.dataset.attribution || '',
-      placesRaw:   el.dataset.places,
-    }
-  })
+	Array.from(document.querySelectorAll(".map"), (el, i) => {
+		el.id = "map" + i;
+		return {
+			el,
+			id: "map" + i,
+			tileServer: el.dataset.tileserver || null,
+			minZoom: el.dataset.minzoom || 2,
+			maxZoom: el.dataset.maxzoom || 18,
+			zoom: el.dataset.zoom || null,
+			attribution: el.dataset.attribution || "",
+			placesRaw: el.dataset.places,
+		};
+	});
 
 // ─── Résolution du serveur de tuiles (parallèle) ─────────────────────────────
 
@@ -174,31 +172,31 @@ const collectMapConfigs = () =>
  * @returns {Promise<string>} Template résolu, ou `TILE_DEFAULT`.
  */
 const resolveTileServer = async (template) => {
-  if (!template) return TILE_DEFAULT
+	if (!template) return TILE_DEFAULT;
 
-  const buildProbeUrl = (tmpl, subdomain = '') =>
-    tmpl
-      .replace('{s}', subdomain)
-      .replace('{z}', TILE_PROBE.z)
-      .replace('{x}', TILE_PROBE.x)
-      .replace('{y}', TILE_PROBE.y)
+	const buildProbeUrl = (tmpl, subdomain = "") =>
+		tmpl
+			.replace("{s}", subdomain)
+			.replace("{z}", TILE_PROBE.z)
+			.replace("{x}", TILE_PROBE.x)
+			.replace("{y}", TILE_PROBE.y);
 
-  const probe = (url) =>
-    fetch(url, { method: 'HEAD' }).then(r => {
-      if (!r.ok) throw new Error(r.status)
-      return template
-    })
+	const probe = (url) =>
+		fetch(url, { method: "HEAD" }).then((r) => {
+			if (!r.ok) throw new Error(r.status);
+			return template;
+		});
 
-  const candidates = template.includes('{s}')
-    ? SUBDOMAINS.map(s => probe(buildProbeUrl(template, s)))
-    : [probe(buildProbeUrl(template))]
+	const candidates = template.includes("{s}")
+		? SUBDOMAINS.map((s) => probe(buildProbeUrl(template, s)))
+		: [probe(buildProbeUrl(template))];
 
-  try {
-    return await Promise.any(candidates)
-  } catch {
-    return TILE_DEFAULT
-  }
-}
+	try {
+		return await Promise.any(candidates);
+	} catch {
+		return TILE_DEFAULT;
+	}
+};
 
 // ─── Initialisation Leaflet ───────────────────────────────────────────────────
 
@@ -225,34 +223,39 @@ const resolveTileServer = async (template) => {
  * @returns {Promise<void>}
  */
 const initMap = async (config) => {
-  const { el, id, tileServer, minZoom, maxZoom, zoom, attribution, placesRaw } = config
+	const { el, id, tileServer, minZoom, maxZoom, zoom, attribution, placesRaw } =
+		config;
 
-  const places = JSON.parse(placesRaw)
+	const places = JSON.parse(placesRaw);
 
-  const map            = L.map(id)
-  const resolvedServer = await resolveTileServer(tileServer)
+	const map = L.map(id);
+	const resolvedServer = await resolveTileServer(tileServer);
 
-  const tileLayer = L.tileLayer(resolvedServer, { minZoom, maxZoom, attribution }).addTo(map)
+	const tileLayer = L.tileLayer(resolvedServer, {
+		minZoom,
+		maxZoom,
+		attribution,
+	}).addTo(map);
 
-  tileLayer.on('tileerror', () => {
-    if (resolvedServer !== TILE_DEFAULT) {
-      L.tileLayer(TILE_DEFAULT, { minZoom, maxZoom, attribution }).addTo(map)
-    }
-  })
+	tileLayer.on("tileerror", () => {
+		if (resolvedServer !== TILE_DEFAULT) {
+			L.tileLayer(TILE_DEFAULT, { minZoom, maxZoom, attribution }).addTo(map);
+		}
+	});
 
-  const icon   = getDivIcon()
-  const bounds = L.latLngBounds()
+	const icon = getDivIcon();
+	const bounds = L.latLngBounds();
 
-  for (const [popup, latlng] of places) {
-    bounds.extend(latlng)
-    const marker = L.marker(latlng, { icon })
-    if (popup) marker.bindPopup(popup)
-    marker.addTo(map)
-  }
+	for (const [popup, latlng] of places) {
+		bounds.extend(latlng);
+		const marker = L.marker(latlng, { icon });
+		if (popup) marker.bindPopup(popup);
+		marker.addTo(map);
+	}
 
-  map.fitBounds(bounds)
-  if (zoom) map.setZoom(Number(zoom))
-}
+	map.fitBounds(bounds);
+	if (zoom) map.setZoom(Number(zoom));
+};
 
 // ─── Intersection Observer ────────────────────────────────────────────────────
 
@@ -285,31 +288,31 @@ const initMap = async (config) => {
  * @returns {void}
  */
 const observeMaps = (configs) => {
-  const pending = new Map(configs.map(c => [c.el, c]))
+	const pending = new Map(configs.map((c) => [c.el, c]));
 
-  const observer = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting || entry.intersectionRatio < 0.5) continue
+	const observer = new IntersectionObserver(
+		(entries) => {
+			for (const entry of entries) {
+				if (!entry.isIntersecting || entry.intersectionRatio < 0.5) continue;
 
-        const el     = entry.target
-        const config = pending.get(el)
-        if (!config) continue
+				const el = entry.target;
+				const config = pending.get(el);
+				if (!config) continue;
 
-        el.classList.add(ANIM_CLASS)
-        setTimeout(() => el.classList.remove(ANIM_CLASS), ANIM_DURATION)
+				el.classList.add(ANIM_CLASS);
+				setTimeout(() => el.classList.remove(ANIM_CLASS), ANIM_DURATION);
 
-        initMap(config)
+				initMap(config);
 
-        pending.delete(el)
-        observer.unobserve(el)
-      }
-    },
-    { threshold: 0.5 },
-  )
+				pending.delete(el);
+				observer.unobserve(el);
+			}
+		},
+		{ threshold: 0.5 },
+	);
 
-  for (const { el } of configs) observer.observe(el)
-}
+	for (const { el } of configs) observer.observe(el);
+};
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -339,15 +342,14 @@ const observeMaps = (configs) => {
  * @returns {void}
  */
 const bootstrap = () => {
-  if (typeof L === 'undefined') return
-  const configs = collectMapConfigs()
-  if (configs.length) observeMaps(configs)
-}
+	if (typeof L === "undefined") return;
+	const configs = collectMapConfigs();
+	if (configs.length) observeMaps(configs);
+};
 
 /** @type {() => void} Point d'entrée public pour init manuelle post-`load`. */
-window.initMaps = bootstrap
+window.initMaps = bootstrap;
 
-document.readyState === 'complete'
-  ? bootstrap()
-  : window.addEventListener('load', bootstrap)
-  
+document.readyState === "complete"
+	? bootstrap()
+	: window.addEventListener("load", bootstrap);

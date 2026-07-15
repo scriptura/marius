@@ -29,6 +29,12 @@ players = "sprites/players"
 [webmanifest]
 entry = "manifest.webmanifest"
 
+[service_worker]
+# Handoff §3 — point d'entrée unique, à la racine du thème, même
+# convention que [webmanifest].entry. À corriger si serviceWorker.js vit
+# ailleurs dans votre arborescence réelle.
+entry = "scripts/development/serviceWorker.js"
+
 # ==========================================
 # Pipelines de copie (Zéro-Transformation)
 # ==========================================

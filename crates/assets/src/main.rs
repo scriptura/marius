@@ -48,6 +48,15 @@ use serde_json::Value;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
+// Chantier 4 — minification JS ([scripts.components] + [service_worker]).
+// Cinq crates du même workspace `oxc`, versions épinglées exactement
+// (cf. Cargo.toml pour la justification complète).
+use oxc_allocator::Allocator;
+use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
+use oxc_minifier::{CompressOptions, MangleOptions, Minifier, MinifierOptions};
+use oxc_parser::Parser as OxcParser;
+use oxc_span::SourceType;
+
 // =============================================================================
 // theme.toml — désérialisation d'entrée
 // =============================================================================
@@ -82,6 +91,20 @@ struct ThemeConfig {
     // -> point d'entrée, exactement comme [sprites].
     #[serde(default)]
     scripts: ScriptsConfig,
+    // [service_worker] — Handoff §3, cette session : même forme que
+    // [webmanifest] (un seul point d'entrée, `Option` — un thème sans SW
+    // reste valide). Section absente de `theme.toml` à ce jour : à
+    // ajouter par l'auteur du projet, cf. réponse de session — supposé
+    // par défaut à la racine du thème (`serviceWorker.js`), au même
+    // niveau que `manifest.webmanifest`, à corriger si le fichier réel
+    // vit ailleurs.
+    #[serde(default)]
+    service_worker: Option<ServiceWorkerConfig>,
+}
+
+#[derive(Deserialize)]
+struct ServiceWorkerConfig {
+    entry: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -213,7 +236,8 @@ fn mime_for_extension(ext: &str) -> &'static str {
 }
 
 // =============================================================================
-// Hachage — BLAKE3, 5 premiers caractères hex pour le suffixe de nom de fichier.
+// Hachage — BLAKE3, 5 premiers caractères hex pour le suffixe de nom de
+// fichier (convention déjà en production — cf. main.a81f9.css observé).
 // Le hash complet (64 caractères) est conservé dans le manifeste (§7).
 // =============================================================================
 
@@ -2522,6 +2546,109 @@ fn topological_order_leaves_first(arena: &[JsModule]) -> Result<Vec<usize>, JsPi
     Ok(order)
 }
 
+// =============================================================================
+// Chantier 4 — minification JS (oxc), partagée entre [scripts.components]
+// et [service_worker]. Un seul point d'entrée, `minify_javascript`, plutôt
+// que deux implémentations parallèles : la minification n'a besoin
+// d'aucune connaissance de QUEL pipeline l'appelle, seulement du texte
+// déjà résolu (imports/chemins substitués en amont, en texte brut — cf.
+// Handoff/session) et d'un `Path` indicatif pour détecter Script vs
+// Module.
+//
+// AST instancié UNIQUEMENT ici, pour cette seule passe finale — jamais
+// pour la résolution de chemins (`lex_imports`/`scan_and_resolve_service_
+// worker` restent des scanners plats sur `&[u8]`, aucune régression vers
+// un AST pour cette tâche-là : elle n'en a jamais eu besoin, un AST y
+// serait une dépense pure sans bénéfice).
+// =============================================================================
+
+#[derive(Debug)]
+enum MinifyError {
+    /// Erreur de parsing — le buffer déjà résolu par ce pipeline (imports/
+    /// chemins substitués) doit rester du JavaScript syntaxiquement
+    /// valide ; si `oxc_parser` le rejette, c'est le signe d'un bug en
+    /// amont (substitution ayant cassé la syntaxe), jamais une tolérance
+    /// à absorber silencieusement.
+    Parse(PathBuf, String),
+}
+
+impl fmt::Display for MinifyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MinifyError::Parse(path, msg) => {
+                write!(f, "minification : {} : {msg}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for MinifyError {}
+
+/// Parse -> minifie (compresse + mangle) -> imprime. `path_hint` sert
+/// UNIQUEMENT à détecter Script vs Module (extension `.js`, détection
+/// `Unambiguous` par contenu — vérifié dans le code source d'`oxc_span`
+/// le jour de cette session, pas supposé : `import`/`export` détectés ⟹
+/// Module, sinon Script), jamais à relire le fichier depuis le disque —
+/// le buffer déjà en mémoire (`source`) est la seule source de vérité ici.
+///
+/// `MangleOptions::default()` laisse `top_level` à `None`, qui se résout
+/// alors selon LE TYPE DE SOURCE détecté : `true` pour un Module, `false`
+/// pour un Script classique (vérifié dans `oxc_mangler`, pas supposé) —
+/// c'est exactement le comportement voulu SANS aucune branche
+/// pipeline-spécifique : les modules `[scripts.components]` (ESM natif,
+/// import/export réels) gardent leurs noms EXPORTÉS intacts (résolution
+/// cross-fichier à l'exécution, chaque fichier miniifié indépendamment
+/// des autres) tandis que leurs bindings locaux sont mangled ; le
+/// Service Worker (aucun `import`/`export`, un script isolé, jamais
+/// référencé par nom depuis un autre fichier) n'a par défaut que ses
+/// bindings de fonction mangled, pas ses `const` de premier niveau — un
+/// choix conservateur délibéré, pas une limite technique : rien n'empêche
+/// de forcer `top_level: Some(true)` pour ce seul fichier si l'octet
+/// supplémentaire économisé importe un jour.
+fn minify_javascript(source: &str, path_hint: &Path) -> Result<String, MinifyError> {
+    let source_type = SourceType::from_path(path_hint).expect(
+        "tous les points d'entrée de ce binaire sont suffixés .js par construction du thème",
+    );
+
+    let allocator = Allocator::default();
+    let parser_ret = OxcParser::new(&allocator, source, source_type).parse();
+
+    if parser_ret.diagnostics.has_errors() {
+        let messages: Vec<String> = parser_ret
+            .diagnostics
+            .errors()
+            .map(std::string::ToString::to_string)
+            .collect();
+        return Err(MinifyError::Parse(
+            path_hint.to_path_buf(),
+            messages.join("; "),
+        ));
+    }
+
+    let mut program = parser_ret.program;
+
+    // `CompressOptions::smallest()` : preset officiel du crate, `drop_
+    // console: false` par défaut — les `console.error(...)` de diagnostic
+    // du Service Worker (et de tout module applicatif) survivent
+    // volontairement, utiles en inspection navigateur sur un incident réel.
+    let options = MinifierOptions {
+        mangle: Some(MangleOptions::default()),
+        compress: Some(CompressOptions::smallest()),
+    };
+    let minifier_ret = Minifier::new(options).minify(&allocator, &mut program);
+
+    let codegen_ret = Codegen::new()
+        .with_options(CodegenOptions {
+            minify: true,
+            comments: CommentOptions::disabled(),
+            ..CodegenOptions::default()
+        })
+        .with_scoping(minifier_ret.scoping)
+        .build(&program);
+
+    Ok(codegen_ret.code)
+}
+
 // ── Patch + hash — bottom-up, dans l'ordre de la Passe 2 ───────────────────
 
 /// Métadonnées d'un module patché, retournées à l'appelant pour qu'il
@@ -2576,7 +2703,13 @@ fn patch_and_hash_modules(
         }
         patched.push_str(&module.source[cursor..]);
 
-        let bytes = patched.into_bytes();
+        // Chantier 4 — minification, dernière étape avant le hachage :
+        // le hash doit porter sur les octets RÉELLEMENT servis, pas sur
+        // un brouillon intermédiaire plus volumineux qui ne sera jamais
+        // écrit sur disque.
+        let minified =
+            minify_javascript(&patched, &module.path).map_err(|e| format!("scripts   : {e}"))?;
+        let bytes = minified.into_bytes();
         let (full_hash, short_hash) = hash_content(&bytes);
 
         let stem = module
@@ -2643,6 +2776,279 @@ fn run_scripts_pipeline(
             components[*target_name], patched.url
         );
     }
+
+    Ok(())
+}
+
+// =============================================================================
+// Pipeline [service_worker] — Handoff §3. `serviceWorker.js` est traité
+// comme un gabarit textuel déterministe, pas un AST : chaque littéral de
+// chaîne du fichier est scanné, et réécrit en place s'il ressemble à un
+// chemin d'asset local — exactement le modèle d'auteurship déjà en place
+// pour `{% asset %}`/`url()`/`icons[].src` ("je liste mes ressources
+// moi-même, l'outil réécrit chaque chemin"), jamais une régénération du
+// tableau depuis le manifeste.
+//
+// Seul pipeline de ce binaire à dépendre du MANIFESTE COMPLET (toutes les
+// clés, tous pipelines confondus), pas seulement d'`AssetUrlRegistry`
+// (peuplé exclusivement par [static.verbatim], structurellement plus
+// étroit) — d'où son câblage en tout dernier dans `main()` (§3.4). Une
+// vue `AssetUrlRegistry` est dérivée du manifeste juste avant l'appel,
+// pour réutiliser `resolve_asset_reference` sans le modifier.
+// =============================================================================
+
+#[derive(Debug)]
+enum ServiceWorkerError {
+    Io(PathBuf, std::io::Error),
+    Lex(PathBuf, String),
+    /// Même politique fail-hard que CSS/webmanifest/scripts : une chaîne
+    /// qui commence par `/`, n'est ni `/` ni terminée par `.html`, mais
+    /// absente du registre, est une erreur fatale — jamais une exception
+    /// silencieuse propre à ce seul pipeline (Handoff §3.2, proposition de
+    /// pass-through généralisé explicitement rejetée).
+    AssetNotFound {
+        specifier: String,
+        filename: String,
+        in_file: PathBuf,
+    },
+}
+
+impl fmt::Display for ServiceWorkerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ServiceWorkerError::Io(path, e) => {
+                write!(
+                    f,
+                    "service_worker : lecture impossible de {} : {e}",
+                    path.display()
+                )
+            }
+            ServiceWorkerError::Lex(path, msg) => {
+                write!(f, "service_worker : {} : {msg}", path.display())
+            }
+            ServiceWorkerError::AssetNotFound {
+                specifier,
+                filename,
+                in_file,
+            } => write!(
+                f,
+                "service_worker : AssetNotFound '{specifier}' (fichier '{filename}' absent du \
+                 registre) référencé dans {}",
+                in_file.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ServiceWorkerError {}
+
+/// Conversion depuis `JsPipelineError` — seules `skip_block_comment` et
+/// `find_unescaped_quote` (réutilisées ci-dessous, cf. `[scripts.components]`)
+/// peuvent produire une erreur ici, et seulement la variante `Lex` (chaîne
+/// ou commentaire bloc non fermé) : ni `AssetNotFound` ni `CyclicImport`
+/// n'appartiennent à ce pipeline (résolution d'imports / tri topologique,
+/// tous deux hors sujet pour un scan linéaire de littéraux). Le bras `other`
+/// ne devrait donc jamais s'exécuter — message explicite plutôt qu'un
+/// panic aveugle si cet invariant venait à changer un jour.
+impl From<JsPipelineError> for ServiceWorkerError {
+    fn from(e: JsPipelineError) -> Self {
+        match e {
+            JsPipelineError::Lex(path, msg) => ServiceWorkerError::Lex(path, msg),
+            JsPipelineError::Io(path, io_err) => ServiceWorkerError::Io(path, io_err),
+            other => ServiceWorkerError::Lex(
+                PathBuf::new(),
+                format!(
+                    "erreur inattendue réutilisée depuis le lexer [scripts.components] : {other}"
+                ),
+            ),
+        }
+    }
+}
+
+/// Applique la règle de résolution à 3 niveaux (Handoff §3.2) à UN
+/// littéral déjà isolé par le scanner (guillemets déjà exclus par
+/// l'appelant).
+///
+/// Niveau 1 (filtrage a priori, zéro bruit) : toute chaîne ne commençant
+/// pas par `/` n'est même pas candidate — `'style'`, `'GET'`, le jeton
+/// `MARIUS_CACHE_HASH` lui-même, tous exclus ici, avant toute tentative.
+/// Niveau 2 (liste blanche restreinte) : `/` seul (racine du document) et
+/// tout ce qui se termine par `.html` — aucun pipeline de ce projet ne
+/// hache de page HTML, cf. Handoff §3.2 (point de vigilance explicite pour
+/// l'avenir, pas une objection actuelle).
+/// Niveau 3 (résolution stricte) : tout le reste passe par
+/// `resolve_asset_reference`, échec dur sans exception.
+fn resolve_service_worker_literal(
+    literal: &str,
+    registry: &AssetUrlRegistry,
+    ctx: &Path,
+) -> Result<String, ServiceWorkerError> {
+    if !literal.starts_with('/') {
+        return Ok(literal.to_string());
+    }
+    if literal == "/" || literal.ends_with(".html") {
+        return Ok(literal.to_string());
+    }
+    match resolve_asset_reference(literal, registry) {
+        Ok(Some(resolved)) => Ok(resolved),
+        // Structurellement improbable ici (Niveau 1 exige déjà un `/` en
+        // tête, alors que `is_external_url` reconnaît `#`/`//`/`data:`/
+        // `://`) — mais `resolve_asset_reference` reste appelé sans le
+        // contourner, pour ne jamais diverger silencieusement du
+        // comportement déjà éprouvé par [styles]/[scripts.components].
+        Ok(None) => Ok(literal.to_string()),
+        Err(filename) => Err(ServiceWorkerError::AssetNotFound {
+            specifier: literal.to_string(),
+            filename,
+            in_file: ctx.to_path_buf(),
+        }),
+    }
+}
+
+/// Scan à plat du buffer entier — aucune notion de déclaration `import`
+/// (contrairement à `lex_import_statement`), juste une alternance stricte
+/// commentaire / littéral / reste, dans cet ordre de priorité À CHAQUE
+/// position : c'est cet ordre qui protège les apostrophes des élisions
+/// françaises à l'intérieur des blocs `/** JSDoc */` (nombreuses dans ce
+/// fichier réel) contre une interprétation erronée comme guillemet
+/// ouvrant — sans ce garde-fou, un scanner naïf désynchroniserait tout le
+/// reste du fichier dès le premier commentaire un peu long.
+///
+/// Un littéral gabarit (`` ` `` ) est traité comme une région opaque, même
+/// limite déjà documentée pour `skip_string_like` : une interpolation
+/// `${...}` n'est jamais un chemin d'asset valide dans ce projet, la
+/// laisser intacte est sûr, pas une approximation risquée.
+fn scan_and_resolve_service_worker(
+    source: &str,
+    registry: &AssetUrlRegistry,
+    ctx: &Path,
+) -> Result<String, ServiceWorkerError> {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                let end = skip_line_comment(bytes, i);
+                out.push_str(&source[i..end]);
+                i = end;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let end = skip_block_comment(bytes, i, ctx)?;
+                out.push_str(&source[i..end]);
+                i = end;
+            }
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[i];
+                let close = find_unescaped_quote(bytes, i + 1, quote, ctx)?;
+                let literal = &source[i + 1..close];
+                out.push(quote as char);
+                out.push_str(&resolve_service_worker_literal(literal, registry, ctx)?);
+                out.push(quote as char);
+                i = close + 1;
+            }
+            _ => {
+                // Avance d'un caractère UTF-8 complet, pas d'un octet — même
+                // discipline que `substitute_line` : un caractère multioctet
+                // (accents français, hors des zones déjà traitées ci-dessus)
+                // ne doit jamais être coupé en deux.
+                let ch_len = source[i..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(1);
+                out.push_str(&source[i..i + ch_len]);
+                i += ch_len;
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Pipeline `[service_worker]` réel — Handoff §3, bootstrap du hash en 2
+/// passes (§3.3), méthode actée sans réserve :
+///
+///  1. Résolution des chemins d'assets (Niveaux 1-3 ci-dessus) — le jeton
+///     `MARIUS_CACHE_HASH` n'est JAMAIS touché à cette passe : il ne
+///     commence pas par `/`, le Niveau 1 l'exclut déjà naturellement,
+///     aucun traitement spécial requis. Hash de CE buffer intermédiaire :
+///     cette valeur devient `CACHE_NAME` au runtime — elle change si et
+///     seulement si un asset référencé a changé.
+///  2. Substitution exacte du jeton sentinelle par ce hash — un
+///     remplacement de chaîne ciblé, pas une nouvelle passe de résolution
+///     d'assets (le hash n'est structurellement pas un nom de fichier du
+///     registre). Hash COMPLET (64 caractères hex), pas le suffixe court :
+///     `CACHE_NAME` est une clé `caches.open()` arbitraire au runtime,
+///     sans contrainte de longueur de nom de fichier — le hash complet
+///     porte plus d'entropie pour ce rôle d'identité de contenu, le
+///     suffixe court reste réservé à son usage établi (nom de fichier).
+///  3. Hash du buffer FINAL, réellement écrit sur disque — nomme le
+///     fichier produit, même convention que tous les autres pipelines.
+fn run_service_worker_pipeline(
+    theme_dir: &Path,
+    build_root: &Path,
+    build_root_rel: &str,
+    config: &ServiceWorkerConfig,
+    manifest_url_registry: &AssetUrlRegistry,
+    manifest: &mut HashMap<String, AssetEntry>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let source_path = theme_dir.join(&config.entry);
+    let raw = fs::read_to_string(&source_path).map_err(|e| {
+        format!(
+            "service_worker : lecture impossible de {} : {e}",
+            source_path.display()
+        )
+    })?;
+
+    let pass1_resolved =
+        scan_and_resolve_service_worker(&raw, manifest_url_registry, &source_path)?;
+
+    // Chantier 4 — minification, APRÈS la résolution textuelle des
+    // chemins mais AVANT le bootstrap du hash en 2 passes ci-dessous : le
+    // hash de `CACHE_NAME` doit porter sur les octets réellement servis
+    // (minifiés), pas sur un brouillon plus verbeux qui ne sera jamais
+    // écrit sur disque — même principe que pour [scripts.components].
+    // Le jeton `MARIUS_CACHE_HASH` traverse cette passe intact : c'est un
+    // littéral de chaîne, jamais altéré par un minifieur correct (au pire
+    // dupliqué si le `const CACHE_NAME` est inliné à ses points d'usage —
+    // sans conséquence ici, la substitution globale ci-dessous reste
+    // correcte quel que soit le nombre d'occurrences).
+    let pass1 = minify_javascript(&pass1_resolved, &source_path)
+        .map_err(|e| format!("service_worker : {e}"))?;
+
+    let (cache_hash_full, _) = hash_content(pass1.as_bytes());
+    let final_content = pass1.replace("MARIUS_CACHE_HASH", &cache_hash_full);
+
+    let bytes = final_content.as_bytes();
+    let (full_hash, short_hash) = hash_content(bytes);
+
+    let hashed_filename = format!("serviceWorker.{short_hash}.js");
+    let output_abs = build_root.join(&hashed_filename);
+    fs::write(&output_abs, bytes)?;
+
+    // Clé logique fixe, comme `manifest.webmanifest` — un seul Service
+    // Worker par thème, indépendant du nom de fichier source réel.
+    manifest.insert(
+        "serviceWorker.js".to_string(),
+        AssetEntry {
+            url: format!("/{hashed_filename}"),
+            path: join_slash(build_root_rel, &hashed_filename),
+            mime: mime_for_extension("js").to_string(),
+            size: bytes.len() as u64,
+            hash: full_hash,
+            // Ce pipeline tourne APRÈS la boucle de version dans `main()`
+            // (§3.4) : la version doit lui être affectée explicitement par
+            // l'appelant juste après cet appel, pas ici.
+            version: String::new(),
+        },
+    );
+
+    println!(
+        "[marius-assets] service_worker {} -> /{hashed_filename}",
+        config.entry
+    );
 
     Ok(())
 }
@@ -2771,6 +3177,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // pour ne l'écrire qu'à un seul endroit.
     for entry in manifest.values_mut() {
         entry.version = theme.theme.version.clone();
+    }
+
+    // [service_worker] (Handoff §3) — SEUL pipeline de ce binaire à
+    // dépendre du MANIFESTE COMPLET (styles + sprites + scripts +
+    // webmanifest + verbatim), pas seulement d'`AssetUrlRegistry` (résolu
+    // en tout début par [static.verbatim], structurellement plus étroit :
+    // il ne contient jamais les URLs des styles/sprites/scripts/
+    // webmanifest). D'où son câblage ici, tout dernier, APRÈS la boucle de
+    // version ci-dessus (§3.4) — sa propre `AssetEntry` reçoit donc la
+    // version explicitement, juste après l'appel, plutôt que de réordonner
+    // cette boucle globale pour ce seul cas.
+    //
+    // `Option` : un thème sans Service Worker (pas de section
+    // `[service_worker]` dans `theme.toml`) reste valide, ce pipeline est
+    // sauté silencieusement — même politique que `[webmanifest]`.
+    if let Some(sw_config) = &theme.service_worker {
+        // Vue dérivée, jetable : reconstruite à partir du manifeste final
+        // pour réutiliser `resolve_asset_reference` (qui exige
+        // `&AssetUrlRegistry`) sans le modifier — `AssetUrlRegistry` et
+        // `manifest` sont deux structures distinctes du code réel (l'une
+        // ne contient QUE le verbatim, l'autre TOUTES les clés).
+        let manifest_url_registry: AssetUrlRegistry = manifest
+            .iter()
+            .map(|(k, v)| (k.clone(), v.url.clone()))
+            .collect();
+
+        run_service_worker_pipeline(
+            &theme_dir,
+            &build_root,
+            &build_root_rel,
+            sw_config,
+            &manifest_url_registry,
+            &mut manifest,
+        )?;
+
+        if let Some(entry) = manifest.get_mut("serviceWorker.js") {
+            entry.version = theme.theme.version.clone();
+        }
     }
 
     let output = AssetManifest { assets: manifest };
@@ -3557,10 +4001,14 @@ mod tests {
 
         // L'import relatif doit pointer vers l'URL hachée RÉELLE de
         // navigation.js — pas vers './navigation.js' ni vers un
-        // placeholder : on retrouve son hash effectif en resolvant depuis
-        // le même dossier scripts/ produit par CE run.
+        // placeholder. On vérifie le PRÉFIXE de l'URL résolue, pas le nom
+        // du binding local appelé : le mangling (Chantier 4) peut
+        // légitimement renommer `initNavigation` en un identifiant court
+        // à l'intérieur de main/index.js (binding purement local à ce
+        // fichier, jamais son nom exporté — cf. commentaire de
+        // `minify_javascript`), ce n'est pas une régression.
         assert!(!main_written.contains("./navigation.js"));
-        assert!(main_written.contains("initNavigation();"));
+        assert!(main_written.contains("/scripts/navigation."));
 
         let more_url = &manifest["more.js"].url;
         let more_filename = Path::new(more_url).file_name().unwrap();
@@ -3608,5 +4056,314 @@ mod tests {
         assert!(manifest.is_empty());
 
         let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    // ── resolve_service_worker_literal / scan_and_resolve_service_worker
+    // ── (Handoff §3, [service_worker]) ───────────────────────────────────
+
+    /// Niveau 1 : ne commence pas par `/` — jamais candidat, quelle que
+    /// soit sa forme (y compris le jeton sentinelle lui-même).
+    #[test]
+    fn resolve_service_worker_literal_ignores_non_slash_strings() {
+        let registry = AssetUrlRegistry::new();
+        let ctx = Path::new("sw.js");
+        assert_eq!(
+            resolve_service_worker_literal("style", &registry, ctx).unwrap(),
+            "style"
+        );
+        assert_eq!(
+            resolve_service_worker_literal("MARIUS_CACHE_HASH", &registry, ctx).unwrap(),
+            "MARIUS_CACHE_HASH"
+        );
+    }
+
+    /// Niveau 2 : racine du document et routes `.html` — exemptées, jamais
+    /// soumises à `resolve_asset_reference`, même avec un registre vide.
+    #[test]
+    fn resolve_service_worker_literal_exempts_root_and_html_routes() {
+        let registry = AssetUrlRegistry::new();
+        let ctx = Path::new("sw.js");
+        assert_eq!(
+            resolve_service_worker_literal("/", &registry, ctx).unwrap(),
+            "/"
+        );
+        assert_eq!(
+            resolve_service_worker_literal("/offline.html", &registry, ctx).unwrap(),
+            "/offline.html"
+        );
+    }
+
+    /// Niveau 3 : résolution stricte — trouvé, réécrit vers l'URL du
+    /// registre.
+    #[test]
+    fn resolve_service_worker_literal_resolves_known_asset() {
+        let mut registry = AssetUrlRegistry::new();
+        registry.insert("main.css".to_string(), "/styles/main.a1b2c.css".to_string());
+        let ctx = Path::new("sw.js");
+        assert_eq!(
+            resolve_service_worker_literal("/styles/main.css", &registry, ctx).unwrap(),
+            "/styles/main.a1b2c.css"
+        );
+    }
+
+    /// Niveau 3 : échec dur, même politique que CSS/webmanifest/scripts —
+    /// aucune tolérance propre à ce seul pipeline.
+    #[test]
+    fn resolve_service_worker_literal_fails_hard_on_unknown_asset() {
+        let registry = AssetUrlRegistry::new();
+        let ctx = Path::new("sw.js");
+        let err = resolve_service_worker_literal("/scripts/index.js", &registry, ctx).unwrap_err();
+        match err {
+            ServiceWorkerError::AssetNotFound {
+                specifier,
+                filename,
+                ..
+            } => {
+                assert_eq!(specifier, "/scripts/index.js");
+                assert_eq!(filename, "index.js");
+            }
+            other => panic!("attendu AssetNotFound, obtenu {other:?}"),
+        }
+    }
+
+    /// Le bug exact que ce scanner doit éviter : une apostrophe française
+    /// à l'intérieur d'un commentaire bloc ne doit jamais être vue comme un
+    /// guillemet ouvrant — sinon tout le reste du fichier serait
+    /// désynchronisé. Reproduction directe du motif réel de
+    /// `serviceWorker.js` (élision dans un bloc `/** ... */`).
+    #[test]
+    fn scan_and_resolve_service_worker_apostrophe_inside_block_comment_is_not_a_quote() {
+        let registry = AssetUrlRegistry::new();
+        let ctx = Path::new("sw.js");
+        let src = "/** L'API Cache Storage n'a qu'un seul rôle */\nconst x = '/offline.html';";
+        let out = scan_and_resolve_service_worker(src, &registry, ctx).unwrap();
+        assert_eq!(out, src); // rien à résoudre ici, mais surtout : pas d'erreur de lex.
+    }
+
+    /// Même garde-fou pour un commentaire de ligne `//`.
+    #[test]
+    fn scan_and_resolve_service_worker_apostrophe_inside_line_comment_is_not_a_quote() {
+        let registry = AssetUrlRegistry::new();
+        let ctx = Path::new("sw.js");
+        let src = "// évite l'interception des fragments 206\nconst y = '/';";
+        let out = scan_and_resolve_service_worker(src, &registry, ctx).unwrap();
+        assert_eq!(out, src);
+    }
+
+    /// Un littéral gabarit (backtick) avec interpolation est traité comme
+    /// une région opaque — jamais soumis à la résolution, contenu intact.
+    #[test]
+    fn scan_and_resolve_service_worker_template_literal_is_opaque() {
+        let registry = AssetUrlRegistry::new();
+        let ctx = Path::new("sw.js");
+        let src = "const m = `media-${CACHE_NAME}`;";
+        let out = scan_and_resolve_service_worker(src, &registry, ctx).unwrap();
+        assert_eq!(out, src);
+    }
+
+    /// Un littéral d'asset réel, entouré de bruit non pertinent
+    /// (mot-clé `'GET'`), doit être réécrit en place, le reste du fichier
+    /// intact caractère pour caractère.
+    #[test]
+    fn scan_and_resolve_service_worker_rewrites_asset_path_in_place() {
+        let mut registry = AssetUrlRegistry::new();
+        registry.insert(
+            "utils.svg".to_string(),
+            "/sprites/utils.4c4e9.svg".to_string(),
+        );
+        let ctx = Path::new("sw.js");
+        let src = "if (m !== 'GET') return '/sprites/utils.svg';";
+        let out = scan_and_resolve_service_worker(src, &registry, ctx).unwrap();
+        assert_eq!(out, "if (m !== 'GET') return '/sprites/utils.4c4e9.svg';");
+    }
+
+    /// Trouve la première sous-chaîne de 64 caractères hexadécimaux dans
+    /// un texte — la représentation littérale d'un hash BLAKE3 complet,
+    /// quel que soit le guillemet qui l'entoure (cf. commentaire du test
+    /// qui l'utilise). S'assure de ne pas capturer un fragment d'un
+    /// hexadécimal plus long en vérifiant que le caractère suivant n'en
+    /// est pas un lui-même.
+    fn find_hex64(text: &str) -> Option<&str> {
+        let bytes = text.as_bytes();
+        if bytes.len() < 64 {
+            return None;
+        }
+        for start in 0..=bytes.len() - 64 {
+            let end = start + 64;
+            let candidate = &text[start..end];
+            let next_is_hex = bytes.get(end).is_some_and(u8::is_ascii_hexdigit);
+            if !next_is_hex && candidate.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    // ── run_service_worker_pipeline (intégration, Handoff §3.3/§3.4) ────────
+
+    /// Bootstrap du hash en 2 passes de bout en bout : le jeton sentinelle
+    /// disparaît totalement du fichier écrit sur disque, remplacé par un
+    /// hash de 64 caractères hex ; le nom de fichier produit reflète un
+    /// SECOND hash, du contenu final — les deux hashs doivent différer
+    /// (l'un précède l'injection de l'autre dans le buffer).
+    #[test]
+    fn run_service_worker_pipeline_two_pass_hash_bootstrap() {
+        let sandbox = std::env::temp_dir().join("marius-assets-test-sw-bootstrap");
+        let theme_dir = sandbox.join("theme");
+        let build_root = sandbox.join("build");
+        fs::create_dir_all(&theme_dir).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        fs::write(
+            theme_dir.join("serviceWorker.js"),
+            "const CACHE_NAME = \"MARIUS_CACHE_HASH\";\nconst r = ['/styles/main.css'];",
+        )
+        .unwrap();
+
+        let mut registry = AssetUrlRegistry::new();
+        registry.insert("main.css".to_string(), "/styles/main.a1b2c.css".to_string());
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+        let config = ServiceWorkerConfig {
+            entry: "serviceWorker.js".to_string(),
+        };
+
+        run_service_worker_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &config,
+            &registry,
+            &mut manifest,
+        )
+        .unwrap();
+
+        let entry = manifest.get("serviceWorker.js").expect("entrée attendue");
+        assert!(!entry.url.contains("MARIUS_CACHE_HASH"));
+        assert!(entry.url.starts_with("/serviceWorker."));
+        assert!(entry.url.ends_with(".js"));
+
+        let written =
+            fs::read_to_string(build_root.join(entry.url.trim_start_matches('/'))).unwrap();
+
+        assert!(!written.contains("MARIUS_CACHE_HASH"));
+        assert!(written.contains("/styles/main.a1b2c.css"));
+
+        // Le hash CACHE_NAME injecté dans le contenu est le hash COMPLET
+        // (64 hex) du buffer intermédiaire (Passe 1) ; le hash du manifeste
+        // (`entry.hash`, également complet) est celui du buffer FINAL
+        // (Passe 2, après injection) — les deux hashent des contenus
+        // différents, ils doivent donc différer.
+        //
+        // Extraction SANS dépendre du caractère de guillemet : en mode
+        // `minify: true`, `oxc_codegen` choisit dynamiquement guillemet
+        // simple/double selon la sortie la plus courte pour CHAQUE chaîne
+        // (vérifié dans `oxc_codegen/src/str.rs` — le champ `single_quote`
+        // n'est consulté que hors mode minifié). Un guillemet double fixe
+        // n'est donc jamais une hypothèse sûre ici.
+        let injected_hash =
+            find_hex64(&written).expect("hash complet (64 hex) attendu dans le contenu écrit");
+        assert_eq!(
+            injected_hash.len(),
+            64,
+            "hash complet attendu, pas le suffixe court"
+        );
+        assert_ne!(
+            injected_hash, entry.hash,
+            "Passe 1 (avant injection) et Passe 2 (après) doivent produire des hashs distincts"
+        );
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    /// Fail-hard : un chemin ressemblant à un asset mais absent du
+    /// registre dérivé du manifeste bloque tout le pipeline, aucune
+    /// exception propre au Service Worker.
+    #[test]
+    fn run_service_worker_pipeline_fails_hard_on_missing_asset() {
+        let sandbox = std::env::temp_dir().join("marius-assets-test-sw-missing");
+        let theme_dir = sandbox.join("theme");
+        let build_root = sandbox.join("build");
+        fs::create_dir_all(&theme_dir).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        fs::write(
+            theme_dir.join("serviceWorker.js"),
+            "const CACHE_NAME = \"MARIUS_CACHE_HASH\";\nconst r = ['/scripts/index.js'];",
+        )
+        .unwrap();
+
+        let registry = AssetUrlRegistry::new(); // vide : rien à trouver
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+        let config = ServiceWorkerConfig {
+            entry: "serviceWorker.js".to_string(),
+        };
+
+        let result = run_service_worker_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &config,
+            &registry,
+            &mut manifest,
+        );
+        assert!(result.is_err());
+        assert!(manifest.is_empty());
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    // ── minify_javascript (Chantier 4, oxc) ─────────────────────────────
+
+    /// Suppression des commentaires et des espaces superflus — le
+    /// comportement de base attendu d'une minification.
+    #[test]
+    fn minify_javascript_strips_comments_and_whitespace() {
+        let src = "// commentaire\nconst   x   =   1 + 1;\nconsole.log(x);\n";
+        let out = minify_javascript(src, Path::new("test.js")).unwrap();
+        assert!(!out.contains("commentaire"));
+        assert!(!out.contains('\n'));
+    }
+
+    /// Le contenu d'un littéral de chaîne (une URL hachée, typiquement)
+    /// traverse la minification intact — seuls les commentaires/espaces/
+    /// noms de bindings locaux sont affectés, jamais le contenu d'une
+    /// chaîne.
+    #[test]
+    fn minify_javascript_preserves_string_literal_content() {
+        let src = "const u = '/scripts/main.a1b2c3.js';\nconsole.log(u);";
+        let out = minify_javascript(src, Path::new("test.js")).unwrap();
+        assert!(out.contains("/scripts/main.a1b2c3.js"));
+    }
+
+    /// Un nom EXPORTÉ (Module ESM réel, `import`/`export` présents) doit
+    /// survivre à la passe de mangling — c'est la garantie centrale sans
+    /// laquelle [scripts.components] casserait la résolution ESM
+    /// inter-fichiers (cf. commentaire de `minify_javascript`).
+    #[test]
+    fn minify_javascript_keeps_exported_name_in_module_source() {
+        let src = "export const initNavigation = () => { console.log('Nav'); };";
+        let out = minify_javascript(src, Path::new("navigation.js")).unwrap();
+        assert!(out.contains("initNavigation"));
+    }
+
+    /// Fail-hard : un buffer syntaxiquement invalide en amont (bug de
+    /// substitution, pas une tolérance à absorber) doit faire échouer la
+    /// minification, pas produire un artefact tronqué silencieusement.
+    #[test]
+    fn minify_javascript_fails_hard_on_invalid_syntax() {
+        let src = "const x = ;";
+        let result = minify_javascript(src, Path::new("broken.js"));
+        assert!(result.is_err());
+    }
+
+    /// Une source sans `import`/`export` (cas du Service Worker réel,
+    /// script isolé) doit être détectée comme Script, pas Module, et se
+    /// minifier sans erreur.
+    #[test]
+    fn minify_javascript_handles_plain_script_source() {
+        let src =
+            "const CACHE_NAME = 'MARIUS_CACHE_HASH';\nself.addEventListener('install', () => {});";
+        let out = minify_javascript(src, Path::new("serviceWorker.js")).unwrap();
+        assert!(out.contains("MARIUS_CACHE_HASH"));
     }
 }

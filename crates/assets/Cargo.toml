@@ -53,6 +53,31 @@ lightningcss = { version = "1.0.0-alpha.71", features = ["bundler", "visitor"] }
 # cet outil de build (voir note en bas de fichier).
 quick-xml = "0.41"
 
+# Pipeline [scripts.components] + [service_worker] — passe de minification
+# finale (suppression des commentaires/espaces, compression AST,
+# renommage des bindings locaux). Cinq crates du même workspace `oxc`,
+# ARENA-based (`oxc_allocator`) — cohérent avec l'éthique DOD du reste de
+# ce binaire, pas un choix arbitraire.
+#
+# ATTENTION VERSION : `oxc_*` est en 0.x (pas de release 1.0 à ce jour),
+# cadence de publication hebdomadaire observée sur crates.io le jour de
+# cette session (0.140.0, 0.139.0, 0.138.0, ... une release par semaine
+# environ) — API instable par construction sous ce régime, donc épinglage
+# EXACT (`=`) plutôt qu'une plage `^`/`~`, même logique que `lightningcss`
+# ci-dessus. Les cinq crates DOIVENT rester synchronisées à la même
+# version — elles partagent des types internes (`Program<'a>`,
+# `Allocator`) au travers des frontières de crate ; une divergence de
+# version entre elles ne compile simplement pas.
+# Signature exacte vérifiée par lecture directe du dépôt GitHub
+# `oxc-project/oxc` (branche `main`, fichier
+# `crates/oxc_minifier/examples/minifier.rs`) le jour de cette session —
+# pas déduite de mémoire, cet écosystème bouge trop vite pour ça.
+oxc_allocator = "=0.140.0"
+oxc_parser = "=0.140.0"
+oxc_span = "=0.140.0"
+oxc_codegen = "=0.140.0"
+oxc_minifier = "=0.140.0"
+
 # Volontairement absent : aucune dépendance async/tokio (ce binaire est
 # séquentiel, DOD — un seul thread, un seul passage par fichier, buffers
 # réutilisés), aucun framework CLI (clap, etc. — un seul argument

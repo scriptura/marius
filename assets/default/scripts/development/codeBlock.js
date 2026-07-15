@@ -1,5 +1,3 @@
-'use strict'
-
 /**
  * @summary Initialise les blocs de code : bouton copy-to-clipboard et bandeau
  * de langue. Cible les éléments `.pre > code` et `.pre` présents au moment
@@ -33,73 +31,73 @@
  *   nécessaire.
  */
 
-const selectText = node => {
-  if (!window.getSelection) {
-    console.warn('selectText: API getSelection non supportée.')
-    return
-  }
-  const selection = window.getSelection()
-  const range = document.createRange()
-  range.selectNodeContents(node)
-  selection.removeAllRanges()
-  selection.addRange(range)
-}
+const selectText = (node) => {
+	if (!window.getSelection) {
+		console.warn("selectText: API getSelection non supportée.");
+		return;
+	}
+	const selection = window.getSelection();
+	const range = document.createRange();
+	range.selectNodeContents(node);
+	selection.removeAllRanges();
+	selection.addRange(range);
+};
 
 function initCopyButtons() {
-  const codeElements = document.querySelectorAll('.pre > code:not(:empty)')
-  if (!codeElements.length) return
+	const codeElements = document.querySelectorAll(".pre > code:not(:empty)");
+	if (!codeElements.length) return;
 
-  // Batch read — toutes les lectures layout avant toute écriture DOM
-  const heights = Array.from(codeElements, el => el.offsetHeight)
+	// Batch read — toutes les lectures layout avant toute écriture DOM
+	const heights = Array.from(codeElements, (el) => el.offsetHeight);
 
-  for (let i = 0; i < codeElements.length; i++) {
-    const el = codeElements[i]
-    const label = el.dataset.select || 'Select and copy'
-    const button = document.createElement('button')
+	for (let i = 0; i < codeElements.length; i++) {
+		const el = codeElements[i];
+		const label = el.dataset.select || "Select and copy";
+		const button = document.createElement("button");
 
-    button.type = 'button'
-    button.title = label
-    button.ariaLabel = label
+		button.type = "button";
+		button.title = label;
+		button.ariaLabel = label;
 
-    if (heights[i] < 30) button.classList.add('copy-offset')
+		if (heights[i] < 30) button.classList.add("copy-offset");
 
-    if (typeof injectSvgSprite === 'function') injectSvgSprite(button, 'copy')
+		if (typeof injectSvgSprite === "function") injectSvgSprite(button, "copy");
 
-    button.addEventListener('click', () => {
-      selectText(el)
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(el.textContent)
-      } else {
-        document.execCommand('copy')
-      }
-    })
+		button.addEventListener("click", () => {
+			selectText(el);
+			if (navigator.clipboard) {
+				navigator.clipboard.writeText(el.textContent);
+			} else {
+				document.execCommand("copy");
+			}
+		});
 
-    el.parentElement.appendChild(button)
-  }
+		el.parentElement.appendChild(button);
+	}
 }
 
 function initCodeBlockTitles() {
-  const blocks = document.querySelectorAll('.pre')
-  if (!blocks.length) return
+	const blocks = document.querySelectorAll(".pre");
+	if (!blocks.length) return;
 
-  for (const el of blocks) {
-    const firstChild = el.children[0]
-    if (!firstChild) continue
+	for (const el of blocks) {
+		const firstChild = el.children[0];
+		if (!firstChild) continue;
 
-    const language = firstChild.dataset.language
-    const item = document.createElement('div')
+		const language = firstChild.dataset.language;
+		const item = document.createElement("div");
 
-    if (typeof injectSvgSprite === 'function') injectSvgSprite(item, 'code')
+		if (typeof injectSvgSprite === "function") injectSvgSprite(item, "code");
 
-    if (language) {
-      const span = document.createElement('span')
-      span.textContent = language
-      item.appendChild(span)
-    }
+		if (language) {
+			const span = document.createElement("span");
+			span.textContent = language;
+			item.appendChild(span);
+		}
 
-    el.appendChild(item)
-  }
+		el.appendChild(item);
+	}
 }
 
-initCopyButtons()
-initCodeBlockTitles()
+initCopyButtons();
+initCodeBlockTitles();

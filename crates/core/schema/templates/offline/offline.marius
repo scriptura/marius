@@ -1,0 +1,38 @@
+{% extends templates/base.marius %}
+
+{% block head_description %}{{ record.description }}{% endblock %}
+
+{% block head_title %}{{ record.description }}{% endblock %}
+
+{% block main_content %}<article class="content-core">
+    <header role="banner">
+        <h1 class="main-heading">Problème réseau <span>.&nbsp;Page offline</span></h1>
+    </header>
+    <div class="grid2 s-grid1 gap">
+        <!--
+        <figure class="xs-center">
+            <svg class="size xs-scale decorative-svg sprite-to-inline svg-animation invisible-if-animation" role="img"
+                focusable="false" style="--size:35em;--xs-scale:75%">
+                <use href=""></use>
+            </svg>
+        </figure>
+        -->
+        <div class="center">
+            <div class="grid">
+                <div class="message-highlight">
+                    <svg class="icon" role="img" focusable="false">
+                        <use href="/sprites/utils.svg#info"></use>
+                    </svg>
+                    <div>
+                        <p>Il semble que vous n'ayez pas de connexion Internet ou que le serveur soit indisponible.</p>
+                        <p>Veuillez recharger la page lorsque vous serez connecté.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <hr><button class="go-back button"><svg class="icon-inline reverse" role="img" focusable="false">
+            <use href="/sprites/utils.svg#arrow-right2"></use>
+        </svg>Retour à la page précédente</button>
+    <!-- TODO test -->
+</article>{% endblock %}
