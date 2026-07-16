@@ -1,6 +1,6 @@
 /**
  * @module DisclosureSystem
- * @version 1.1.0
+ * @version 1.2.0
  * @author Olivier C
  * * --- RAISON D'ÊTRE & VISION ARCHITECTURALE ---
  * Ce moteur traite les Onglets (.tabs) et les Accordéons (.accordion) comme une seule
@@ -98,7 +98,6 @@ const SUPPORTS_UNTIL_FOUND = "onbeforematch" in window;
 const STATE_KEY = "uiState";
 
 // --- DATA LAYOUT (Hot State Cache) ---
-// Centralisation de l'état en mémoire vive pour découpler la logique du stockage I/O.
 const DisclosureState = {
 	slug: window.location.pathname,
 	cache: null,
@@ -107,18 +106,25 @@ const DisclosureState = {
 // --- DAL (Data Access Layer) ---
 const hydrateState = () => {
 	if (DisclosureState.cache) return DisclosureState.cache;
+
 	try {
 		const stored = localStorage.getItem(STATE_KEY);
-		const parsed = stored ? JSON.parse(stored) : { uiState: {} };
-		if (!parsed.uiState[DisclosureState.slug]) {
+		const parsed = stored ? JSON.parse(stored) : null;
+
+		// Sécurité DOD : garantit un data layout strict même si l'I/O JSON est corrompu
+		if (!parsed || typeof parsed !== "object")
+			throw new Error("Invalid payload");
+		if (!parsed.uiState) parsed.uiState = {};
+		if (!parsed.uiState[DisclosureState.slug])
 			parsed.uiState[DisclosureState.slug] = {};
-		}
+
 		DisclosureState.cache = parsed;
 	} catch {
-		// localStorage indisponible (navigation privée iOS, quota dépassé, etc.)
-		// Dégradation silencieuse : état en mémoire volatile, pas de persistance.
+		// Dégradation silencieuse : layout mémoire pur volatil
 		DisclosureState.cache = { uiState: { [DisclosureState.slug]: {} } };
 	}
+
+	// INVARIANT CRITIQUE : Toujours retourner le pointeur du cache
 	return DisclosureState.cache;
 };
 
@@ -127,42 +133,32 @@ const persistState = () => {
 	try {
 		localStorage.setItem(STATE_KEY, JSON.stringify(DisclosureState.cache));
 	} catch {
-		// Échec silencieux — la session reste fonctionnelle, sans persistance.
+		// Échec silencieux
 	}
 };
 
 // --- Animation Engine (The Painter) ---
 const animatePanel = (panel, isOpening) => {
-	// Accordéons uniquement — les tab-panels ne transitent pas par ici
 	if (!panel.classList.contains("accordion-panel")) return;
 
 	if (isOpening) {
-		// Panel déjà révélé par syncState → scrollHeight lisible
 		panel.style.maxHeight = "0px";
-		panel.offsetHeight; // Force reflow — commit le point de départ
+		panel.offsetHeight; // Force reflow
 		panel.style.maxHeight = `${panel.scrollHeight}px`;
 
 		const onEnd = () => {
-			// removeAttribute libère le panel (flexible au resize / injection de contenu)
 			panel.removeAttribute("style");
 			panel.removeEventListener("transitionend", onEnd);
 		};
 		panel.addEventListener("transitionend", onEnd);
 	} else {
-		// Panel encore visible → scrollHeight > 0, commit le point de départ
 		panel.style.maxHeight = `${panel.scrollHeight}px`;
 
-		// rAF : retire l'inline ET pose aria-hidden atomiquement.
-		// aria-hidden='true' pilote la transition CSS (max-height: 0 via [aria-hidden='true']).
-		// hidden='until-found' ne peut pas être le déclencheur : son masquage natif navigateur
-		// est instantané et couperait la transition avant qu'elle ne s'exécute.
 		requestAnimationFrame(() => {
 			panel.removeAttribute("style");
 			panel.setAttribute("aria-hidden", "true");
 		});
 
-		// Après la transition : upgrade vers until-found si supporté (active CTRL+F).
-		// C'est ici seulement que le masquage natif navigateur peut être posé sans dommage.
 		const onEnd = () => {
 			if (SUPPORTS_UNTIL_FOUND) {
 				panel.removeAttribute("aria-hidden");
@@ -187,8 +183,6 @@ const transform = (container, cIdx) => {
 		tabList.className = "tab-list";
 	}
 
-	// Signal source : name sur les summaries → injection de data-singletab sur le container.
-	// Attribut canonique observable dans le DOM transformé (CSS, devtools, tests).
 	const hasNamedSummary = Array.from(rawEntities).some((d) =>
 		d.hasAttribute("name"),
 	);
@@ -238,7 +232,7 @@ const syncState = (targetTrigger, container, useAnimation = true) => {
 	const triggers = container.querySelectorAll(
 		isTabs ? ':scope > .tab-list > [role="tab"]' : ".accordion-summary",
 	);
-	const fullState = hydrateState();
+	const fullState = hydrateState(); // Appel sécurisé
 
 	const willBeOpen = isTabs
 		? true
@@ -257,13 +251,10 @@ const syncState = (targetTrigger, container, useAnimation = true) => {
 					: currentlyOpen;
 		const isChanging = shouldOpen !== currentlyOpen;
 
-		// FERMETURE animée (accordion) : capturer scrollHeight avant toute mutation.
-		// animatePanel devient owner du masquage (posé dans le rAF au cycle suivant).
 		if (isChanging && !shouldOpen && useAnimation) {
 			animatePanel(panel, false);
 		}
 
-		// Mutation des attributs trigger
 		trigger.setAttribute("aria-expanded", shouldOpen);
 		if (isTabs) {
 			trigger.setAttribute("aria-selected", shouldOpen);
@@ -271,20 +262,14 @@ const syncState = (targetTrigger, container, useAnimation = true) => {
 		}
 
 		if (shouldOpen) {
-			// Révélation synchrone — scrollHeight devient lisible pour animatePanel
 			panel.removeAttribute("hidden");
 			panel.removeAttribute("aria-hidden");
 			fullState.uiState[DisclosureState.slug][trigger.id] = "open";
 
-			// OUVERTURE animée : panel révélé, scrollHeight > 0
 			if (isChanging && useAnimation) {
 				animatePanel(panel, true);
 			}
 		} else {
-			// Masquage immédiat dans deux cas :
-			// - tabs : animatePanel est inopérant (pas un accordion-panel)
-			// - useAnimation=false : beforematch, restauration init
-			// Cas accordion animé : masquage délégué au rAF dans animatePanel(false)
 			if (!useAnimation || isTabs) {
 				if (SUPPORTS_UNTIL_FOUND) {
 					panel.hidden = "until-found";
@@ -300,8 +285,6 @@ const syncState = (targetTrigger, container, useAnimation = true) => {
 };
 
 // --- Navigation clavier (tabs uniquement) ---
-// Spec ARIA 1.1 : les role="tab" sont navigables par flèches au sein du tablist.
-// Tab/Shift+Tab gère le focus entre zones — les flèches gèrent le focus intra-tablist.
 const bindTabKeyboard = (container) => {
 	const tabList = container.querySelector(":scope > .tab-list");
 	if (!tabList) return;
@@ -349,30 +332,35 @@ export const initDisclosureSystem = () => {
 
 		if (isTabs) bindTabKeyboard(container);
 
-		// AOT : Évaluation isolée du cache pour CE conteneur uniquement.
-		// Empêche la mutation en cours de boucle de corrompre l'initialisation des conteneurs suivants.
+		// Isolement O(N) pour éviter l'écrasement inter-conteneurs
 		const containerHasOpenTab =
 			isTabs && Array.from(triggers).some((t) => pageState[t.id] === "open");
 
+		// Phase de Boot : Hydratation unidirectionnelle Cache -> DOM sans déclencher syncState
 		triggers.forEach((trigger) => {
 			trigger.addEventListener("click", () =>
 				syncState(trigger, container, true),
 			);
 
-			// Restauration de l'état (sans animation pour le premier rendu)
-			if (pageState[trigger.id] === "open") {
-				syncState(trigger, container, false);
-			} else if (isTabs && !containerHasOpenTab && trigger === triggers[0]) {
-				syncState(trigger, container, false);
+			const shouldBeOpen =
+				pageState[trigger.id] === "open" ||
+				(isTabs && !containerHasOpenTab && trigger === triggers[0]);
+
+			trigger.setAttribute("aria-expanded", shouldBeOpen);
+			if (isTabs) {
+				trigger.setAttribute("aria-selected", shouldBeOpen);
+				trigger.disabled = shouldBeOpen;
+			}
+
+			const pnl = document.getElementById(
+				trigger.getAttribute("aria-controls"),
+			);
+			if (shouldBeOpen) {
+				pnl.removeAttribute("hidden");
+				pnl.removeAttribute("aria-hidden");
 			} else {
-				const pnl = document.getElementById(
-					trigger.getAttribute("aria-controls"),
-				);
-				if (SUPPORTS_UNTIL_FOUND) {
-					pnl.hidden = "until-found";
-				} else {
-					pnl.setAttribute("aria-hidden", "true");
-				}
+				if (SUPPORTS_UNTIL_FOUND) pnl.hidden = "until-found";
+				else pnl.setAttribute("aria-hidden", "true");
 			}
 		});
 
@@ -382,7 +370,6 @@ export const initDisclosureSystem = () => {
 					const trigger = document.getElementById(
 						panel.getAttribute("aria-labelledby"),
 					);
-					// Recherche CTRL+F : ouverture instantanée, pas de transition de hauteur
 					if (trigger) syncState(trigger, container, false);
 				});
 			});
