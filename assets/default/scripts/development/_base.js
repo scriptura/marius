@@ -139,63 +139,6 @@ const AppPipeline = (() => {
 		},
 	};
 
-	// — Navigation principale —
-	const NavigationSystem = {
-		_btn: null,
-		_subNav: null,
-		_content: null,
-		_sizeNav: 0,
-		_htmlFontSize: 1,
-		_resizeTimer: null,
-
-		init() {
-			this._btn = document.querySelector(".cmd-nav");
-			this._subNav = document.querySelector(".sub-nav");
-			if (!this._btn || !this._subNav) return;
-
-			this._content = document.querySelectorAll("body > :not(.nav)");
-			this._sizeNav = parseFloat(
-				getComputedStyle(DOM.html).getPropertyValue("--size-nav"),
-			);
-			this._htmlFontSize = parseFloat(
-				getComputedStyle(DOM.html).getPropertyValue("font-size"),
-			);
-
-			// État initial : dépend du viewport courant.
-			// En mode desktop (viewport > sizeNav), le sub-nav est visible en CSS
-			// et ne doit pas être masqué aux AT via aria-hidden.
-			const isMobile = window.innerWidth / this._htmlFontSize < this._sizeNav;
-			this._btn.setAttribute("aria-expanded", "false");
-			this._subNav.setAttribute("aria-hidden", isMobile ? "true" : "false");
-		},
-
-		toggle() {
-			if (!this._btn) return;
-			const isActive = DOM.html.classList.toggle("active");
-			DOM.body.classList.toggle("active");
-			this._btn.setAttribute("aria-expanded", isActive.toString());
-			this._subNav.setAttribute("aria-hidden", (!isActive).toString());
-			this._content.forEach((e) =>
-				isActive ? e.setAttribute("inert", "") : e.removeAttribute("inert"),
-			);
-		},
-
-		onResize() {
-			clearTimeout(this._resizeTimer);
-			this._resizeTimer = setTimeout(() => {
-				if (!this._btn) return;
-				const isDesktop =
-					window.innerWidth / this._htmlFontSize > this._sizeNav;
-				if (isDesktop) {
-					// Passage en desktop : ferme le menu burger si ouvert et restaure
-					// aria-hidden à false — le sub-nav est désormais visible en CSS.
-					if (this._btn.getAttribute("aria-expanded") === "true") this.toggle();
-					this._subNav.setAttribute("aria-hidden", "false");
-				}
-			}, 200);
-		},
-	};
-
 	// — Assets —
 	const AssetSystem = {
 		// Capturé une fois : point d'insertion pour respecter l'ordre de cascade CSS.

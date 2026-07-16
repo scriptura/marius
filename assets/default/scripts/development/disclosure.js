@@ -1,6 +1,6 @@
 /**
  * @module DisclosureSystem
- * @version 1.0.1
+ * @version 1.1.0
  * @author Olivier C
  * * --- RAISON D'ÊTRE & VISION ARCHITECTURALE ---
  * Ce moteur traite les Onglets (.tabs) et les Accordéons (.accordion) comme une seule
@@ -101,11 +101,12 @@ const STATE_KEY = "uiState";
 // Centralisation de l'état en mémoire vive pour découpler la logique du stockage I/O.
 const DisclosureState = {
 	slug: window.location.pathname,
-	cache: {},
+	cache: null,
 };
 
 // --- DAL (Data Access Layer) ---
 const hydrateState = () => {
+	if (DisclosureState.cache) return DisclosureState.cache;
 	try {
 		const stored = localStorage.getItem(STATE_KEY);
 		const parsed = stored ? JSON.parse(stored) : { uiState: {} };
@@ -118,9 +119,11 @@ const hydrateState = () => {
 		// Dégradation silencieuse : état en mémoire volatile, pas de persistance.
 		DisclosureState.cache = { uiState: { [DisclosureState.slug]: {} } };
 	}
+	return DisclosureState.cache;
 };
 
 const persistState = () => {
+	if (!DisclosureState.cache) return;
 	try {
 		localStorage.setItem(STATE_KEY, JSON.stringify(DisclosureState.cache));
 	} catch {
@@ -189,7 +192,9 @@ const transform = (container, cIdx) => {
 	const hasNamedSummary = Array.from(rawEntities).some((d) =>
 		d.hasAttribute("name"),
 	);
-	if (hasNamedSummary && !isTabs) container.setAttribute("data-singletab", "");
+	if (hasNamedSummary && !isTabs) {
+		container.setAttribute("data-singletab", "");
+	}
 
 	rawEntities.forEach((details, eIdx) => {
 		const summary = details.querySelector(":scope > summary");
@@ -233,12 +238,11 @@ const syncState = (targetTrigger, container, useAnimation = true) => {
 	const triggers = container.querySelectorAll(
 		isTabs ? ':scope > .tab-list > [role="tab"]' : ".accordion-summary",
 	);
+	const fullState = hydrateState();
 
 	const willBeOpen = isTabs
 		? true
 		: targetTrigger.getAttribute("aria-expanded") !== "true";
-
-	const localState = DisclosureState.cache.uiState[DisclosureState.slug];
 
 	triggers.forEach((trigger) => {
 		const panel = document.getElementById(
@@ -255,7 +259,9 @@ const syncState = (targetTrigger, container, useAnimation = true) => {
 
 		// FERMETURE animée (accordion) : capturer scrollHeight avant toute mutation.
 		// animatePanel devient owner du masquage (posé dans le rAF au cycle suivant).
-		if (isChanging && !shouldOpen && useAnimation) animatePanel(panel, false);
+		if (isChanging && !shouldOpen && useAnimation) {
+			animatePanel(panel, false);
+		}
 
 		// Mutation des attributs trigger
 		trigger.setAttribute("aria-expanded", shouldOpen);
@@ -268,20 +274,25 @@ const syncState = (targetTrigger, container, useAnimation = true) => {
 			// Révélation synchrone — scrollHeight devient lisible pour animatePanel
 			panel.removeAttribute("hidden");
 			panel.removeAttribute("aria-hidden");
-			localState[trigger.id] = "open";
+			fullState.uiState[DisclosureState.slug][trigger.id] = "open";
 
 			// OUVERTURE animée : panel révélé, scrollHeight > 0
-			if (isChanging && useAnimation) animatePanel(panel, true);
+			if (isChanging && useAnimation) {
+				animatePanel(panel, true);
+			}
 		} else {
 			// Masquage immédiat dans deux cas :
 			// - tabs : animatePanel est inopérant (pas un accordion-panel)
 			// - useAnimation=false : beforematch, restauration init
 			// Cas accordion animé : masquage délégué au rAF dans animatePanel(false)
 			if (!useAnimation || isTabs) {
-				if (SUPPORTS_UNTIL_FOUND) panel.hidden = "until-found";
-				else panel.setAttribute("aria-hidden", "true");
+				if (SUPPORTS_UNTIL_FOUND) {
+					panel.hidden = "until-found";
+				} else {
+					panel.setAttribute("aria-hidden", "true");
+				}
 			}
-			localState[trigger.id] = "close";
+			fullState.uiState[DisclosureState.slug][trigger.id] = "close";
 		}
 	});
 
@@ -295,26 +306,24 @@ const bindTabKeyboard = (container) => {
 	const tabList = container.querySelector(":scope > .tab-list");
 	if (!tabList) return;
 
-	// Mise en cache statique pour éviter l'allocation dynamique Array/NodeList à chaque frappe
-	const tabs = Array.from(tabList.querySelectorAll('[role="tab"]'));
-
 	tabList.addEventListener("keydown", (e) => {
-		// Filtrage en place de l'état actif/désactivé
-		const activeTabs = tabs.filter((t) => !t.hasAttribute("disabled"));
-		if (activeTabs.length === 0) return;
-
+		const tabs = [...tabList.querySelectorAll('[role="tab"]:not([disabled])')];
 		const current = document.activeElement;
-		const idx = activeTabs.indexOf(current);
+		const idx = tabs.indexOf(current);
 		if (idx === -1) return;
 
 		let next = null;
-		if (e.key === "ArrowRight")
-			next = activeTabs[(idx + 1) % activeTabs.length];
-		else if (e.key === "ArrowLeft")
-			next = activeTabs[(idx - 1 + activeTabs.length) % activeTabs.length];
-		else if (e.key === "Home") next = activeTabs[0];
-		else if (e.key === "End") next = activeTabs[activeTabs.length - 1];
-		else return;
+		if (e.key === "ArrowRight") {
+			next = tabs[(idx + 1) % tabs.length];
+		} else if (e.key === "ArrowLeft") {
+			next = tabs[(idx - 1 + tabs.length) % tabs.length];
+		} else if (e.key === "Home") {
+			next = tabs[0];
+		} else if (e.key === "End") {
+			next = tabs[tabs.length - 1];
+		} else {
+			return;
+		}
 
 		e.preventDefault();
 		next.focus();
@@ -324,9 +333,8 @@ const bindTabKeyboard = (container) => {
 
 // --- EXPORT PUBLIC (Entrypoint System) ---
 export const initDisclosureSystem = () => {
-	hydrateState(); // Hydratation unique (I/O) au démarrage du système
+	const pageState = hydrateState().uiState[DisclosureState.slug];
 	const containers = document.querySelectorAll(".tabs, .accordion");
-	const pageState = DisclosureState.cache.uiState[DisclosureState.slug];
 
 	containers.forEach((container, cIdx) => {
 		transform(container, cIdx);
@@ -341,6 +349,11 @@ export const initDisclosureSystem = () => {
 
 		if (isTabs) bindTabKeyboard(container);
 
+		// AOT : Évaluation isolée du cache pour CE conteneur uniquement.
+		// Empêche la mutation en cours de boucle de corrompre l'initialisation des conteneurs suivants.
+		const containerHasOpenTab =
+			isTabs && Array.from(triggers).some((t) => pageState[t.id] === "open");
+
 		triggers.forEach((trigger) => {
 			trigger.addEventListener("click", () =>
 				syncState(trigger, container, true),
@@ -349,18 +362,17 @@ export const initDisclosureSystem = () => {
 			// Restauration de l'état (sans animation pour le premier rendu)
 			if (pageState[trigger.id] === "open") {
 				syncState(trigger, container, false);
-			} else if (
-				isTabs &&
-				!Object.values(pageState).includes("open") &&
-				trigger === triggers[0]
-			) {
+			} else if (isTabs && !containerHasOpenTab && trigger === triggers[0]) {
 				syncState(trigger, container, false);
 			} else {
 				const pnl = document.getElementById(
 					trigger.getAttribute("aria-controls"),
 				);
-				if (SUPPORTS_UNTIL_FOUND) pnl.hidden = "until-found";
-				else pnl.setAttribute("aria-hidden", "true");
+				if (SUPPORTS_UNTIL_FOUND) {
+					pnl.hidden = "until-found";
+				} else {
+					pnl.setAttribute("aria-hidden", "true");
+				}
 			}
 		});
 

@@ -2777,6 +2777,59 @@ fn run_scripts_pipeline(
         );
     }
 
+    // Bug découvert en session : modules DÉPENDANCE (importés
+    // transitivement via ESM natif, ex. `navigation.js` importé par
+    // `main`/`index.js`) — hachés et écrits sur disque par
+    // `patch_and_hash_modules` (Passe 3, l'arène ENTIÈRE, dépendances
+    // comprises), mais jusqu'ici jamais inscrits au manifeste puisque la
+    // boucle ci-dessus ne parcourt QUE les points d'entrée déclarés dans
+    // `theme.toml`. Un fichier physiquement présent mais absent de tout
+    // registre logique est invisible à `{% asset %}` (Forge) ET à la
+    // table de routage statique du Shell (`asset_routes.rs`, elle-même
+    // dérivée de ce manifeste) — 404 côté navigateur malgré un build
+    // apparemment réussi.
+    //
+    // Clé : stem du fichier source (ex. "navigation.js") — ces modules
+    // n'ont pas de nom de cible logique, seulement leur propre identité de
+    // fichier. Limite connue, non résolue ici : deux dépendances de même
+    // stem dans des dossiers différents (ex. `foo/utils.js` et
+    // `bar/utils.js`) collisionneraient silencieusement sur cette même
+    // clé — non pertinent pour l'arborescence actuelle du thème, mais à
+    // garder en tête si le graphe de modules se complexifie.
+    let entry_idx_set: HashSet<usize> = entry_indices.iter().copied().collect();
+    for (idx, slot) in resolved.iter().enumerate() {
+        if entry_idx_set.contains(&idx) {
+            continue; // déjà couvert ci-dessus, sous sa clé logique (nom de cible)
+        }
+        let Some(patched) = slot else {
+            continue; // jamais atteint par la Passe 2/3 — nœud mort, hors graphe réel
+        };
+
+        let stem = arena[idx]
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("module-{idx}"));
+
+        manifest.insert(
+            format!("{stem}.js"),
+            AssetEntry {
+                url: patched.url.clone(),
+                path: join_slash(build_root_rel, &patched.output_rel),
+                mime: mime_for_extension("js").to_string(),
+                size: patched.size,
+                hash: patched.full_hash.clone(),
+                version: String::new(),
+            },
+        );
+
+        println!(
+            "[marius-assets] scripts   (dépendance) {} -> {}",
+            arena[idx].path.display(),
+            patched.url
+        );
+    }
+
     Ok(())
 }
 
@@ -4177,28 +4230,6 @@ mod tests {
         assert_eq!(out, "if (m !== 'GET') return '/sprites/utils.4c4e9.svg';");
     }
 
-    /// Trouve la première sous-chaîne de 64 caractères hexadécimaux dans
-    /// un texte — la représentation littérale d'un hash BLAKE3 complet,
-    /// quel que soit le guillemet qui l'entoure (cf. commentaire du test
-    /// qui l'utilise). S'assure de ne pas capturer un fragment d'un
-    /// hexadécimal plus long en vérifiant que le caractère suivant n'en
-    /// est pas un lui-même.
-    fn find_hex64(text: &str) -> Option<&str> {
-        let bytes = text.as_bytes();
-        if bytes.len() < 64 {
-            return None;
-        }
-        for start in 0..=bytes.len() - 64 {
-            let end = start + 64;
-            let candidate = &text[start..end];
-            let next_is_hex = bytes.get(end).is_some_and(u8::is_ascii_hexdigit);
-            if !next_is_hex && candidate.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Some(candidate);
-            }
-        }
-        None
-    }
-
     // ── run_service_worker_pipeline (intégration, Handoff §3.3/§3.4) ────────
 
     /// Bootstrap du hash en 2 passes de bout en bout : le jeton sentinelle
@@ -4253,15 +4284,14 @@ mod tests {
         // (`entry.hash`, également complet) est celui du buffer FINAL
         // (Passe 2, après injection) — les deux hashent des contenus
         // différents, ils doivent donc différer.
-        //
-        // Extraction SANS dépendre du caractère de guillemet : en mode
-        // `minify: true`, `oxc_codegen` choisit dynamiquement guillemet
-        // simple/double selon la sortie la plus courte pour CHAQUE chaîne
-        // (vérifié dans `oxc_codegen/src/str.rs` — le champ `single_quote`
-        // n'est consulté que hors mode minifié). Un guillemet double fixe
-        // n'est donc jamais une hypothèse sûre ici.
-        let injected_hash =
-            find_hex64(&written).expect("hash complet (64 hex) attendu dans le contenu écrit");
+        let cache_name_line = written
+            .lines()
+            .find(|l| l.starts_with("const CACHE_NAME"))
+            .expect("ligne CACHE_NAME attendue");
+        let injected_hash = cache_name_line
+            .split('"')
+            .nth(1)
+            .expect("valeur entre guillemets attendue");
         assert_eq!(
             injected_hash.len(),
             64,
