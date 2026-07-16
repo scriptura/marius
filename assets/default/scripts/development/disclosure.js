@@ -1,6 +1,6 @@
 /**
  * @module DisclosureSystem
- * @version 1.0.0
+ * @version 1.0.1
  * @author Olivier C
  * * --- RAISON D'ÊTRE & VISION ARCHITECTURALE ---
  * Ce moteur traite les Onglets (.tabs) et les Accordéons (.accordion) comme une seule
@@ -94,280 +94,286 @@
  * d'autres scripts, plutôt que greffée localement ici.
  */
 
-const disclosureSystem = () => {
-	const slug = window.location.pathname;
-	const STATE_KEY = "uiState";
-	const SUPPORTS_UNTIL_FOUND = "onbeforematch" in window;
+const SUPPORTS_UNTIL_FOUND = "onbeforematch" in window;
+const STATE_KEY = "uiState";
 
-	// --- DAL (Data Access Layer) ---
-	const getStoredState = () => {
-		try {
-			const stored = localStorage.getItem(STATE_KEY);
-			const parsed = stored ? JSON.parse(stored) : { uiState: {} };
-			if (!parsed.uiState[slug]) parsed.uiState[slug] = {};
-			return parsed;
-		} catch {
-			// localStorage indisponible (navigation privée iOS, quota dépassé, etc.)
-			// Dégradation silencieuse : état en mémoire volatile, pas de persistance.
-			return { uiState: { [slug]: {} } };
+// --- DATA LAYOUT (Hot State Cache) ---
+// Centralisation de l'état en mémoire vive pour découpler la logique du stockage I/O.
+const DisclosureState = {
+	slug: window.location.pathname,
+	cache: {},
+};
+
+// --- DAL (Data Access Layer) ---
+const hydrateState = () => {
+	try {
+		const stored = localStorage.getItem(STATE_KEY);
+		const parsed = stored ? JSON.parse(stored) : { uiState: {} };
+		if (!parsed.uiState[DisclosureState.slug]) {
+			parsed.uiState[DisclosureState.slug] = {};
 		}
-	};
+		DisclosureState.cache = parsed;
+	} catch {
+		// localStorage indisponible (navigation privée iOS, quota dépassé, etc.)
+		// Dégradation silencieuse : état en mémoire volatile, pas de persistance.
+		DisclosureState.cache = { uiState: { [DisclosureState.slug]: {} } };
+	}
+};
 
-	const saveStoredState = (state) => {
-		try {
-			localStorage.setItem(STATE_KEY, JSON.stringify(state));
-		} catch {
-			// Échec silencieux — la session reste fonctionnelle, sans persistance.
-		}
-	};
+const persistState = () => {
+	try {
+		localStorage.setItem(STATE_KEY, JSON.stringify(DisclosureState.cache));
+	} catch {
+		// Échec silencieux — la session reste fonctionnelle, sans persistance.
+	}
+};
 
-	// --- Animation Engine (The Painter) ---
-	const animatePanel = (panel, isOpening) => {
-		// Accordéons uniquement — les tab-panels ne transitent pas par ici
-		if (!panel.classList.contains("accordion-panel")) return;
+// --- Animation Engine (The Painter) ---
+const animatePanel = (panel, isOpening) => {
+	// Accordéons uniquement — les tab-panels ne transitent pas par ici
+	if (!panel.classList.contains("accordion-panel")) return;
 
-		if (isOpening) {
-			// Panel déjà révélé par syncState → scrollHeight lisible
-			panel.style.maxHeight = "0px";
-			panel.offsetHeight; // Force reflow — commit le point de départ
-			panel.style.maxHeight = `${panel.scrollHeight}px`;
+	if (isOpening) {
+		// Panel déjà révélé par syncState → scrollHeight lisible
+		panel.style.maxHeight = "0px";
+		panel.offsetHeight; // Force reflow — commit le point de départ
+		panel.style.maxHeight = `${panel.scrollHeight}px`;
 
-			const onEnd = () => {
-				// removeAttribute libère le panel (flexible au resize / injection de contenu)
-				panel.removeAttribute("style");
-				panel.removeEventListener("transitionend", onEnd);
-			};
-			panel.addEventListener("transitionend", onEnd);
-		} else {
-			// Panel encore visible → scrollHeight > 0, commit le point de départ
-			panel.style.maxHeight = `${panel.scrollHeight}px`;
+		const onEnd = () => {
+			// removeAttribute libère le panel (flexible au resize / injection de contenu)
+			panel.removeAttribute("style");
+			panel.removeEventListener("transitionend", onEnd);
+		};
+		panel.addEventListener("transitionend", onEnd);
+	} else {
+		// Panel encore visible → scrollHeight > 0, commit le point de départ
+		panel.style.maxHeight = `${panel.scrollHeight}px`;
 
-			// rAF : retire l'inline ET pose aria-hidden atomiquement.
-			// aria-hidden='true' pilote la transition CSS (max-height: 0 via [aria-hidden='true']).
-			// hidden='until-found' ne peut pas être le déclencheur : son masquage natif navigateur
-			// est instantané et couperait la transition avant qu'elle ne s'exécute.
-			requestAnimationFrame(() => {
-				panel.removeAttribute("style");
-				panel.setAttribute("aria-hidden", "true");
-			});
-
-			// Après la transition : upgrade vers until-found si supporté (active CTRL+F).
-			// C'est ici seulement que le masquage natif navigateur peut être posé sans dommage.
-			const onEnd = () => {
-				if (SUPPORTS_UNTIL_FOUND) {
-					panel.removeAttribute("aria-hidden");
-					panel.hidden = "until-found";
-				}
-				panel.removeEventListener("transitionend", onEnd);
-			};
-			panel.addEventListener("transitionend", onEnd);
-		}
-	};
-
-	// --- Phase 1 : Transformation (JIT Layout) ---
-	const transform = (container, cIdx) => {
-		const isTabs = container.classList.contains("tabs");
-		const rawEntities = container.querySelectorAll(":scope > details");
-		if (rawEntities.length === 0) return;
-
-		let tabList = null;
-		if (isTabs) {
-			tabList = document.createElement("div");
-			tabList.setAttribute("role", "tablist");
-			tabList.className = "tab-list";
-		}
-
-		// Signal source : name sur les summaries → injection de data-singletab sur le container.
-		// Attribut canonique observable dans le DOM transformé (CSS, devtools, tests).
-		const hasNamedSummary = Array.from(rawEntities).some((d) =>
-			d.hasAttribute("name"),
-		);
-		if (hasNamedSummary && !isTabs)
-			container.setAttribute("data-singletab", "");
-
-		rawEntities.forEach((details, eIdx) => {
-			const summary = details.querySelector(":scope > summary");
-			const content = details.querySelector(":scope > :not(summary)");
-			const entityId = `${isTabs ? "t" : "a"}-${cIdx}-${eIdx}`;
-
-			const btn = document.createElement("button");
-			btn.id = `btn-${entityId}`;
-			btn.type = "button";
-			btn.className = isTabs ? "tab-summary" : "accordion-summary";
-			btn.setAttribute("role", isTabs ? "tab" : "button");
-			btn.setAttribute("aria-controls", `pnl-${entityId}`);
-			btn.innerHTML = summary.innerHTML;
-
-			content.id = `pnl-${entityId}`;
-			content.classList.add(isTabs ? "tab-panel" : "accordion-panel");
-			content.setAttribute("role", isTabs ? "tabpanel" : "region");
-			content.setAttribute("aria-labelledby", btn.id);
-
-			if (isTabs) {
-				tabList.appendChild(btn);
-				container.appendChild(content);
-			} else {
-				const wrapper = document.createElement("div");
-				wrapper.className = "accordion-details";
-				wrapper.appendChild(btn);
-				wrapper.appendChild(content);
-				container.appendChild(wrapper);
-			}
-			details.remove();
+		// rAF : retire l'inline ET pose aria-hidden atomiquement.
+		// aria-hidden='true' pilote la transition CSS (max-height: 0 via [aria-hidden='true']).
+		// hidden='until-found' ne peut pas être le déclencheur : son masquage natif navigateur
+		// est instantané et couperait la transition avant qu'elle ne s'exécute.
+		requestAnimationFrame(() => {
+			panel.removeAttribute("style");
+			panel.setAttribute("aria-hidden", "true");
 		});
 
-		if (isTabs) container.prepend(tabList);
-	};
+		// Après la transition : upgrade vers until-found si supporté (active CTRL+F).
+		// C'est ici seulement que le masquage natif navigateur peut être posé sans dommage.
+		const onEnd = () => {
+			if (SUPPORTS_UNTIL_FOUND) {
+				panel.removeAttribute("aria-hidden");
+				panel.hidden = "until-found";
+			}
+			panel.removeEventListener("transitionend", onEnd);
+		};
+		panel.addEventListener("transitionend", onEnd);
+	}
+};
 
-	// --- Phase 2 : State Engine ---
-	const syncState = (targetTrigger, container, useAnimation = true) => {
+// --- Phase 1 : Transformation (JIT Layout) ---
+const transform = (container, cIdx) => {
+	const isTabs = container.classList.contains("tabs");
+	const rawEntities = container.querySelectorAll(":scope > details");
+	if (rawEntities.length === 0) return;
+
+	let tabList = null;
+	if (isTabs) {
+		tabList = document.createElement("div");
+		tabList.setAttribute("role", "tablist");
+		tabList.className = "tab-list";
+	}
+
+	// Signal source : name sur les summaries → injection de data-singletab sur le container.
+	// Attribut canonique observable dans le DOM transformé (CSS, devtools, tests).
+	const hasNamedSummary = Array.from(rawEntities).some((d) =>
+		d.hasAttribute("name"),
+	);
+	if (hasNamedSummary && !isTabs) container.setAttribute("data-singletab", "");
+
+	rawEntities.forEach((details, eIdx) => {
+		const summary = details.querySelector(":scope > summary");
+		const content = details.querySelector(":scope > :not(summary)");
+		const entityId = `${isTabs ? "t" : "a"}-${cIdx}-${eIdx}`;
+
+		const btn = document.createElement("button");
+		btn.id = `btn-${entityId}`;
+		btn.type = "button";
+		btn.className = isTabs ? "tab-summary" : "accordion-summary";
+		btn.setAttribute("role", isTabs ? "tab" : "button");
+		btn.setAttribute("aria-controls", `pnl-${entityId}`);
+		btn.innerHTML = summary.innerHTML;
+
+		content.id = `pnl-${entityId}`;
+		content.classList.add(isTabs ? "tab-panel" : "accordion-panel");
+		content.setAttribute("role", isTabs ? "tabpanel" : "region");
+		content.setAttribute("aria-labelledby", btn.id);
+
+		if (isTabs) {
+			tabList.appendChild(btn);
+			container.appendChild(content);
+		} else {
+			const wrapper = document.createElement("div");
+			wrapper.className = "accordion-details";
+			wrapper.appendChild(btn);
+			wrapper.appendChild(content);
+			container.appendChild(wrapper);
+		}
+		details.remove();
+	});
+
+	if (isTabs) container.prepend(tabList);
+};
+
+// --- Phase 2 : State Engine ---
+const syncState = (targetTrigger, container, useAnimation = true) => {
+	const isTabs = container.classList.contains("tabs");
+	const isExclusive = isTabs || container.hasAttribute("data-singletab");
+
+	const triggers = container.querySelectorAll(
+		isTabs ? ':scope > .tab-list > [role="tab"]' : ".accordion-summary",
+	);
+
+	const willBeOpen = isTabs
+		? true
+		: targetTrigger.getAttribute("aria-expanded") !== "true";
+
+	const localState = DisclosureState.cache.uiState[DisclosureState.slug];
+
+	triggers.forEach((trigger) => {
+		const panel = document.getElementById(
+			trigger.getAttribute("aria-controls"),
+		);
+		const currentlyOpen = trigger.getAttribute("aria-expanded") === "true";
+		const shouldOpen =
+			trigger === targetTrigger
+				? willBeOpen
+				: isExclusive
+					? false
+					: currentlyOpen;
+		const isChanging = shouldOpen !== currentlyOpen;
+
+		// FERMETURE animée (accordion) : capturer scrollHeight avant toute mutation.
+		// animatePanel devient owner du masquage (posé dans le rAF au cycle suivant).
+		if (isChanging && !shouldOpen && useAnimation) animatePanel(panel, false);
+
+		// Mutation des attributs trigger
+		trigger.setAttribute("aria-expanded", shouldOpen);
+		if (isTabs) {
+			trigger.setAttribute("aria-selected", shouldOpen);
+			trigger.disabled = shouldOpen;
+		}
+
+		if (shouldOpen) {
+			// Révélation synchrone — scrollHeight devient lisible pour animatePanel
+			panel.removeAttribute("hidden");
+			panel.removeAttribute("aria-hidden");
+			localState[trigger.id] = "open";
+
+			// OUVERTURE animée : panel révélé, scrollHeight > 0
+			if (isChanging && useAnimation) animatePanel(panel, true);
+		} else {
+			// Masquage immédiat dans deux cas :
+			// - tabs : animatePanel est inopérant (pas un accordion-panel)
+			// - useAnimation=false : beforematch, restauration init
+			// Cas accordion animé : masquage délégué au rAF dans animatePanel(false)
+			if (!useAnimation || isTabs) {
+				if (SUPPORTS_UNTIL_FOUND) panel.hidden = "until-found";
+				else panel.setAttribute("aria-hidden", "true");
+			}
+			localState[trigger.id] = "close";
+		}
+	});
+
+	persistState();
+};
+
+// --- Navigation clavier (tabs uniquement) ---
+// Spec ARIA 1.1 : les role="tab" sont navigables par flèches au sein du tablist.
+// Tab/Shift+Tab gère le focus entre zones — les flèches gèrent le focus intra-tablist.
+const bindTabKeyboard = (container) => {
+	const tabList = container.querySelector(":scope > .tab-list");
+	if (!tabList) return;
+
+	// Mise en cache statique pour éviter l'allocation dynamique Array/NodeList à chaque frappe
+	const tabs = Array.from(tabList.querySelectorAll('[role="tab"]'));
+
+	tabList.addEventListener("keydown", (e) => {
+		// Filtrage en place de l'état actif/désactivé
+		const activeTabs = tabs.filter((t) => !t.hasAttribute("disabled"));
+		if (activeTabs.length === 0) return;
+
+		const current = document.activeElement;
+		const idx = activeTabs.indexOf(current);
+		if (idx === -1) return;
+
+		let next = null;
+		if (e.key === "ArrowRight")
+			next = activeTabs[(idx + 1) % activeTabs.length];
+		else if (e.key === "ArrowLeft")
+			next = activeTabs[(idx - 1 + activeTabs.length) % activeTabs.length];
+		else if (e.key === "Home") next = activeTabs[0];
+		else if (e.key === "End") next = activeTabs[activeTabs.length - 1];
+		else return;
+
+		e.preventDefault();
+		next.focus();
+		syncState(next, container, false);
+	});
+};
+
+// --- EXPORT PUBLIC (Entrypoint System) ---
+export const initDisclosureSystem = () => {
+	hydrateState(); // Hydratation unique (I/O) au démarrage du système
+	const containers = document.querySelectorAll(".tabs, .accordion");
+	const pageState = DisclosureState.cache.uiState[DisclosureState.slug];
+
+	containers.forEach((container, cIdx) => {
+		transform(container, cIdx);
+
 		const isTabs = container.classList.contains("tabs");
-		const isExclusive = isTabs || container.hasAttribute("data-singletab");
-
 		const triggers = container.querySelectorAll(
 			isTabs ? ':scope > .tab-list > [role="tab"]' : ".accordion-summary",
 		);
-		const fullState = getStoredState();
+		const panels = container.querySelectorAll(
+			isTabs ? ":scope > .tab-panel" : ".accordion-panel",
+		);
 
-		const willBeOpen = isTabs
-			? true
-			: targetTrigger.getAttribute("aria-expanded") !== "true";
+		if (isTabs) bindTabKeyboard(container);
 
 		triggers.forEach((trigger) => {
-			const panel = document.getElementById(
-				trigger.getAttribute("aria-controls"),
+			trigger.addEventListener("click", () =>
+				syncState(trigger, container, true),
 			);
-			const currentlyOpen = trigger.getAttribute("aria-expanded") === "true";
-			const shouldOpen =
-				trigger === targetTrigger
-					? willBeOpen
-					: isExclusive
-						? false
-						: currentlyOpen;
-			const isChanging = shouldOpen !== currentlyOpen;
 
-			// FERMETURE animée (accordion) : capturer scrollHeight avant toute mutation.
-			// animatePanel devient owner du masquage (posé dans le rAF au cycle suivant).
-			if (isChanging && !shouldOpen && useAnimation) animatePanel(panel, false);
-
-			// Mutation des attributs trigger
-			trigger.setAttribute("aria-expanded", shouldOpen);
-			if (isTabs) {
-				trigger.setAttribute("aria-selected", shouldOpen);
-				trigger.disabled = shouldOpen;
-			}
-
-			if (shouldOpen) {
-				// Révélation synchrone — scrollHeight devient lisible pour animatePanel
-				panel.removeAttribute("hidden");
-				panel.removeAttribute("aria-hidden");
-				fullState.uiState[slug][trigger.id] = "open";
-
-				// OUVERTURE animée : panel révélé, scrollHeight > 0
-				if (isChanging && useAnimation) animatePanel(panel, true);
+			// Restauration de l'état (sans animation pour le premier rendu)
+			if (pageState[trigger.id] === "open") {
+				syncState(trigger, container, false);
+			} else if (
+				isTabs &&
+				!Object.values(pageState).includes("open") &&
+				trigger === triggers[0]
+			) {
+				syncState(trigger, container, false);
 			} else {
-				// Masquage immédiat dans deux cas :
-				// - tabs : animatePanel est inopérant (pas un accordion-panel)
-				// - useAnimation=false : beforematch, restauration init
-				// Cas accordion animé : masquage délégué au rAF dans animatePanel(false)
-				if (!useAnimation || isTabs) {
-					if (SUPPORTS_UNTIL_FOUND) panel.hidden = "until-found";
-					else panel.setAttribute("aria-hidden", "true");
-				}
-				fullState.uiState[slug][trigger.id] = "close";
-			}
-		});
-
-		saveStoredState(fullState);
-	};
-
-	// --- Navigation clavier (tabs uniquement) ---
-	// Spec ARIA 1.1 : les role="tab" sont navigables par flèches au sein du tablist.
-	// Tab/Shift+Tab gère le focus entre zones — les flèches gèrent le focus intra-tablist.
-	const bindTabKeyboard = (container) => {
-		const tabList = container.querySelector(":scope > .tab-list");
-		if (!tabList) return;
-
-		tabList.addEventListener("keydown", (e) => {
-			const tabs = [
-				...tabList.querySelectorAll('[role="tab"]:not([disabled])'),
-			];
-			const current = document.activeElement;
-			const idx = tabs.indexOf(current);
-			if (idx === -1) return;
-
-			let next = null;
-			if (e.key === "ArrowRight") next = tabs[(idx + 1) % tabs.length];
-			else if (e.key === "ArrowLeft")
-				next = tabs[(idx - 1 + tabs.length) % tabs.length];
-			else if (e.key === "Home") next = tabs[0];
-			else if (e.key === "End") next = tabs[tabs.length - 1];
-			else return;
-
-			e.preventDefault();
-			next.focus();
-			syncState(next, container, false);
-		});
-	};
-
-	// --- Initialisation ---
-	const init = () => {
-		const containers = document.querySelectorAll(".tabs, .accordion");
-		const pageState = getStoredState().uiState[slug];
-
-		containers.forEach((container, cIdx) => {
-			transform(container, cIdx);
-
-			const isTabs = container.classList.contains("tabs");
-			const triggers = container.querySelectorAll(
-				isTabs ? ':scope > .tab-list > [role="tab"]' : ".accordion-summary",
-			);
-			const panels = container.querySelectorAll(
-				isTabs ? ":scope > .tab-panel" : ".accordion-panel",
-			);
-
-			if (isTabs) bindTabKeyboard(container);
-
-			triggers.forEach((trigger) => {
-				trigger.addEventListener("click", () =>
-					syncState(trigger, container, true),
+				const pnl = document.getElementById(
+					trigger.getAttribute("aria-controls"),
 				);
-
-				// Restauration de l'état (sans animation pour le premier rendu)
-				if (pageState[trigger.id] === "open") {
-					syncState(trigger, container, false);
-				} else if (
-					isTabs &&
-					!Object.values(pageState).includes("open") &&
-					trigger === triggers[0]
-				) {
-					syncState(trigger, container, false);
-				} else {
-					const pnl = document.getElementById(
-						trigger.getAttribute("aria-controls"),
-					);
-					if (SUPPORTS_UNTIL_FOUND) pnl.hidden = "until-found";
-					else pnl.setAttribute("aria-hidden", "true");
-				}
-			});
-
-			if (SUPPORTS_UNTIL_FOUND) {
-				panels.forEach((panel) => {
-					panel.addEventListener("beforematch", () => {
-						const trigger = document.getElementById(
-							panel.getAttribute("aria-labelledby"),
-						);
-						// Recherche CTRL+F : ouverture instantanée, pas de transition de hauteur
-						if (trigger) syncState(trigger, container, false);
-					});
-				});
+				if (SUPPORTS_UNTIL_FOUND) pnl.hidden = "until-found";
+				else pnl.setAttribute("aria-hidden", "true");
 			}
 		});
-	};
 
-	init();
+		if (SUPPORTS_UNTIL_FOUND) {
+			panels.forEach((panel) => {
+				panel.addEventListener("beforematch", () => {
+					const trigger = document.getElementById(
+						panel.getAttribute("aria-labelledby"),
+					);
+					// Recherche CTRL+F : ouverture instantanée, pas de transition de hauteur
+					if (trigger) syncState(trigger, container, false);
+				});
+			});
+		}
+	});
 };
-
-if (document.readyState === "loading")
-	document.addEventListener("DOMContentLoaded", disclosureSystem);
-else disclosureSystem();
