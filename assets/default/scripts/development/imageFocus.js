@@ -1,135 +1,167 @@
 /**
  * @summary Système de focus d'image autonome par Object Pooling et délégation d'événements.
- * @strategy 
- * - Object Pooling : Création d'une instance unique détachée du DOM en état de repos (Idle) pour éviter les fuites mémoire.
- * - Strict Data Mapping : Injection des attributs (src, alt) uniquement au moment de l'activation pour garantir la validité HTML5.
- * - Unified Input System : Délégation d'événements globale traitant l'ouverture et la fermeture comme des transitions d'état.
- * @architectural-decision
- * - Le composant est physiquement retiré du DOM (Node.remove()) à la fermeture pour prévenir tout conflit avec la cascade CSS, tout en restant alloué en mémoire.
- * - Suppression des conteneurs intermédiaires : mapping strict sur la classe d'origine `.picture-area` pour respecter le layout pré-existant.
+ * @strategy
+ * - Object Pooling : Instance unique réutilisable hors-DOM pour éviter la fragmentation mémoire.
+ * - Strict Data Mapping : Injection JIT (Just-In-Time) des attributs (src, alt) à l'activation.
+ * - Flat Loop Execution : Itérations indexées directes sans allocation de fermetures.
  */
-'use strict';
 
-{
-  const CONFIG = {
-    TRIGGER_SELECTOR: '[class*="-focus"]',
-    OVERLAY_ID: 'picture-focus-overlay',
-    OVERLAY_CLASS: 'picture-area' // Alignement strict avec votre CSS d'origine
-  };
+const CONFIG = {
+	TRIGGER_SELECTOR: '[class*="-focus"]',
+	OVERLAY_ID: "picture-focus-overlay",
+	OVERLAY_CLASS: "picture-area",
+};
 
-  const state = {
-    activeTrigger: null,
-    overlay: null,
-    imgEntity: null,
-    siblings: []
-  };
+const state = {
+	activeTrigger: null,
+	overlay: null,
+	imgEntity: null,
+	mutatedElements: [], // Conserve les références des nœuds modifiés pour éviter le clobbering
+};
 
-  /**
-   * Construction du Prefab en mémoire (AOT)
-   */
-  const bootstrapSystem = () => {
-    if (document.getElementById(CONFIG.OVERLAY_ID)) return;
+/**
+ * Instanciation unique du Prefab en mémoire (AOT)
+ */
+const bootstrapSystem = () => {
+	if (document.getElementById(CONFIG.OVERLAY_ID)) {
+		state.overlay = document.getElementById(CONFIG.OVERLAY_ID);
+		state.imgEntity = state.overlay.querySelector("img");
+		return;
+	}
 
-    const overlay = document.createElement('div');
-    overlay.id = CONFIG.OVERLAY_ID;
-    overlay.className = CONFIG.OVERLAY_CLASS;
+	const overlay = document.createElement("div");
+	overlay.id = CONFIG.OVERLAY_ID;
+	overlay.className = CONFIG.OVERLAY_CLASS;
 
-    // Prefab valide : omission stricte des attributs vides
-    overlay.innerHTML = `
-      <img loading="lazy">
-      <button class="shrink-button" aria-label="shrink"></button>
-    `;
+	overlay.innerHTML = `
+    <img loading="lazy">
+    <button class="shrink-button" aria-label="shrink"></button>
+  `;
 
-    state.overlay = overlay;
-    state.imgEntity = overlay.querySelector('img');
+	state.overlay = overlay;
+	state.imgEntity = overlay.querySelector("img");
 
-    const shrinkBtn = overlay.querySelector('.shrink-button');
-    if (typeof injectSvgSprite === 'function') {
-      injectSvgSprite(shrinkBtn, 'minimize');
-    }
-  };
+	const shrinkBtn = overlay.querySelector(".shrink-button");
+	if (typeof globalThis.injectSvgSprite === "function") {
+		globalThis.injectSvgSprite(shrinkBtn, "minimize");
+	}
+};
 
-  /**
-   * System State Machine
-   */
-  const setSystemState = (target = null) => {
-    const isOpening = !!target;
-    const root = document.documentElement;
+/**
+ * Machine à états du système
+ * @param {HTMLElement|null} target - Élément déclencheur à activer, ou null pour désactiver.
+ */
+export const setSystemState = (target = null) => {
+	const isOpening = !!target;
+	const root = document.documentElement;
 
-    root.classList.toggle('freeze', isOpening);
+	root.classList.toggle("freeze", isOpening);
 
-    if (isOpening) {
-      state.activeTrigger = target;
-      const sourceImg = target.querySelector('img');
-      
-      // Data Injection
-      state.imgEntity.setAttribute('src', sourceImg.src);
-      if (sourceImg.alt) state.imgEntity.setAttribute('alt', sourceImg.alt);
+	if (isOpening) {
+		state.activeTrigger = target;
+		const sourceImg = target.querySelector("img");
+		if (!sourceImg) return;
 
-      // Entity Attachment (Insertion DOM)
-      document.body.appendChild(state.overlay);
+		// Data Injection par propriété directe (plus rapide que setAttribute)
+		state.imgEntity.src = sourceImg.src;
+		if (sourceImg.alt) {
+			state.imgEntity.alt = sourceImg.alt;
+		} else {
+			state.imgEntity.removeAttribute("alt");
+		}
 
-      // Gestion de l'accessibilité (Calcul O(N) sécurisé après insertion)
-      state.siblings = Array.from(document.body.children).filter(el => el !== state.overlay);
-      state.siblings.forEach(el => el.setAttribute('inert', ''));
-      
-      state.overlay.querySelector('button')?.focus();
-    } else {
-      // Context Restoration
-      state.siblings.forEach(el => el.removeAttribute('inert'));
-      state.activeTrigger?.querySelector('button')?.focus();
-      state.activeTrigger = null;
-      
-      // Data Flush & Entity Detachment
-      state.imgEntity.removeAttribute('src');
-      state.imgEntity.removeAttribute('alt');
-      state.overlay.remove(); // Retire l'élément visuellement sans le détruire en mémoire
-    }
-  };
+		// Rattachement physique au DOM
+		document.body.appendChild(state.overlay);
 
-  /**
-   * Input Processor
-   */
-  const handleInteraction = (e) => {
-    const trigger = e.target.closest(CONFIG.TRIGGER_SELECTOR);
-    if (trigger && !state.activeTrigger) {
-      setSystemState(trigger);
-      return;
-    }
+		// Isolation sémantique sans altérer l'état préexistant (No-Clobbering)
+		state.mutatedElements = [];
+		const children = document.body.children;
+		const len = children.length;
+		for (let i = 0; i < len; i++) {
+			const el = children[i];
+			if (el !== state.overlay && !el.hasAttribute("inert")) {
+				el.setAttribute("inert", "");
+				state.mutatedElements.push(el);
+			}
+		}
 
-    if (state.activeTrigger) {
-      const isOverlayClick = e.target.closest(`#${CONFIG.OVERLAY_ID}`);
-      if (isOverlayClick) {
-        setSystemState(null);
-      }
-    }
-  };
+		state.overlay.querySelector("button")?.focus();
+	} else {
+		// Restauration de l'état sémantique
+		const len = state.mutatedElements.length;
+		for (let i = 0; i < len; i++) {
+			state.mutatedElements[i].removeAttribute("inert");
+		}
+		state.mutatedElements = [];
 
-  const init = () => {
-    const targets = document.querySelectorAll(CONFIG.TRIGGER_SELECTOR);
-    if (!targets.length) return;
+		state.activeTrigger?.querySelector("button")?.focus();
+		state.activeTrigger = null;
 
-    // AOT : Préparation des déclencheurs
-    targets.forEach(item => {
-      if (item.querySelector('button')) return;
-      const btn = document.createElement('button');
-      btn.ariaLabel = 'enlarge';
-      if (typeof injectSvgSprite === 'function') injectSvgSprite(btn, 'maximize');
-      item.appendChild(btn);
-    });
+		// Nettoyage des références (Zéro fuite mémoire)
+		state.imgEntity.removeAttribute("src");
+		state.imgEntity.removeAttribute("alt");
+		state.overlay.remove();
+	}
+};
 
-    bootstrapSystem();
-    document.addEventListener('click', handleInteraction);
-    
-    // Support clavier
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && state.activeTrigger) setSystemState(null);
-    });
-  };
+/**
+ * Processeur d'Entrées unique
+ */
+const handleInteraction = (e) => {
+	const trigger = e.target.closest(CONFIG.TRIGGER_SELECTOR);
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
+	if (!state.activeTrigger) {
+		if (trigger) {
+			setSystemState(trigger);
+		}
+	} else {
+		// Tout clic actif en dehors ou sur l'overlay déclenche la fermeture
+		setSystemState(null);
+	}
+};
+
+/**
+ * Décoration AOT des cibles disponibles dans le DOM actuel.
+ * Exporté pour permettre une ré-exécution manuelle lors de mutations DOM dynamiques.
+ */
+export const decorateTargets = () => {
+	const targets = document.querySelectorAll(CONFIG.TRIGGER_SELECTOR);
+	const len = targets.length;
+	for (let i = 0; i < len; i++) {
+		const item = targets[i];
+		if (item.querySelector("button")) continue;
+
+		const btn = document.createElement("button");
+		btn.ariaLabel = "enlarge";
+		if (typeof globalThis.injectSvgSprite === "function") {
+			globalThis.injectSvgSprite(btn, "maximize");
+		}
+		item.appendChild(btn);
+	}
+};
+
+/**
+ * Initialisation globale (Méthode idempotente)
+ */
+export const init = () => {
+	bootstrapSystem();
+	decorateTargets();
+
+	document.removeEventListener("click", handleInteraction);
+	document.addEventListener("click", handleInteraction);
+
+	const handleKeyDown = (e) => {
+		if (e.key === "Escape" && state.activeTrigger) {
+			setSystemState(null);
+		}
+	};
+	document.removeEventListener("keydown", handleKeyDown);
+	document.addEventListener("keydown", handleKeyDown);
+};
+
+// Auto-bootstrap uniquement si importé directement sans orchestrateur
+if (document.readyState === "loading") {
+	document.addEventListener("DOMContentLoaded", init);
+} else {
+	init();
 }

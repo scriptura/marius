@@ -78,7 +78,7 @@
                         <use href="{% asset utils.svg %}#flame"></use>
                     </svg>Banana</button><button id="btn-t-1-2" type="button" class="tab-summary" role="tab"
                     aria-controls="pnl-t-1-2" aria-expanded="true" aria-selected="true" disabled=""><svg
-                        class="icon-inline" role="img" focusable="false">
+                        class="icon-inline" aria-hidden="true">
                         <use href="{% asset utils.svg %}#old-key"></use>
                     </svg>Apple</button></div>
             <div id="pnl-t-1-0" class="tab-panel" role="tabpanel" aria-labelledby="btn-t-1-0" hidden="until-found">

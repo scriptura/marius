@@ -4041,11 +4041,22 @@ mod tests {
         )
         .unwrap();
 
-        // Seules les cibles logiques entrent dans le manifeste — jamais
-        // navigation.js, artefact de build intermédiaire.
+        // Les cibles logiques ET les modules dépendance entrent au
+        // manifeste — correctif de cette session : un module atteint
+        // seulement par import ESM transitif (navigation.js, jamais
+        // déclaré comme cible dans theme.toml) doit rester résolvable par
+        // sa propre clé (stem), sous peine d'être introuvable par tout
+        // consommateur de manifest.toml malgré sa présence réelle sur
+        // disque (bug constaté en usage réel : 404 côté navigateur).
         assert!(manifest.contains_key("main.js"));
         assert!(manifest.contains_key("more.js"));
-        assert!(!manifest.contains_key("navigation.js"));
+        assert!(manifest.contains_key("navigation.js"));
+        assert!(
+            manifest["navigation.js"]
+                .url
+                .starts_with("/scripts/navigation.")
+        );
+        assert!(manifest["navigation.js"].url.ends_with(".js"));
 
         let main_url = &manifest["main.js"].url;
         let main_filename = Path::new(main_url).file_name().unwrap();
@@ -4062,6 +4073,11 @@ mod tests {
         // `minify_javascript`), ce n'est pas une régression.
         assert!(!main_written.contains("./navigation.js"));
         assert!(main_written.contains("/scripts/navigation."));
+
+        // Cohérence : l'URL substituée dans main_written doit être EXACTEMENT
+        // celle du manifeste — pas seulement un préfixe qui matcherait par
+        // coïncidence.
+        assert!(main_written.contains(manifest["navigation.js"].url.as_str()));
 
         let more_url = &manifest["more.js"].url;
         let more_filename = Path::new(more_url).file_name().unwrap();
@@ -4230,6 +4246,27 @@ mod tests {
         assert_eq!(out, "if (m !== 'GET') return '/sprites/utils.4c4e9.svg';");
     }
 
+    /// Trouve la première sous-chaîne de 64 caractères hexadécimaux dans
+    /// un texte — la représentation littérale d'un hash BLAKE3 complet,
+    /// quel que soit le guillemet qui l'entoure. S'assure de ne pas
+    /// capturer un fragment d'un hexadécimal plus long en vérifiant que le
+    /// caractère suivant n'en est pas un lui-même.
+    fn find_hex64(text: &str) -> Option<&str> {
+        let bytes = text.as_bytes();
+        if bytes.len() < 64 {
+            return None;
+        }
+        for start in 0..=bytes.len() - 64 {
+            let end = start + 64;
+            let candidate = &text[start..end];
+            let next_is_hex = bytes.get(end).is_some_and(u8::is_ascii_hexdigit);
+            if !next_is_hex && candidate.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
     // ── run_service_worker_pipeline (intégration, Handoff §3.3/§3.4) ────────
 
     /// Bootstrap du hash en 2 passes de bout en bout : le jeton sentinelle
@@ -4284,14 +4321,15 @@ mod tests {
         // (`entry.hash`, également complet) est celui du buffer FINAL
         // (Passe 2, après injection) — les deux hashent des contenus
         // différents, ils doivent donc différer.
-        let cache_name_line = written
-            .lines()
-            .find(|l| l.starts_with("const CACHE_NAME"))
-            .expect("ligne CACHE_NAME attendue");
-        let injected_hash = cache_name_line
-            .split('"')
-            .nth(1)
-            .expect("valeur entre guillemets attendue");
+        //
+        // Extraction SANS dépendre du caractère de guillemet : en mode
+        // `minify: true`, `oxc_codegen` choisit dynamiquement guillemet
+        // simple/double selon la sortie la plus courte pour CHAQUE chaîne
+        // (vérifié dans `oxc_codegen/src/str.rs` — le champ `single_quote`
+        // n'est consulté que hors mode minifié). Un guillemet double fixe
+        // n'est donc jamais une hypothèse sûre ici.
+        let injected_hash =
+            find_hex64(&written).expect("hash complet (64 hex) attendu dans le contenu écrit");
         assert_eq!(
             injected_hash.len(),
             64,

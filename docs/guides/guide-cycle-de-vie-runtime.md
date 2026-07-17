@@ -63,10 +63,14 @@ elle ne l'est pas.
 Face à un HTML qui ne change pas malgré un `cargo build` réussi, la question
 n'est **jamais** « le template est-il correct ? » en premier — c'est : **quel
 artefact sur disque a été réellement réécrit, et par quel événement ?**
-Trois artefacts distincts existent par table, avec trois producteurs
-distincts, trois cycles d'invalidation distincts. Confondre l'un pour l'autre
-est la cause la plus fréquente d'un « ça ne marche pas » qui prend des heures
-à isoler.
+Trois artefacts distincts existent par table SQL, avec trois producteurs
+distincts, trois cycles d'invalidation distincts — **plus une quatrième
+catégorie, ajoutée le 17 juillet 2026, pour les pages sans table SQL du
+tout** (§1bis). Confondre l'un pour l'autre est la cause la plus fréquente
+d'un « ça ne marche pas » qui prend des heures à isoler — et la première
+question à trancher est justement : cette page est-elle seulement
+concernée par la chaîne `NOTIFY` (§3), ou appartient-elle à §1bis, auquel
+cas §3 ne s'applique pas du tout.
 
 ---
 
@@ -81,6 +85,42 @@ est la cause la plus fréquente d'un « ça ne marche pas » qui prend des heure
 Point de vigilance central, vécu en session : **recompiler `render()` ne touche à aucun des deux `.bin`.** Le pack HTML n'est régénéré que si quelque chose appelle explicitement `regenerate_and_swap` avec le nouveau `render()` déjà lié dans le binaire — recompiler seul ne suffit jamais.
 
 **Confusion fréquente, à ne pas reproduire** : `regenerate_and_swap` **n'interroge jamais `{table}_store.bin`** — il exécute `P::fetch_batch(pool, ids)`, une requête PostgreSQL live (`batch_renderer.rs`, en-tête : « distinct du store.bin »). Les deux artefacts `.bin` n'ont **aucune** dépendance de lecture entre eux ; `store.bin` sert exclusivement `marius-dump`/`marius-verify`, jamais le chemin de régénération du pack HTML.
+
+---
+
+## 1bis. La quatrième catégorie — pages `STATIC_PAGES`, aucune des trois invalidations ci-dessus
+
+Ajouté le 17 juillet 2026, à la suite de la mise en œuvre du pipeline
+`[service_worker]`/`offline.html` de `marius-assets`. Certaines pages
+`.marius` (déclarées dans `STATIC_PAGES`, `crates/core/schema/build.rs` —
+aujourd'hui : `offline`/`offline`) ne participent à **aucun** des trois
+artefacts du tableau ci-dessus, et surtout : **aucun `NOTIFY` ne les
+concerne, jamais, par construction.** Ce ne sont pas des tables SQL — il
+n'existe rien à `UPDATE` pour en forcer la régénération.
+
+| Artefact | Producteur | Contenu | Invalidé par |
+| --- | --- | --- | --- |
+| `{table}.html` (ex. `offline.html`) | `resolve_static_page`/`emit_static_html` (`build.rs`, **avant** l'ouverture du pool Postgres) | HTML déjà composé (`{% extends %}`/`{% block %}`/`{% asset %}` déjà résolus) | **`cargo build` du crate `core/schema` uniquement** — jamais `NOTIFY`, jamais `marius-dump`, jamais `regenerate_and_swap` |
+
+Si le HTML d'une page de cette liste ne reflète pas un changement de
+template : la checklist §6 ne s'applique **pas** telle quelle — inutile de
+vérifier le trigger PostgreSQL (§3) ou `[pg_listener] abonné`, aucun des
+deux n'entre en jeu ici. Le point à vérifier est uniquement : `cargo build`
+a-t-il réellement recompilé `core/schema` (`cargo build -vv`, même piège
+`rerun-if-changed` qu'au §2 — s'applique identiquement), et le fichier
+produit (`build/{theme}/{table}.html`) porte-t-il un mtime postérieur à
+cette recompilation ?
+
+**Pourquoi cette catégorie existe** : une page sans donnée dynamique n'a
+structurellement aucune raison de dépendre du cycle `NOTIFY`/`Dispatcher`
+— ce cycle existe pour invalider un HTML dont le contenu dépend de lignes
+SQL susceptibles de changer. Une page de routage (fallback hors-ligne, 404,
+etc.) n'a pas cette dépendance ; la faire transiter par le graphe de droite
+du schéma en tête de ce guide aurait été un couplage artificiel. Voir
+`guide-fragment-forge.md` §4.8 pour le détail du garde-fou qui empêche une
+page de cette liste de référencer silencieusement une donnée dynamique
+(`SchemaIndex` toujours vide, échec `UnknownField` explicite à la
+compilation si violé).
 
 ---
 
@@ -171,6 +211,15 @@ depuis la racine du workspace. En cas de doute sur l'artefact réellement lu,
 `find / -name "{table}*.bin" -exec ls -la {} \;` révèle immédiatement tout
 exemplaire parasite par sa localisation et son mtime.
 
+**Même convention pour `build/{theme}/{table}.html` (§1bis)** : `build_dir()`
+dans `crates/core/schema/build.rs` résout `build/{theme}` par rapport à
+`CARGO_MANIFEST_DIR` (trois remontées, pas une convention CWD-relative comme
+`packfile_path_for` ci-dessus) — mais le piège de fond est le même : lancer
+`cargo build` depuis un mauvais répertoire, ou avoir plusieurs checkouts du
+dépôt sur la même machine, peut faire écrire `offline.html` à un endroit
+différent de celui que le serveur sert réellement. En cas de doute,
+`find / -name "offline.html" -exec ls -la {} \;` s'applique tout aussi bien.
+
 ---
 
 ## 5. Contrat `dump.rs` — store **et** pack, jamais l'un sans l'autre
@@ -195,6 +244,10 @@ sert.
 Dans l'ordre, chaque étape élimine une classe de cause avant de passer à la
 suivante — ne pas sauter d'étape :
 
+0. **Cette page est-elle dans `STATIC_PAGES` (`crates/core/schema/build.rs`) ?**
+   Si oui → §1bis, pas la suite de cette checklist : aucun `NOTIFY`, aucun
+   trigger, aucun `[pg_listener]` n'entre en jeu pour ces pages. Vérifier
+   uniquement `cargo build -vv` et le mtime de `build/{theme}/{table}.html`.
 1. **`cargo build -vv`** fait-il apparaître `cargo:warning=template=...` pour
    la table concernée, sans message de fallback ? Sinon → §2 (Cargo).
 2. **`stat -c '%y %s' artifacts/{table}.bin`** avant et après une écriture
@@ -214,3 +267,4 @@ suivante — ne pas sauter d'étape :
 ---
 
 _Créé le 7 juillet 2026._
+_Mis à jour le 17 juillet 2026 : ajout de §1bis (quatrième catégorie d'artefact, pages `STATIC_PAGES` sans table SQL — `offline.html`), note de résolution de chemin en §4, étape 0 ajoutée à la checklist §6 — session de mise en œuvre du pipeline `[service_worker]`/`offline.html` de `marius-assets`._

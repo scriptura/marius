@@ -13,9 +13,9 @@ Ce guide a deux parties de statut différent :
 | Partie | Contenu | Statut |
 | --- | --- | --- |
 | **Partie 1** | Mode fragment : `{{ }}`, `{% if %}`, `{% include %}` | **Implémenté** — pipeline réellement câblé dans `crates/core/schema/build.rs` |
-| **Partie 2** | Mode page : `{% extends %}`, `{% block %}`, `{% static %}` | **Implémenté** — `parse_page_block`/`lower`/`link` existent et compilent (`fragment-forge/src/lib.rs`), validé en production sur `content/core.marius` |
+| **Partie 2** | Mode page : `{% extends %}`, `{% block %}`, `{% static %}`, `{% asset %}`, `{% script %}` | **Implémenté** — `parse_page_block`/`lower`/`link` existent et compilent (`fragment-forge/src/lib.rs`), validé en production sur `content/core.marius` (extends/block) et `templates/base.marius`/`templates/offline/offline.marius` (asset/script, session du 17 juillet 2026) |
 
-Ne confondez pas les deux avec « également testé de bout en bout » : les deux modes compilent aujourd'hui avec `cargo build`. Ce qui reste réellement non câblé, listé précisément en §4.7 et §4.5 : la validation `UnknownEntity` et l'application stricte du seuil de taille `{% static %}` — deux points où la spécification v1.1 va au-delà de ce que le code fait aujourd'hui. Le reste de la Partie 2 (composition, fusion de blocs, `{% static %}` lui-même) est du code qui tourne, pas une intention.
+Ne confondez pas les deux avec « également testé de bout en bout » : les deux modes compilent aujourd'hui avec `cargo build`. Ce qui reste réellement non câblé, listé précisément en §4.7 et §4.5 : la validation `UnknownEntity` et l'application stricte du seuil de taille `{% static %}` — deux points où la spécification v1.1 va au-delà de ce que le code fait aujourd'hui. Le reste de la Partie 2 (composition, fusion de blocs, `{% static %}` lui-même, `{% asset %}`/`{% script %}` — §4.5bis) est du code qui tourne, pas une intention.
 
 **Hors périmètre de ce document** : ce guide couvre la compilation `.marius` → `render()`. Il ne couvre pas ce qui se passe *après* — comment `render()` est invoqué, à quelle fréquence, ni ce qui invalide le HTML déjà servi. `cargo build` peut réussir intégralement (nouveau `.marius`, nouveau `render()` généré) sans que la moindre requête HTTP n'en voie la couleur : c'est un autre pipeline, un autre cycle d'invalidation, documenté dans `guide-cycle-de-vie-runtime.md`. Un `.marius` correct est une condition nécessaire, jamais suffisante, pour qu'un changement atteigne le navigateur.
 
@@ -227,7 +227,7 @@ C'est le contrat que `fragment-forge` vous garantit en échange des restrictions
 
 ---
 
-## 4. Composition de pages — `{% extends %}`, `{% block %}`, `{% static %}`
+## 4. Composition de pages — `{% extends %}`, `{% block %}`, `{% static %}`, `{% asset %}`, `{% script %}`
 
 > **Statut : spécifié (v1.1), non implémenté.** Cette partie décrit la cible de conception (`specification-marius-compilateur-projections-html.md` §1–9) pour que vous puissiez anticiper l'écriture de vos futures spécifications de page. Rien ici ne compile avec la version actuelle de `fragment-forge`.
 
@@ -299,6 +299,23 @@ Politique de taille visée (`FRAGMENT_FORGE_STATIC_WARN_BYTES`, défaut 32 768) 
 
 **Non appliqué aujourd'hui** : aucun de ces trois paliers n'est vérifié par le code actuel (`lib.rs`, `build.rs`) — `PageLinkError` ne porte que `ExtendsNotFound`, `OrphanBlock`, `StaticFileNotFound`, aucune variante liée à une taille. Un fichier `{% static %}` de 5 Mo compile aujourd'hui sans avertissement ni erreur. Cette politique est une spécification v1.1, pas un comportement observable — ne vous y fiez pas pour dimensionner un fichier réel tant qu'aucun `cargo:warning` de taille n'est vérifié en pratique.
 
+### 4.5bis `{% asset key %}` et `{% script %} … {% endscript %}` — absents de ce guide jusqu'ici, réels depuis le début
+
+**Ajouté le 17 juillet 2026**, à la suite d'une session où ces deux constructions ont été prises pour de la syntaxe non câblée — la grammaire documentée en §5 (avant cette révision) ne les mentionnait pas du tout. Elles sont pourtant réelles, compilées, et utilisées en production dans `templates/base.marius`. L'absence n'était pas un signal qu'elles n'existaient pas : c'était un point aveugle de ce document, pas du code.
+
+**`{% asset key %}`** — résout `key` (un nom de fichier logique, ex. `main.js`, `utils.svg`, jamais un chemin complet) contre le manifeste d'assets produit par `marius-assets` (`build/{theme}/manifest.toml`, table `[assets."clé"]`). Généré comme `FlatPageToken::AssetRef(key)` par le parseur — même famille de token que `Static`/`Field`, mais résolu au moment de l'écriture (build.rs), pas au moment du parsing.
+
+**`{% script %} … {% endscript %}`** — capture un bloc `<script>...</script>` complet, le "hisse" (déduplication si plusieurs blocs identiques apparaissent, par exemple parce que deux pages différentes chargent le même script), et le réinjecte à l'emplacement du marqueur littéral `<!-- MARIUS_SCRIPTS -->` dans le layout parent (`templates/base.marius`). Le marqueur est cherché comme sous-chaîne exacte, jamais interprété comme une construction `.marius` — un simple point d'ancrage textuel.
+
+**Où vit quoi, même partage des responsabilités qu'au §3.2 pour `get_file_size`** :
+
+- `fragment-forge` (`lib.rs`) définit les token types (`FlatPageToken::AssetRef`, `ScriptStart`, `ScriptEnd`) et les fonctions de manipulation du flux : `hoist_and_dedupe_scripts` (extrait les blocs `{% script %}` du flux, les déduplique), `splice_hoisted_scripts` (les réinsère à l'emplacement du marqueur). `resolve_and_measure` accepte un closure `resolve_asset_len: impl Fn(&str) -> AssetLookup` injecté par l'appelant — `fragment-forge` ne lit jamais lui-même `manifest.toml`, exactement la même discipline de testabilité que pour `{% include %}`/`get_file_size`.
+- `crates/core/schema/build.rs` lit `manifest.toml` (`load_asset_manifest`), fournit la closure de résolution (`resolve_asset_lookup`), et c'est lui qui échoue avec un `cargo:error` explicite (pas une variante d'enum nommée dans `fragment-forge`) si une clé est absente du manifeste — diagnostic par distance de Levenshtein sur les clés existantes.
+
+**Piège de syntaxe déjà rencontré** : le mot-clé est `asset`, **singulier** — `{% assets utils.svg %}` (pluriel) n'est reconnu par aucune grammaire et tombe dans le même rejet générique que tout mot-clé de bloc inconnu, `PageValidationError::RelationalKeyword { keyword }` (§2.3/§4.7 — ce n'est pas un mot-clé relationnel, c'est le fourre-tout de `collect_blocks` pour "mot-clé de bloc jamais vu", partagé avec `join`/`where`/`filter`/`group`). Le message ne nomme jamais explicitement "faute de frappe" — seul le mot-clé fautif apparaît, à charge du lecteur de reconnaître l'faute.
+
+**Ordonnancement de résolution — vérifié empiriquement, pas seulement lu dans le code** : les URLs produites par `{% asset %}` reflètent le nom **physique** du fichier écrit sur disque par `marius-assets` (dérivé du stem du fichier source pour `[scripts.components]`, ex. `index.js` → `/scripts/index.HASH.js`), pas nécessairement le nom de la **cible logique** déclarée dans `theme.toml` (ex. `main`). La clé passée à `{% asset %}` doit correspondre à la clé du manifeste (`{cible}.js`), pas au nom de fichier physique si les deux diffèrent — source de confusion réelle en session, résolue en alignant la convention de nommage plutôt qu'en modifiant le mécanisme de résolution.
+
 ### 4.6 Algorithme de fusion — ce qui se passe à `cargo build`
 
 ```
@@ -310,7 +327,8 @@ Politique de taille visée (`FRAGMENT_FORGE_STATIC_WARN_BYTES`, défaut 32 768) 
 4. Résoudre chaque {% static %} : taille réelle, chemin relatif, cargo:rerun-if-changed
 5. Validation sémantique : entité, champs, type bool des conditions, absence de {% for %},
    absence de mot-clé relationnel, absence d'imbrication
-→ Vec<FlatPageToken> : uniquement Static | Field | IfBool | EndIf | StaticInclude
+→ Vec<FlatPageToken> : Static | Field | IfBool | EndIf | StaticInclude | AssetRef | ScriptStart | ScriptEnd
+  (ScriptStart/ScriptEnd retirés du flux par hoist_and_dedupe_scripts avant l'étape 5 ci-dessus — cf. §4.5bis)
 ```
 
 Le résultat de la fusion est un AST **plat**, du même type `FlatPageToken` que le mode fragment. Conséquence directe : tout ce que vous avez appris en Partie 1 sur les contraintes de `{{ }}`/`{% if %}` (entité unique, types booléens, pas de boucle) s'applique identiquement après fusion — la composition de page n'assouplit aucune règle du mode fragment, elle compose des fragments qui doivent chacun déjà s'y conformer.
@@ -328,8 +346,9 @@ Le résultat de la fusion est un AST **plat**, du même type `FlatPageToken` que
 | `UnknownField` | Champ absent du schéma |
 | `NonBoolIfCondition` | `{% if %}` sur un champ non `bool` |
 | `ForLoopDetected` | `{% for %}` détecté |
-| `RelationalKeyword` | `join`/`where`/`filter`/`group` détecté |
+| `RelationalKeyword` | `join`/`where`/`filter`/`group` détecté — également tout mot-clé de bloc inconnu, y compris une faute de frappe sur `asset`/`script` (§4.5bis) |
 | `NestedBlock` / `NestedIf` | Imbrication détectée |
+| *(pas de variante nommée)* | `{% asset %}` référençant une clé absente de `manifest.toml` — `cargo:error` émis directement par `build.rs` (`resolve_asset_lookup`), pas par une erreur `fragment-forge` dédiée (§4.5bis) |
 
 **`UnknownEntity` n'existe pas dans le code** — ni en mode page, ni en mode fragment. Ce n'était pas une omission de ce guide, c'était une erreur : la spécification v1.1 la prévoit, mais après fusion (`lower()`), l'AST rejoint le point de convergence documenté au §4.6 — `validate_ast`/`resolve_and_measure`, **gelés, identiques aux deux modes**. Aucune fonction dédiée au mode page n'existe pour vérifier une entité ; le seul contrôle réel porte sur `field`, via `ResolverError::UnknownField` (§2.2, même limitation qu'en mode fragment). Autrement dit : le nom d'entité reste syntaxiquement obligatoire, sémantiquement décoratif, **dans les deux modes** — §2.2 ne décrit pas une lacune propre au fragment en attente d'un futur rattrapage page, c'est l'état réel, partout, aujourd'hui.
 
@@ -343,6 +362,10 @@ Une fois compilées, les deux fonctions vivent dans le même `impl` :
 `render_page()` n'appelle **pas** `render()` — chacune est une transpilation indépendante du même type d'AST, pas une composition runtime de l'une par l'autre.
 
 Ce découplage n'est pas accessoire : ADR-008 tranche qu'**aucune page complète n'est jamais stockée comme artefact monolithique pré-composé**. Chaque composant (en-tête, contenu, pied de page) reste stocké et invalidé indépendamment. La composition résolue par `{% extends %}`/`{% block %}` a lieu **à l'écriture** (au moment où l'application matérialise la page sur disque), jamais à la lecture — le contrat de lecture reste un `sendfile(2)` unique sur un fichier déjà composé, jamais une résolution applicative au moment de la requête.
+
+**Exception délibérée, ajoutée le 17 juillet 2026 : les pages de `STATIC_PAGES`.** Certaines pages `.marius` (aujourd'hui : `offline`/`offline`, une page de routage sans donnée dynamique — pas une sous-ressource) ne suivent **aucun** des deux chemins ci-dessus. `build.rs` les détecte via une liste explicite (`STATIC_PAGES`, `(schema, table)`), **avant** même l'ouverture du pool Postgres, et les fait passer par le même pipeline `scan → parse_page_tokens → link → lower → validate_ast → resolve_and_measure`, mais avec un `SchemaIndex` **toujours vide** (`fixed: &[], varlena: &[]`) — garde-fou structurel : la moindre référence `{{ record.* }}`/`{% if %}` échoue avec `UnknownField` avant qu'un seul octet ne soit produit. Le flux de tokens résolu est ensuite matérialisé **directement en HTML** (`emit_static_html`, nouvelle fonction de `build.rs`) et écrit une fois sur disque (`build/{theme}/{table}.html`) — **aucun `render_page()` n'est jamais généré ni compilé pour ces pages**. Conséquence pour le cycle de vie runtime (voir `guide-cycle-de-vie-runtime.md`, désormais mis à jour en conséquence) : ces pages ne participent à AUCUN des trois artefacts habituels, ne sont jamais invalidées par `NOTIFY`, et leur seul déclencheur de régénération est un `cargo build` du crate `core/schema`.
+
+À réserver aux pages qui n'ont structurellement aucune raison de dépendre d'une ligne de base de données — une page candidate qui référencerait un jour `{{ record.* }}` casse le build plutôt que de produire un HTML figé et faux, par construction du garde-fou ci-dessus, pas par discipline d'équipe.
 
 ### 4.9 Ce qui ne change pas en passant au mode page
 
@@ -364,6 +387,8 @@ Mode page (implémenté) :
   {% extends chemin %}            ← doit être la première construction du fichier
   {% block name %} … {% endblock %}
   {% static chemin %}
+  {% asset clé %}                 ← résolu contre manifest.toml (marius-assets), §4.5bis
+  {% script %} … {% endscript %}  ← hissé + déduplicé, réinjecté sur <!-- MARIUS_SCRIPTS -->
 
 Interdit, dans les deux modes :
   {% for … %}
@@ -378,3 +403,4 @@ Toute violation est une erreur de compilation (`cargo build` échoue), jamais un
 ---
 
 _Vérifié et corrigé le 7 juillet 2026 (v2 : frontière vues sémantiques \/ tables physiques ajoutée) — audit croisé + revue de code (`lib.rs`, `introspect.rs`) contre le guide._
+_Mis à jour le 17 juillet 2026 (v3) : `{% asset %}`/`{% script %}` documentés (§4.5bis, absents des versions précédentes bien que réels et implémentés depuis le début) ; contradiction §0/§4 sur le statut de la Partie 2 corrigée ; exception `STATIC_PAGES` ajoutée (§4.8) — session de mise en œuvre du pipeline `[service_worker]`/`offline.html` de `marius-assets`._
