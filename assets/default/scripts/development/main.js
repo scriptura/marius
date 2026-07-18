@@ -1,18 +1,20 @@
 import { initDisclosureSystem } from "./disclosure.js";
-import { initMaps } from "./map.js";
+//import { initMaps } from "./map.js";
 //import { initImageFocus } from "./imageFocus.js";
 //import { initMasonry } from "./masonry.js";
 //import { initMediaPlayer } from "./mediaPlayer.js";
 import { initNavigation } from "./navigation.js";
-import { mountAllSliders, setupSliderEvents } from "./range.js";
+
+//import { mountAllSliders, setupSliderEvents } from "./range.js";
 
 initDisclosureSystem();
 //initMediaPlayer();
 initNavigation();
 //initMasonry();
 //initImageFocus();
-initMaps();
+//initMaps();
+
 // Activer la délégation d'événements
-setupSliderEvents();
+//setupSliderEvents();
 // Initialiser le DOM actuel
-mountAllSliders();
+//mountAllSliders();
