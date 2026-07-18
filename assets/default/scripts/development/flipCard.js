@@ -1,112 +1,137 @@
 /**
- * @summary Système de gestion de l'état "Flip" par délégation d'événements et pilotage par données.
- * * @strategy
- * - Event Delegation : Réduction de l'empreinte mémoire (O(1) listener vs O(N)).
- * - State Mirroring : Utilisation des attributs data-* comme source de vérité structurelle, permettant un pipeline CSS déterministe.
- * - Timer Pooling : Remplacement des multiples timeouts par une gestion d'expiration centralisée pour éviter la fragmentation de l'Event Loop.
- * * @architectural-decision
- * - Suppression du `forEach` sur le DOM pour éviter l'allocation de multiples closures.
- * - Transformation du toggle en une fonction pure de transition d'état (Input -> State Update -> Render).
- * - Utilisation de `localStorage` en accès hâtif (AOT logic) pour court-circuiter le système de démo.
+ * @summary Système de gestion de l'état "Flip" (ES Module)
+ *
+ * @strategy
+ * - Event Delegation : Réduction de l'empreinte mémoire (1 listener).
+ * - State Mirroring : Set en mémoire pour un accès O(1) aux entités actives, évitant le parsing DOM.
+ * - Timer Pooling (WeakMap) : Prévention des fuites mémoire par références faibles.
+ *
+ * @architectural-decision
+ * - Remplacement de tous les `forEach` par des `for...of` (zéro allocation de closure).
+ * - Remplacement de `querySelectorAll` par le miroir d'état `activeEntities` dans le hot path.
  */
 
-{
-	const CONFIG = {
-		CLASS_FLIP: "flip",
-		ATTR_STATE: "data-flipped",
-		DEMO_KEY: "demoCounterFlipCards",
-		AUTO_FLIP_LIMIT: 4,
-		AUTO_UNFLIP_MS: 1500,
-		GLOBAL_UNFLIP_MS: 3000,
-	};
+const CONFIG = {
+	CLASS_FLIP: "flip",
+	ATTR_STATE: "data-flipped",
+	DEMO_KEY: "demoCounterFlipCards",
+	AUTO_FLIP_LIMIT: 4,
+	AUTO_UNFLIP_MS: 1500,
+	GLOBAL_UNFLIP_MS: 3000,
+};
 
-	// State Manager (Data Layer)
-	const state = {
-		autoFlipping: true,
-		viewCount: parseInt(localStorage.getItem(CONFIG.DEMO_KEY)) || 0,
-		timers: new Map(), // Pool de timers indexés par élément pour éviter les collisions
-	};
+// Data Layout (Module Scope)
+let autoFlipping = true;
+let viewCount = 0;
 
-	/**
-	 * Update unique du compteur (AOT check)
-	 */
-	const updateAnalytics = () => {
-		state.viewCount++;
-		localStorage.setItem(CONFIG.DEMO_KEY, state.viewCount);
-	};
+// WeakMap : Indexation des timers sans bloquer le Garbage Collector
+const timers = new WeakMap();
 
-	/**
-	 * Système de rendu / Mutation DOM
-	 */
-	const setFlipState = (el, isActive) => {
-		if (!el) return;
-		el.setAttribute(CONFIG.ATTR_STATE, isActive);
-		// Transition class-based pour compatibilité CSS existante
-		el.classList.toggle("active", isActive);
-	};
+// Set : Miroir d'état pour éviter les requêtes DOM (O(N) -> O(1))
+const activeEntities = new Set();
 
-	/**
-	 * Gestionnaire de cycle de vie des timers (Evite les fuites mémoires)
-	 */
-	const scheduleUnflip = (el, delay) => {
-		if (state.timers.has(el)) clearTimeout(state.timers.get(el));
-		const timer = setTimeout(() => {
-			setFlipState(el, false);
-			state.timers.delete(el);
-		}, delay);
-		state.timers.set(el, timer);
-	};
+/**
+ * Update unique du compteur (I/O)
+ */
+const updateAnalytics = () => {
+	viewCount = parseInt(localStorage.getItem(CONFIG.DEMO_KEY), 10) || 0;
+	viewCount++;
+	localStorage.setItem(CONFIG.DEMO_KEY, viewCount.toString());
+};
 
-	/**
-	 * Initialisation de la séquence démo (Pipeline déterministe)
-	 */
-	const runDemoSequence = () => {
-		const firstCard = document.querySelector(`.${CONFIG.CLASS_FLIP}`);
-		if (!firstCard || state.viewCount >= CONFIG.AUTO_FLIP_LIMIT) {
-			state.autoFlipping = false;
-			return;
+/**
+ * Fonction pure de transition d'état (Mutation DOM & Miroir)
+ */
+const setFlipState = (el, isActive) => {
+	if (!el) return;
+
+	if (isActive) {
+		el.setAttribute(CONFIG.ATTR_STATE, "true");
+		el.classList.add("active");
+		activeEntities.add(el);
+	} else {
+		el.setAttribute(CONFIG.ATTR_STATE, "false");
+		el.classList.remove("active");
+		activeEntities.delete(el);
+	}
+};
+
+/**
+ * Gestionnaire de cycle de vie des timers
+ */
+const scheduleUnflip = (el, delay) => {
+	if (timers.has(el)) {
+		clearTimeout(timers.get(el));
+	}
+
+	const timerId = setTimeout(() => {
+		setFlipState(el, false);
+		timers.delete(el);
+	}, delay);
+
+	timers.set(el, timerId);
+};
+
+/**
+ * Input System : Pipeline déterministe sur interaction
+ */
+const handleInput = (e) => {
+	const card = e.target.closest(`.${CONFIG.CLASS_FLIP}`);
+	if (!card) return;
+
+	// Interruption définitive du flux automatique
+	autoFlipping = false;
+
+	const isCurrentlyActive = activeEntities.has(card);
+
+	if (isCurrentlyActive) {
+		setFlipState(card, false);
+	} else {
+		// Unflip asynchrone des autres entités (Boucle native, 0 closure)
+		for (const activeCard of activeEntities) {
+			if (activeCard !== card) {
+				scheduleUnflip(activeCard, CONFIG.GLOBAL_UNFLIP_MS);
+			}
 		}
+		setFlipState(card, true);
+	}
+};
 
-		setTimeout(() => {
-			if (!state.autoFlipping) return;
-			setFlipState(firstCard, true);
-			scheduleUnflip(firstCard, CONFIG.AUTO_UNFLIP_MS);
-			state.autoFlipping = false;
-		}, 1000);
-	};
+/**
+ * Séquence démo (Pipeline d'initialisation)
+ * @param {HTMLCollection} cards - Collection d'entités cibles
+ */
+const runDemoSequence = (cards) => {
+	if (cards.length === 0 || viewCount >= CONFIG.AUTO_FLIP_LIMIT) {
+		autoFlipping = false;
+		return;
+	}
 
-	/**
-	 * Event Bus (Input System)
-	 * Centralisation de la capture sur le document ou un container racine.
-	 */
-	document.addEventListener("click", (e) => {
-		const card = e.target.closest(`.${CONFIG.CLASS_FLIP}`);
-		if (!card) return;
+	const firstCard = cards[0];
+	setTimeout(() => {
+		if (!autoFlipping) return;
+		setFlipState(firstCard, true);
+		scheduleUnflip(firstCard, CONFIG.AUTO_UNFLIP_MS);
+		autoFlipping = false;
+	}, 1000);
+};
 
-		// Interruption du flux automatique sur interaction utilisateur
-		if (state.autoFlipping) state.autoFlipping = false;
-
-		const isCurrentlyActive = card.getAttribute(CONFIG.ATTR_STATE) === "true";
-
-		if (isCurrentlyActive) {
-			setFlipState(card, false);
-		} else {
-			// Logic: Unflip des autres entités actives avec délai
-			document
-				.querySelectorAll(`.${CONFIG.CLASS_FLIP}[data-flipped="true"]`)
-				.forEach((other) => {
-					if (other !== card) scheduleUnflip(other, CONFIG.GLOBAL_UNFLIP_MS);
-				});
-			setFlipState(card, true);
-		}
-	});
-
-	// Nettoyage de l'accessibilité via sélecteur global (AOT style)
-	document
-		.querySelectorAll(`.${CONFIG.CLASS_FLIP}`)
-		.forEach((el) => el.removeAttribute("tabindex"));
-
-	// Entry point
+/**
+ * Entry point public du module
+ */
+export function initFlipSystem() {
 	updateAnalytics();
-	runDemoSequence();
+
+	// Utilisation de getElementsByClassName (Live Collection : plus performant que querySelectorAll)
+	const cards = document.getElementsByClassName(CONFIG.CLASS_FLIP);
+
+	// Nettoyage de l'accessibilité via boucle native (AOT fallback)
+	for (const el of cards) {
+		el.removeAttribute("tabindex");
+	}
+
+	runDemoSequence(cards);
+
+	// Event Bus (Root Delegation)
+	document.addEventListener("click", handleInput);
 }

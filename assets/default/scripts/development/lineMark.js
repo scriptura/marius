@@ -1,13 +1,12 @@
-'use strict'
-
 /**
  * @summary Injection de marqueurs de ligne numérotés et navigation par ancre dans les
  *          pages article. Chaque élément cible reçoit une ancre `#mark-N` navigable.
  *
  * @strategy
- *   – Sélecteur déclaré comme constante AOT : évalué une fois, jamais recalculé.
- *   – Création des nœuds <a> en boucle synchrone : le DOM est stable avant tout
- *     appel de scroll, sans recours à un événement différé.
+ *   – Sélecteur, préfixes et template déclarés en constantes AOT : évalués une fois.
+ *   – Création par clonage natif (cloneNode) en boucle indexée : le DOM est stable avant
+ *     tout appel de scroll, élimination des allocations de création (createElement).
+ *   – Lookup O(1) via getElementById plutôt que parseur CSS querySelector.
  *
  * @architectural-decision
  *   – Le scroll-to-hash est intentionnellement différé de SCROLL_DELAY ms après le boot.
@@ -17,61 +16,73 @@
  *     navigation dans la page. L'effet repose sur scroll-behavior: smooth déclaré sur
  *     <html> en CSS : sans cette règle, le scroll est instantané et l'intention UX est
  *     perdue.
- *   – Sélecteur explicite (:where(p, h2, ...)) préféré au sélecteur universel '*' avec
+ *   – Sélecteur explicite (:where(...)) préféré au sélecteur universel '*' avec
  *     exclusions : coût de matching inférieur, intention déclarative.
- *   – Null-guard sur querySelector(hash) : un hash malformé ou orphelin ne doit pas
+ *   – Null-guard sur targetEl : un hash malformé ou orphelin ne doit pas
  *     produire de throw silencieux.
  */
-const LineMarkSystem = (() => {
 
-  // ---------------------------------------------------------------------------
-  // 1. Data Layout
-  // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 1. Data Layout (Invariants & Cache)
+// ---------------------------------------------------------------------------
 
-  // @note Pour un meilleur contrôle, les éléments cibles sont listés explicitement
-  //       plutôt qu'utilisés avec le sélecteur universel '*' par exclusion.
-  const SELECTOR = '.add-line-marks > :where(p, h2, h3, h4, h5, h6, blockquote, ul, ol, [class*=grid])'
+const SELECTOR =
+	".add-line-marks > :where(p, h2, h3, h4, h5, h6, blockquote, ul, ol, [class*=grid])";
+const SCROLL_DELAY = 2000;
+const PREFIX_ID = "mark-";
+const PREFIX_HASH = `#${PREFIX_ID}`;
 
-  // Délai UX intentionnel : laisse le temps à l'utilisateur de percevoir la page
-  // avant le défilement automatique vers l'ancre cible.
-  const SCROLL_DELAY = 2000
+// Template AOT : Allocation isolée hors boucle pour copie mémoire rapide (cloneNode)
+const MARKER_TEMPLATE = document.createElement("a");
+MARKER_TEMPLATE.className = "line-mark";
 
-  // ---------------------------------------------------------------------------
-  // 2. Systems
-  // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 2. Systems
+// ---------------------------------------------------------------------------
 
-  const build = () => {
-    const els = document.querySelectorAll(SELECTOR)
-    if (!els.length) return
+const injectMarkers = () => {
+	const els = document.querySelectorAll(SELECTOR);
+	const len = els.length;
 
-    let i = 0
-    for (const el of els) {
-      i++
-      const a = document.createElement('a')
-      a.id          = `mark-${i}`
-      a.href        = `#mark-${i}`
-      a.textContent = i
-      a.className   = 'line-mark'
-      el.appendChild(a)
-    }
-  }
+	if (len === 0) return;
 
-  const scrollToHash = () => {
-    const hash = location.hash
-    if (!hash.startsWith('#mark')) return
-    document.querySelector(hash)?.scrollIntoView()
-  }
+	// Boucle indexée : zéro allocation d'itérateur
+	for (let i = 0; i < len; i++) {
+		const indexStr = (i + 1).toString();
+		const targetId = PREFIX_ID + indexStr;
 
-  // ---------------------------------------------------------------------------
-  // 3. Boot
-  // ---------------------------------------------------------------------------
+		// Clonage direct de l'empreinte mémoire du template
+		const node = MARKER_TEMPLATE.cloneNode(false);
+		node.id = targetId;
+		node.href = PREFIX_HASH + indexStr;
+		node.textContent = indexStr;
 
-  const boot = () => {
-    build()
-    if (location.hash.startsWith('#mark')) setTimeout(scrollToHash, SCROLL_DELAY)
-  }
+		els[i].appendChild(node);
+	}
+};
 
-  return { boot }
-})()
+const scrollToHash = () => {
+	const hash = location.hash;
 
-LineMarkSystem.boot()
+	if (!hash.startsWith(PREFIX_HASH)) return;
+
+	// O(1) Hash Map lookup. Extraction de l'ID natif en retirant le '#'.
+	const targetId = hash.substring(1);
+	const targetEl = document.getElementById(targetId);
+
+	if (targetEl !== null) {
+		targetEl.scrollIntoView();
+	}
+};
+
+// ---------------------------------------------------------------------------
+// 3. Boot / Export
+// ---------------------------------------------------------------------------
+
+export const boot = () => {
+	injectMarkers();
+
+	if (location.hash.startsWith(PREFIX_HASH)) {
+		setTimeout(scrollToHash, SCROLL_DELAY);
+	}
+};

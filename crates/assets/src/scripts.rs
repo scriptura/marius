@@ -1,0 +1,993 @@
+// crates/assets/src/scripts.rs
+//
+// Pipeline [scripts.components] — Phase 7. ES Modules natifs, pas de
+// bundling par concaténation : chaque module source devient un fichier
+// `.js` haché indépendant, les `import ... from '...'` sont réécrits pour
+// pointer vers les URLs publiques des autres modules déjà hachés.
+//
+// Le lexer bas niveau (`skip_line_comment`, `skip_block_comment`,
+// `find_unescaped_quote`, `JsPipelineError`) est `pub(crate)` : réutilisé
+// tel quel par `crate::service_worker`, sans duplication de logique
+// (Handoff §3 — voir le commentaire de `service_worker.rs`).
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
+use crate::js_minify::minify_javascript;
+use crate::resolve::resolve_asset_reference;
+
+// =============================================================================
+// Pipeline [scripts.components] — Phase 7. ES Modules natifs, pas de
+// bundling par concaténation : chaque module source devient un fichier
+// `.js` haché indépendant, les `import ... from '...'` sont réécrits pour
+// pointer vers les URLs publiques des autres modules déjà hachés — le
+// navigateur assemble le graphe lui-même via ESM natif au runtime, ce
+// pipeline ne fait QUE renommer les chemins et garantir l'ordre de hachage
+// (une dépendance doit être hachée avant le module qui l'importe, puisque
+// son URL finale doit apparaître dans le texte patché de ce dernier).
+//
+// Aucune nouvelle dépendance Cargo : lexer fait main (octets), arène plate
+// (Vec + indices), BLAKE3 déjà présent pour le hash — rien à ajouter au
+// Cargo.toml pour cette Phase.
+//
+// Trois passes séparées, dans cet ordre strict, jamais fusionnées :
+//   1. `build_module_arena`          — exploration (I/O + lex), construit
+//                                       le graphe.
+//   2. `topological_order_leaves_first` — tri topologique pur (aucune I/O,
+//                                       aucune allocation de contenu),
+//                                       détecte les cycles.
+//   3. `patch_and_hash_modules`      — écrit sur disque, dans l'ordre
+//                                       feuilles → racines imposé par (2).
+// Même discipline que la séparation Passe A / Passe B déjà en place pour
+// `[styles]` (Phase 3) : chaque passe a une seule responsabilité, aucune
+// ne mélange "lire le graphe" et "l'ordonner" et "le matérialiser".
+// =============================================================================
+
+/// Position (octet, longueur) d'un chemin d'import littéral dans son texte
+/// source — guillemets exclus. Alias nommé pour la lisibilité et pour
+/// satisfaire `clippy::type_complexity` sur les signatures qui l'imbriquent
+/// (`Option<(ImportSpan, usize)>`) ; la structure reste un simple tuple,
+/// aucune sémantique supplémentaire par rapport à `(usize, usize)`.
+pub(crate) type ImportSpan = (usize, usize);
+
+#[derive(Debug)]
+pub(crate) enum JsPipelineError {
+    Io(PathBuf, std::io::Error),
+    Lex(PathBuf, String),
+    /// Import non-relatif (`/libs/leaflet.js`, un nom de paquet nu, etc.)
+    /// absent du registre d'assets verbatim — même politique fail-hard que
+    /// `CssUrlResolutionError`/`WebManifestError` : ce n'est pas un module
+    /// de CE pipeline (voir doc `ImportTarget::ExternalAsset`), mais son
+    /// absence est quand même fatale, pas un `console.error` runtime.
+    AssetNotFound {
+        specifier: String,
+        filename: String,
+        in_file: PathBuf,
+    },
+    /// Cycle d'imports détecté pendant le tri topologique — mission §3 :
+    /// erreur fatale immédiate, jamais une résolution partielle.
+    CyclicImport(Vec<PathBuf>),
+}
+
+impl fmt::Display for JsPipelineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JsPipelineError::Io(path, e) => {
+                write!(
+                    f,
+                    "scripts : lecture impossible de {} : {e}",
+                    path.display()
+                )
+            }
+            JsPipelineError::Lex(path, msg) => {
+                write!(f, "scripts : {} : {msg}", path.display())
+            }
+            JsPipelineError::AssetNotFound {
+                specifier,
+                filename,
+                in_file,
+            } => write!(
+                f,
+                "scripts : AssetNotFound '{specifier}' (fichier '{filename}' absent du registre) \
+                 référencé dans {}",
+                in_file.display()
+            ),
+            JsPipelineError::CyclicImport(paths) => {
+                let list = paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "scripts : cycle d'imports détecté impliquant : {list}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for JsPipelineError {}
+
+// ── Lexer — un seul passage sur &[u8], aucune regex, aucun AST ─────────────
+
+/// Un octet appartient-il à un identifiant JS (partiel : suffisant pour la
+/// détection de frontière de mot autour de `import`/`from`, pas une
+/// validation complète des identifiants Unicode JS).
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// `source[i..]` commence-t-il par `word`, à une frontière de mot stricte
+/// des deux côtés (ni précédé ni suivi d'un octet d'identifiant) ?
+fn starts_with_word(source: &[u8], i: usize, word: &[u8]) -> bool {
+    if !source[i..].starts_with(word) {
+        return false;
+    }
+    let before_ok = i == 0 || !is_ident_byte(source[i - 1]);
+    let after_ok = source
+        .get(i + word.len())
+        .map(|&b| !is_ident_byte(b))
+        .unwrap_or(true);
+    before_ok && after_ok
+}
+
+pub(crate) fn skip_line_comment(source: &[u8], i: usize) -> usize {
+    // S'arrête AU newline sans le consommer — le newline reste un
+    // caractère significatif pour l'appelant (fin de déclaration `import`
+    // sans `from`, cf. `lex_import_statement`).
+    source[i..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|rel| i + rel)
+        .unwrap_or(source.len())
+}
+
+pub(crate) fn skip_block_comment(source: &[u8], i: usize, ctx: &Path) -> Result<usize, JsPipelineError> {
+    let mut j = i + 2;
+    while j < source.len() {
+        if source[j] == b'*' && source.get(j + 1) == Some(&b'/') {
+            return Ok(j + 2);
+        }
+        j += 1;
+    }
+    Err(JsPipelineError::Lex(
+        ctx.to_path_buf(),
+        "commentaire bloc /* non fermé".to_string(),
+    ))
+}
+
+/// Retourne l'indice du guillemet FERMANT non échappé — même discipline
+/// d'échappement que `strip_css_comments`/`MvarProvider` : une paire
+/// échappée (`\'`, `\"`, `` \` ``) avance de deux octets ensemble, jamais
+/// interprétée séparément.
+pub(crate) fn find_unescaped_quote(
+    source: &[u8],
+    mut i: usize,
+    quote: u8,
+    ctx: &Path,
+) -> Result<usize, JsPipelineError> {
+    while i < source.len() {
+        if source[i] == b'\\' && i + 1 < source.len() {
+            i += 2;
+        } else if source[i] == quote {
+            return Ok(i);
+        } else {
+            i += 1;
+        }
+    }
+    Err(JsPipelineError::Lex(
+        ctx.to_path_buf(),
+        format!(
+            "chaîne ou gabarit non fermé (guillemet '{}' manquant)",
+            quote as char
+        ),
+    ))
+}
+
+/// Saute une chaîne (`'`/`"`) ou un littéral gabarit (`` ` ``) traité comme
+/// une région opaque. Limite connue et documentée, pas un oubli : les
+/// interpolations `${...}` d'un gabarit ne sont pas analysées — un import
+/// écrit à l'intérieur d'une interpolation de gabarit (cas extrêmement
+/// rare, non idiomatique) ne serait pas détecté. Hors grammaire fermée v1.
+pub(crate) fn skip_string_like(
+    source: &[u8],
+    i: usize,
+    quote: u8,
+    ctx: &Path,
+) -> Result<usize, JsPipelineError> {
+    Ok(find_unescaped_quote(source, i + 1, quote, ctx)? + 1)
+}
+
+fn skip_ws_and_comments(source: &[u8], mut i: usize, ctx: &Path) -> Result<usize, JsPipelineError> {
+    loop {
+        while i < source.len() && source[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if source.get(i) == Some(&b'/') && source.get(i + 1) == Some(&b'/') {
+            i = skip_line_comment(source, i);
+        } else if source.get(i) == Some(&b'/') && source.get(i + 1) == Some(&b'*') {
+            i = skip_block_comment(source, i, ctx)?;
+        } else {
+            break;
+        }
+    }
+    Ok(i)
+}
+
+/// Analyse le contenu d'UNE déclaration `import`, immédiatement après le
+/// mot-clé — cherche `from '<chemin>'`/`from "<chemin>"`, bornée par `;`,
+/// un saut de ligne, ou l'EOF. Retourne `((offset, len), position_après)`
+/// du contenu du chemin (guillemets exclus), ou `None` si :
+///  - c'est un `import(...)` dynamique (mission §4, ignoré délibérément) ;
+///  - c'est un import sans `from` (`import './x.js';` — effet de bord pur,
+///    hors grammaire v1, cf. doc de `lex_imports`) ;
+///  - la déclaration est incomplète/malformée avant tout `from`.
+fn lex_import_statement(
+    source: &[u8],
+    start: usize,
+    ctx: &Path,
+) -> Result<Option<(ImportSpan, usize)>, JsPipelineError> {
+    let mut i = skip_ws_and_comments(source, start, ctx)?;
+
+    if source.get(i) == Some(&b'(') {
+        return Ok(None); // import(...) dynamique — grammaire fermée.
+    }
+
+    while i < source.len() {
+        match source[i] {
+            b';' | b'\n' => return Ok(None),
+            b'/' if source.get(i + 1) == Some(&b'/') => i = skip_line_comment(source, i),
+            b'/' if source.get(i + 1) == Some(&b'*') => i = skip_block_comment(source, i, ctx)?,
+            // Bug réel identifié à la relecture : un import SANS `from`
+            // (`import './from-server.js';`) présente son chemin AVANT
+            // toute occurrence légitime de 'from'. Sans cette ligne, le
+            // mot "from" à l'intérieur même de ce chemin littéral serait
+            // pris pour le vrai mot-clé, et la recherche de guillemet
+            // qui suit repartirait d'un point arbitraire à l'intérieur de
+            // la chaîne — extraction silencieusement fausse, pas une
+            // erreur franche. Aucune grammaire JS valide ne place une
+            // chaîne AVANT un `from` réel : sauter toute chaîne rencontrée
+            // ici est donc sûr pour le cas légitime, et corrige le cas
+            // illégitime.
+            b'\'' | b'"' | b'`' => i = skip_string_like(source, i, source[i], ctx)?,
+            _ if starts_with_word(source, i, b"from") => {
+                let quote_pos = skip_ws_and_comments(source, i + "from".len(), ctx)?;
+                let quote = match source.get(quote_pos) {
+                    Some(&q @ (b'\'' | b'"')) => q,
+                    _ => return Ok(None), // 'from' pas suivi d'une chaîne littérale
+                };
+                let content_start = quote_pos + 1;
+                let end = find_unescaped_quote(source, content_start, quote, ctx)?;
+                return Ok(Some(((content_start, end - content_start), end + 1)));
+            }
+            _ => i += 1,
+        }
+    }
+
+    Ok(None)
+}
+
+/// Lexer principal — un seul passage sur `source`, retourne les positions
+/// (octet, longueur) du contenu de chaque chemin d'import statique de
+/// premier niveau détecté (guillemets exclus, zéro allocation de `String`
+/// intermédiaire : chaque span est une sous-tranche empruntée à `source`
+/// au moment du patch, jamais copiée ici).
+///
+/// Le scan de plus haut niveau reste conscient des chaînes/gabarits/
+/// commentaires (même nécessité que `strip_css_comments` pour le CSS) :
+/// sans ça, le mot `import` pourrait être détecté à tort à l'intérieur
+/// d'une chaîne ou d'un commentaire.
+///
+/// Limite connue, non résolue ici (documentée, pas silencieuse) :
+/// aucune distinction division `/` vs littéral regex `/.../ `. Un
+/// commentaire `//` à l'intérieur d'un littéral regex (`/foo\/\/bar/`)
+/// serait à tort traité comme un début de commentaire de ligne. La
+/// désambiguïsation complète division/regex est l'un des problèmes
+/// classiques les plus coûteux du lexing JS (elle dépend du token
+/// précédent) — hors périmètre de cette grammaire fermée v1.
+fn lex_imports(source: &[u8], ctx: &Path) -> Result<Vec<ImportSpan>, JsPipelineError> {
+    let mut spans = Vec::new();
+    let mut i = 0usize;
+
+    while i < source.len() {
+        match source[i] {
+            b'/' if source.get(i + 1) == Some(&b'/') => {
+                i = skip_line_comment(source, i);
+            }
+            b'/' if source.get(i + 1) == Some(&b'*') => {
+                i = skip_block_comment(source, i, ctx)?;
+            }
+            b'\'' | b'"' | b'`' => {
+                i = skip_string_like(source, i, source[i], ctx)?;
+            }
+            _ if starts_with_word(source, i, b"import") => {
+                let after_keyword = i + "import".len();
+                match lex_import_statement(source, after_keyword, ctx)? {
+                    Some((span, next)) => {
+                        spans.push(span);
+                        i = next;
+                    }
+                    None => i = after_keyword,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    Ok(spans)
+}
+
+// ── Arène DOD — Vec<JsModule> plat, arêtes = indices ────────────────────────
+
+/// Cible d'un import détecté — deux familles disjointes, jamais confondues :
+///  - `Module` : import relatif (`./`, `../`), un AUTRE nœud de CETTE
+///    arène — arête réelle du DAG, soumise au tri topologique.
+///  - `ExternalAsset` : tout le reste (`/libs/leaflet.js`, un nom de
+///    paquet nu, une URL externe) — déjà résolu contre `AssetUrlRegistry`
+///    au moment de l'EXPLORATION (Passe 1), jamais une arête du DAG : ce
+///    pipeline ne possède pas ce fichier, ne le parse jamais, n'a aucune
+///    contrainte d'ordre de hachage à son sujet — sa valeur finale est
+///    déjà connue avant même que le tri topologique ne commence.
+enum ImportTarget {
+    Module(usize),
+    ExternalAsset(String),
+}
+
+struct ImportEdge {
+    /// Position (octet, longueur) du chemin littéral dans
+    /// `JsModule::source` — guillemets exclus, réutilisée telle quelle
+    /// par la passe de patch (Passe 3), jamais recalculée.
+    span: ImportSpan,
+    target: ImportTarget,
+}
+
+struct JsModule {
+    /// Chemin absolu canonique — clé de dédoublonnage à l'exploration (un
+    /// diamant d'imports ne doit produire qu'un seul nœud).
+    path: PathBuf,
+    /// Rempli au moment où ce nœud est dépilé du worklist d'exploration —
+    /// vide (`String::new()`) entre sa réservation et son traitement,
+    /// jamais lu avant (voir `build_module_arena`).
+    source: String,
+    imports: Vec<ImportEdge>,
+}
+
+/// Réserve un index d'arène pour `path` s'il n'en a pas déjà un — ne lit
+/// JAMAIS le fichier ici (seule `build_module_arena` le fait, au moment où
+/// l'index est dépilé du worklist). Idempotent : un diamant d'imports
+/// (deux modules important le même troisième) obtient le même index sans
+/// second passage ; un cycle ne boucle jamais à l'infini pour la même
+/// raison — la détection du cycle lui-même est le travail de la Passe 2,
+/// pas de cette fonction.
+fn reserve_module_index(
+    path: &Path,
+    arena: &mut Vec<JsModule>,
+    index_by_path: &mut HashMap<PathBuf, usize>,
+    worklist: &mut VecDeque<usize>,
+) -> usize {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if let Some(&idx) = index_by_path.get(&canonical) {
+        return idx;
+    }
+    let idx = arena.len();
+    arena.push(JsModule {
+        path: canonical.clone(),
+        source: String::new(),
+        imports: Vec::new(),
+    });
+    index_by_path.insert(canonical, idx);
+    worklist.push_back(idx);
+    idx
+}
+
+/// Passe 1 — exploration. Worklist (BFS), pas de récursion : un appel
+/// récursif aurait exigé un emprunt vivant sur `arena[idx].source`
+/// pendant un appel qui pousse lui-même dans `arena` (réallocation
+/// possible du `Vec`) — conflit d'emprunt structurel, pas contournable
+/// sans `unsafe`. Le worklist élimine le problème par construction :
+/// aucun emprunt ne traverse jamais un point de mutation du `Vec`.
+///
+/// Seule allocation de chemin en dehors du lexer lui-même : le
+/// `path.clone()` en tête de boucle, nécessaire pour la même raison
+/// (`fs::read_to_string` emprunte `path`, puis `arena[idx].source = ...`
+/// emprunte `arena` en mutable — les deux emprunts ne peuvent pas
+/// coexister si `path` est lui-même emprunté depuis `arena[idx]`).
+fn build_module_arena(
+    entry_paths: &[PathBuf],
+    asset_url_registry: &AssetUrlRegistry,
+) -> Result<(Vec<JsModule>, Vec<usize>), JsPipelineError> {
+    let mut arena: Vec<JsModule> = Vec::new();
+    let mut index_by_path: HashMap<PathBuf, usize> = HashMap::new();
+    let mut worklist: VecDeque<usize> = VecDeque::new();
+
+    let entry_indices: Vec<usize> = entry_paths
+        .iter()
+        .map(|p| reserve_module_index(p, &mut arena, &mut index_by_path, &mut worklist))
+        .collect();
+
+    while let Some(idx) = worklist.pop_front() {
+        let path = arena[idx].path.clone();
+        let source = fs::read_to_string(&path).map_err(|e| JsPipelineError::Io(path.clone(), e))?;
+        let raw_spans = lex_imports(source.as_bytes(), &path)?;
+
+        let mut imports = Vec::with_capacity(raw_spans.len());
+        for (start, len) in raw_spans {
+            let specifier = &source[start..start + len];
+            let target = if specifier.starts_with('.') {
+                let dep_path = path.with_file_name(specifier);
+                let dep_idx =
+                    reserve_module_index(&dep_path, &mut arena, &mut index_by_path, &mut worklist);
+                ImportTarget::Module(dep_idx)
+            } else {
+                match resolve_asset_reference(specifier, asset_url_registry) {
+                    Ok(Some(resolved)) => ImportTarget::ExternalAsset(resolved),
+                    Ok(None) => ImportTarget::ExternalAsset(specifier.to_string()),
+                    Err(filename) => {
+                        return Err(JsPipelineError::AssetNotFound {
+                            specifier: specifier.to_string(),
+                            filename,
+                            in_file: path.clone(),
+                        });
+                    }
+                }
+            };
+            imports.push(ImportEdge {
+                span: (start, len),
+                target,
+            });
+        }
+
+        arena[idx].source = source;
+        arena[idx].imports = imports;
+    }
+
+    Ok((arena, entry_indices))
+}
+
+// ── Tri topologique — Kahn, feuilles → racines, détection de cycle ────────
+
+/// Ordonne les indices de l'arène pour que toute dépendance-MODULE d'un
+/// nœud apparaisse AVANT lui — condition nécessaire et suffisante pour
+/// que la Passe 3 (patch) connaisse toujours déjà l'URL finale de chaque
+/// dépendance au moment de traiter un module. Algorithme de Kahn sur le
+/// graphe des dépendances (arêtes `Module` uniquement — `ExternalAsset`
+/// n'est jamais une arête, déjà résolu à l'exploration) : un nœud entre
+/// dans la file dès que toutes ses dépendances en sont sorties.
+///
+/// Cycle détecté ⟺ au moins un nœud n'atteint jamais `out_degree == 0` :
+/// erreur fatale immédiate (mission §3), aucune tentative de résolution
+/// partielle.
+fn topological_order_leaves_first(arena: &[JsModule]) -> Result<Vec<usize>, JsPipelineError> {
+    let n = arena.len();
+    let mut out_degree = vec![0usize; n];
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+    for (i, module) in arena.iter().enumerate() {
+        for edge in &module.imports {
+            if let ImportTarget::Module(dep_idx) = edge.target {
+                out_degree[i] += 1;
+                dependents[dep_idx].push(i);
+            }
+        }
+    }
+
+    let mut queue: VecDeque<usize> = (0..n).filter(|&i| out_degree[i] == 0).collect();
+    let mut order = Vec::with_capacity(n);
+
+    while let Some(i) = queue.pop_front() {
+        order.push(i);
+        for &dependent in &dependents[i] {
+            out_degree[dependent] -= 1;
+            if out_degree[dependent] == 0 {
+                queue.push_back(dependent);
+            }
+        }
+    }
+
+    if order.len() != n {
+        let stuck = (0..n)
+            .filter(|&i| out_degree[i] > 0)
+            .map(|i| arena[i].path.clone())
+            .collect();
+        return Err(JsPipelineError::CyclicImport(stuck));
+    }
+
+    Ok(order)
+}
+
+
+// ── Patch + hash — bottom-up, dans l'ordre de la Passe 2 ───────────────────
+
+/// Métadonnées d'un module patché, retournées à l'appelant pour qu'il
+/// décide lui-même lesquelles entrent dans le manifeste (seuls les points
+/// d'entrée logiques de `[scripts.components]` y entrent — un module
+/// intermédiaire comme `navigation.js` est un artefact de build, jamais
+/// référencé directement par `{% asset %}` côté template).
+struct PatchedModule {
+    url: String,
+    output_rel: String,
+    full_hash: String,
+    size: u64,
+}
+
+/// Passe 3 — pour chaque nœud, DANS L'ORDRE `order` (feuilles → racines) :
+/// recopie `source` en substituant chaque span d'import par l'URL publique
+/// finale de sa cible (déjà connue par construction — soit calculée à une
+/// itération précédente de CETTE boucle pour une `Module`, soit déjà
+/// résolue à l'exploration pour une `ExternalAsset`), hache le résultat,
+/// écrit sur disque.
+fn patch_and_hash_modules(
+    arena: &[JsModule],
+    order: &[usize],
+    build_root: &Path,
+) -> Result<Vec<Option<PatchedModule>>, Box<dyn std::error::Error>> {
+    let mut resolved: Vec<Option<PatchedModule>> = (0..arena.len()).map(|_| None).collect();
+
+    let scripts_dir = build_root.join("scripts");
+    fs::create_dir_all(&scripts_dir)?;
+
+    for &idx in order {
+        let module = &arena[idx];
+        let mut patched = String::with_capacity(module.source.len());
+        let mut cursor = 0usize;
+
+        for edge in &module.imports {
+            let (start, len) = edge.span;
+            patched.push_str(&module.source[cursor..start]);
+
+            let replacement: &str = match &edge.target {
+                ImportTarget::Module(dep_idx) => {
+                    resolved[*dep_idx].as_ref().map(|p| p.url.as_str()).expect(
+                        "dépendance déjà patchée par construction — garanti par l'ordre \
+                         topologique de la Passe 2",
+                    )
+                }
+                ImportTarget::ExternalAsset(url) => url.as_str(),
+            };
+            patched.push_str(replacement);
+
+            cursor = start + len;
+        }
+        patched.push_str(&module.source[cursor..]);
+
+        // Chantier 4 — minification, dernière étape avant le hachage :
+        // le hash doit porter sur les octets RÉELLEMENT servis, pas sur
+        // un brouillon intermédiaire plus volumineux qui ne sera jamais
+        // écrit sur disque.
+        let minified = minify_javascript(&patched, &module.path)
+            .map_err(|e| format!("scripts   : {e}"))?;
+        let bytes = minified.into_bytes();
+        let (full_hash, short_hash) = hash_content(&bytes);
+
+        let stem = module
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("module-{idx}"));
+        let hashed_filename = format!("{stem}.{short_hash}.js");
+        let output_rel = join_slash("scripts", &hashed_filename);
+        fs::write(scripts_dir.join(&hashed_filename), &bytes)?;
+
+        resolved[idx] = Some(PatchedModule {
+            url: format!("/{output_rel}"),
+            output_rel,
+            full_hash,
+            size: bytes.len() as u64,
+        });
+    }
+
+    Ok(resolved)
+}
+
+pub(crate) fn run_scripts_pipeline(
+    theme_dir: &Path,
+    build_root: &Path,
+    build_root_rel: &str,
+    components: &HashMap<String, String>,
+    asset_url_registry: &AssetUrlRegistry,
+    manifest: &mut HashMap<String, AssetEntry>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Même raison que [sprites]/[webmanifest] : HashMap n'a pas d'ordre
+    // d'itération garanti, le manifeste doit être reproductible.
+    let mut target_names: Vec<&String> = components.keys().collect();
+    target_names.sort();
+
+    let entry_paths: Vec<PathBuf> = target_names
+        .iter()
+        .map(|name| theme_dir.join(&components[*name]))
+        .collect();
+
+    let (arena, entry_indices) = build_module_arena(&entry_paths, asset_url_registry)?;
+    let order = topological_order_leaves_first(&arena)?;
+    let resolved = patch_and_hash_modules(&arena, &order, build_root)?;
+
+    for (target_name, &entry_idx) in target_names.iter().zip(entry_indices.iter()) {
+        let patched = resolved[entry_idx]
+            .as_ref()
+            .expect("chaque point d'entrée est traité par la Passe 3");
+
+        manifest.insert(
+            format!("{target_name}.js"),
+            AssetEntry {
+                url: patched.url.clone(),
+                path: join_slash(build_root_rel, &patched.output_rel),
+                mime: mime_for_extension("js").to_string(),
+                size: patched.size,
+                hash: patched.full_hash.clone(),
+                version: String::new(), // rempli par l'appelant (theme.version)
+            },
+        );
+
+        println!(
+            "[marius-assets] scripts   {} -> {}",
+            components[*target_name], patched.url
+        );
+    }
+
+    // Bug découvert en session : modules DÉPENDANCE (importés
+    // transitivement via ESM natif, ex. `navigation.js` importé par
+    // `main`/`index.js`) — hachés et écrits sur disque par
+    // `patch_and_hash_modules` (Passe 3, l'arène ENTIÈRE, dépendances
+    // comprises), mais jusqu'ici jamais inscrits au manifeste puisque la
+    // boucle ci-dessus ne parcourt QUE les points d'entrée déclarés dans
+    // `theme.toml`. Un fichier physiquement présent mais absent de tout
+    // registre logique est invisible à `{% asset %}` (Forge) ET à la
+    // table de routage statique du Shell (`asset_routes.rs`, elle-même
+    // dérivée de ce manifeste) — 404 côté navigateur malgré un build
+    // apparemment réussi.
+    //
+    // Clé : stem du fichier source (ex. "navigation.js") — ces modules
+    // n'ont pas de nom de cible logique, seulement leur propre identité de
+    // fichier. Limite connue, non résolue ici : deux dépendances de même
+    // stem dans des dossiers différents (ex. `foo/utils.js` et
+    // `bar/utils.js`) collisionneraient silencieusement sur cette même
+    // clé — non pertinent pour l'arborescence actuelle du thème, mais à
+    // garder en tête si le graphe de modules se complexifie.
+    let entry_idx_set: HashSet<usize> = entry_indices.iter().copied().collect();
+    for (idx, slot) in resolved.iter().enumerate() {
+        if entry_idx_set.contains(&idx) {
+            continue; // déjà couvert ci-dessus, sous sa clé logique (nom de cible)
+        }
+        let Some(patched) = slot else {
+            continue; // jamais atteint par la Passe 2/3 — nœud mort, hors graphe réel
+        };
+
+        let stem = arena[idx]
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("module-{idx}"));
+
+        manifest.insert(
+            format!("{stem}.js"),
+            AssetEntry {
+                url: patched.url.clone(),
+                path: join_slash(build_root_rel, &patched.output_rel),
+                mime: mime_for_extension("js").to_string(),
+                size: patched.size,
+                hash: patched.full_hash.clone(),
+                version: String::new(),
+            },
+        );
+
+        println!(
+            "[marius-assets] scripts   (dépendance) {} -> {}",
+            arena[idx].path.display(),
+            patched.url
+        );
+    }
+
+    Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── lex_imports (Phase 7, scripts) ───────────────────────────────────────
+
+    fn lex(source: &str) -> Vec<ImportSpan> {
+        lex_imports(source.as_bytes(), Path::new("test.js")).unwrap()
+    }
+
+    fn lexed_specifiers(source: &str) -> Vec<&str> {
+        lex(source)
+            .into_iter()
+            .map(|(start, len)| &source[start..start + len])
+            .collect()
+    }
+
+    #[test]
+    fn lex_imports_named_import() {
+        let src = "import { initNavigation } from './navigation.js';\ninitNavigation();";
+        assert_eq!(lexed_specifiers(src), vec!["./navigation.js"]);
+    }
+
+    #[test]
+    fn lex_imports_default_import() {
+        let src = "import L from '/libs/leaflet.js';";
+        assert_eq!(lexed_specifiers(src), vec!["/libs/leaflet.js"]);
+    }
+
+    /// Mission §4 : grammaire fermée, ignoré délibérément (404 légitime au
+    /// runtime si enfreint), pas une erreur de ce lexer.
+    #[test]
+    fn lex_imports_dynamic_import_is_ignored() {
+        let src = "const mod = import('./lazy.js');";
+        assert!(lex(src).is_empty());
+    }
+
+    /// Hors grammaire v1 (documenté dans `lex_imports`), pas un oubli
+    /// silencieux : un import à but d'effet de bord seul, sans `from`.
+    #[test]
+    fn lex_imports_side_effect_import_without_from_is_ignored() {
+        let src = "import './polyfill.js';";
+        assert!(lex(src).is_empty());
+    }
+
+    /// Bug réel corrigé à la relecture : le chemin lui-même contient le
+    /// mot "from" — sans le correctif (sauter les chaînes rencontrées
+    /// avant tout `from` légitime), ce mot aurait été pris pour le
+    /// mot-clé, avec une extraction de chemin silencieusement fausse à la
+    /// clé.
+    #[test]
+    fn lex_imports_path_containing_the_word_from_is_still_ignored_without_real_from() {
+        let src = "import './from-server.js';\nimport { y } from './real.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./real.js"]);
+    }
+
+    #[test]
+    fn lex_imports_ignores_import_keyword_inside_line_comment() {
+        let src = "// import { x } from './ghost.js';\nimport { y } from './real.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./real.js"]);
+    }
+
+    #[test]
+    fn lex_imports_ignores_import_keyword_inside_block_comment() {
+        let src = "/* import { x } from './ghost.js'; */\nimport { y } from './real.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./real.js"]);
+    }
+
+    #[test]
+    fn lex_imports_ignores_import_keyword_inside_string() {
+        let src = "const s = \"import { x } from './ghost.js';\";\nimport { y } from './real.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./real.js"]);
+    }
+
+    /// Limite connue et assumée (documentée sur `lex_imports`) : un
+    /// gabarit est une région opaque, pas d'interpolation `${...}`
+    /// analysée. Ce test prouve seulement que l'opacité fonctionne, pas
+    /// qu'une interpolation serait gérée.
+    #[test]
+    fn lex_imports_skips_template_literal_as_opaque() {
+        let src = "const s = `import fake from './ghost.js'`;\nimport { y } from './real.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./real.js"]);
+    }
+
+    #[test]
+    fn lex_imports_multiple_statements_in_order() {
+        let src = "import a from './a.js';\nimport b from './b.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./a.js", "./b.js"]);
+    }
+
+    #[test]
+    fn lex_imports_unterminated_string_is_an_error() {
+        assert!(lex_imports(b"import x from './a.js", Path::new("test.js")).is_err());
+    }
+
+    #[test]
+    fn lex_imports_unterminated_block_comment_is_an_error() {
+        assert!(lex_imports(b"/* never closed", Path::new("test.js")).is_err());
+    }
+
+    // ── topological_order_leaves_first (Phase 7) ─────────────────────────────
+
+    /// Construit une arène minimale à partir d'une liste d'arêtes
+    /// `Module` (pas de vrai fichier, pas de vrai lexer) — suffisant pour
+    /// tester le tri topologique isolément de l'exploration disque.
+    fn arena_from_edges(edges: &[&[usize]]) -> Vec<JsModule> {
+        edges
+            .iter()
+            .enumerate()
+            .map(|(i, deps)| JsModule {
+                path: PathBuf::from(format!("mod{i}.js")),
+                source: String::new(),
+                imports: deps
+                    .iter()
+                    .map(|&d| ImportEdge {
+                        span: (0, 0),
+                        target: ImportTarget::Module(d),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn topological_order_linear_chain_leaves_first() {
+        // 0 importe 1, 1 importe 2 : ordre attendu 2, 1, 0 (feuille d'abord).
+        let arena = arena_from_edges(&[&[1], &[2], &[]]);
+        assert_eq!(
+            topological_order_leaves_first(&arena).unwrap(),
+            vec![2, 1, 0]
+        );
+    }
+
+    #[test]
+    fn topological_order_diamond_dependency_processes_shared_leaf_once() {
+        // 0 importe 1 et 2 ; 1 et 2 importent tous deux 3 (diamant).
+        let arena = arena_from_edges(&[&[1, 2], &[3], &[3], &[]]);
+        let order = topological_order_leaves_first(&arena).unwrap();
+        assert_eq!(order.len(), 4);
+        // 3 doit précéder 1 et 2, qui doivent tous deux précéder 0.
+        let pos = |i: usize| order.iter().position(|&x| x == i).unwrap();
+        assert!(pos(3) < pos(1));
+        assert!(pos(3) < pos(2));
+        assert!(pos(1) < pos(0));
+        assert!(pos(2) < pos(0));
+    }
+
+    /// Mission §3 : un cycle doit être une erreur fatale immédiate.
+    #[test]
+    fn topological_order_detects_cycle() {
+        let arena = arena_from_edges(&[&[1], &[0]]); // 0 -> 1 -> 0
+        assert!(topological_order_leaves_first(&arena).is_err());
+    }
+
+    #[test]
+    fn topological_order_empty_arena_is_empty_order() {
+        let arena: Vec<JsModule> = Vec::new();
+        assert_eq!(
+            topological_order_leaves_first(&arena).unwrap(),
+            Vec::<usize>::new()
+        );
+    }
+
+    // ── run_scripts_pipeline — intégration bout-en-bout (Phase 7) ────────────
+    //
+    // Reprend le scaffolding exact fourni en session : deux cibles
+    // (`main`, `more`), un import relatif intra-thème (`navigation.js`) et
+    // un import non-relatif vers une ressource verbatim déjà hachée
+    // (`/libs/leaflet.js`).
+
+    #[test]
+    fn run_scripts_pipeline_resolves_relative_and_external_imports() {
+        let sandbox = std::env::temp_dir().join("marius-assets-test-scripts-ok");
+        let theme_dir = sandbox.join("theme");
+        let build_root = sandbox.join("build");
+        let main_dir = theme_dir.join("scripts/development/main");
+        let more_dir = theme_dir.join("scripts/development/more");
+        fs::create_dir_all(&main_dir).unwrap();
+        fs::create_dir_all(&more_dir).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        fs::write(
+            main_dir.join("navigation.js"),
+            "export const initNavigation = () => { console.log(\"Nav\"); };",
+        )
+        .unwrap();
+        fs::write(
+            main_dir.join("index.js"),
+            "import { initNavigation } from './navigation.js';\ninitNavigation();",
+        )
+        .unwrap();
+        fs::write(
+            more_dir.join("index.js"),
+            "// /libs/leaflet.js est une ressource [static.verbatim] hachée en amont.\n\
+             import L from '/libs/leaflet.js';",
+        )
+        .unwrap();
+
+        let mut registry = AssetUrlRegistry::new();
+        registry.insert(
+            "leaflet.js".to_string(),
+            "/libs/leaflet.9f8e7.js".to_string(),
+        );
+
+        let mut components = HashMap::new();
+        components.insert(
+            "main".to_string(),
+            "scripts/development/main/index.js".to_string(),
+        );
+        components.insert(
+            "more".to_string(),
+            "scripts/development/more/index.js".to_string(),
+        );
+
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+
+        run_scripts_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &components,
+            &registry,
+            &mut manifest,
+        )
+        .unwrap();
+
+        // Les cibles logiques ET les modules dépendance entrent au
+        // manifeste — correctif de cette session : un module atteint
+        // seulement par import ESM transitif (navigation.js, jamais
+        // déclaré comme cible dans theme.toml) doit rester résolvable par
+        // sa propre clé (stem), sous peine d'être introuvable par tout
+        // consommateur de manifest.toml malgré sa présence réelle sur
+        // disque (bug constaté en usage réel : 404 côté navigateur).
+        assert!(manifest.contains_key("main.js"));
+        assert!(manifest.contains_key("more.js"));
+        assert!(manifest.contains_key("navigation.js"));
+        assert!(manifest["navigation.js"].url.starts_with("/scripts/navigation."));
+        assert!(manifest["navigation.js"].url.ends_with(".js"));
+
+        let main_url = &manifest["main.js"].url;
+        let main_filename = Path::new(main_url).file_name().unwrap();
+        let main_written =
+            fs::read_to_string(build_root.join("scripts").join(main_filename)).unwrap();
+
+        // L'import relatif doit pointer vers l'URL hachée RÉELLE de
+        // navigation.js — pas vers './navigation.js' ni vers un
+        // placeholder. On vérifie le PRÉFIXE de l'URL résolue, pas le nom
+        // du binding local appelé : le mangling (Chantier 4) peut
+        // légitimement renommer `initNavigation` en un identifiant court
+        // à l'intérieur de main/index.js (binding purement local à ce
+        // fichier, jamais son nom exporté — cf. commentaire de
+        // `minify_javascript`), ce n'est pas une régression.
+        assert!(!main_written.contains("./navigation.js"));
+        assert!(main_written.contains("/scripts/navigation."));
+
+        // Cohérence : l'URL substituée dans main_written doit être EXACTEMENT
+        // celle du manifeste — pas seulement un préfixe qui matcherait par
+        // coïncidence.
+        assert!(main_written.contains(manifest["navigation.js"].url.as_str()));
+
+        let more_url = &manifest["more.js"].url;
+        let more_filename = Path::new(more_url).file_name().unwrap();
+        let more_written =
+            fs::read_to_string(build_root.join("scripts").join(more_filename)).unwrap();
+
+        // L'import non-relatif est réécrit vers l'URL exacte du registre.
+        assert!(more_written.contains("/libs/leaflet.9f8e7.js"));
+        assert!(!more_written.contains("/libs/leaflet.js'"));
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    /// Fail-hard (même politique que CSS/webmanifest) : un import
+    /// non-relatif absent du registre doit faire échouer tout le
+    /// pipeline.
+    #[test]
+    fn run_scripts_pipeline_fails_hard_on_missing_external_asset() {
+        let sandbox = std::env::temp_dir().join("marius-assets-test-scripts-missing");
+        let theme_dir = sandbox.join("theme");
+        let build_root = sandbox.join("build");
+        let dir = theme_dir.join("scripts/development/main");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        fs::write(dir.join("index.js"), "import L from '/libs/leaflet.js';").unwrap();
+
+        let registry = AssetUrlRegistry::new(); // vide : rien à trouver
+        let mut components = HashMap::new();
+        components.insert(
+            "main".to_string(),
+            "scripts/development/main/index.js".to_string(),
+        );
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+
+        let result = run_scripts_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &components,
+            &registry,
+            &mut manifest,
+        );
+        assert!(result.is_err());
+        assert!(manifest.is_empty());
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+}

@@ -1,207 +1,194 @@
 /**
  * @summary Système de gestion de sliders (simple/double) par normalisation de données.
- * @strategy
- * - Resource Pooling     : Memoization des instances Intl.NumberFormat (réduction GC-pressure).
- * - Single Instruction   : Pipeline unifié pour les types 'single' et 'multithumb'.
- * - Data-to-Visual       : CSS Variables comme seul canal JS → CSS.
- * - A11y Data Layer      : Mise à jour ARIA dans le même passage pipeline que les CSS vars.
- * @architectural-decision
- * - Event Delegation globale (Input System) : remplace les closures par instance.
- * - `delta` (max − min) pré-calculé comme invariant de plage.
- * - Séparation stricte calcul brut / formatage sortie.
- * - Collision multithumb : comportement "push" — le pouce actif déplace le pouce passif,
- *   avec un écart minimal configurable (`data-min-gap`), jamais inférieur à `step`.
- * @data-attributes
- * - `data-intl`     : locale Intl.NumberFormat (ex. "fr-FR"). Optionnel.
- * - `data-currency` : code devise ISO 4217 (ex. "EUR"). Optionnel.
- * - `data-min-gap`  : écart minimal entre les deux thumbs (multithumb). Défaut : step.
+ * @architecture
+ * - AOT Data Layout    : Invariants structurels (nœuds, min, max, delta) mis en cache à l'init.
+ * - Zero Allocation    : Aucune instanciation d'objet ou de tableau dans le hot path (input event).
+ * - O(1) Dispatch      : WeakMap liant l'Input DOM à son entité pour court-circuiter l'arbre DOM.
+ * - Single Event Loop  : Un seul écouteur délégué au document gère tout le système.
  */
 
-{
-	// ─── Utilitaires ────────────────────────────────────────────────────────────
+// ─── Registres & Caches (AOT) ───────────────────────────────────────────────
 
-	/**
-	 * Borne une valeur entre [lo, hi]. Fonction pure, sans effet de bord.
-	 * Si v n'est pas fini (NaN, ±Infinity), retourne lo — comportement déterministe
-	 * qui arrête la propagation de NaN dans le pipeline de normalisation.
-	 */
-	const clamp = (v, lo, hi) =>
-		isFinite(v) ? Math.min(Math.max(v, lo), hi) : lo;
+// Cache des formateurs (évite les allocations Intl répétées)
+const formatters = new Map();
 
-	// Cache de formateurs (AOT preparation — évite les allocations durant les interactions)
-	const formatters = new Map();
+// O(1) Dispatch : associe un HTMLInputElement à son Entity configuration
+const inputEntityRegistry = new WeakMap();
 
-	/**
-	 * Configuration pré-calculée par container (AOT init).
-	 * WeakMap : pas de pollution DOM, libération automatique si le nœud est retiré du document.
-	 * Structure : { minGap: number }
-	 */
-	const containerConfig = new WeakMap();
+// Flag global pour garantir l'unicité des écouteurs d'événements
+let isEventSystemMounted = false;
 
-	/**
-	 * Retourne un Intl.NumberFormat mis en cache pour (locale, currency).
-	 * @param {string} loc  - Locale BCP 47 (ex. "fr-FR").
-	 * @param {string} cur  - Code devise ISO 4217 (ex. "EUR"). Optionnel.
-	 */
-	const getFormatter = (loc, cur) => {
-		const key = `${loc}-${cur}`;
-		if (!formatters.has(key)) {
-			formatters.set(
-				key,
-				new Intl.NumberFormat(
-					loc || undefined,
-					cur ? { style: "currency", currency: cur } : {},
-				),
-			);
-		}
-		return formatters.get(key);
-	};
+// ─── Utilitaires purs ────────────────────────────────────────────────────────
 
-	// ─── Pipeline de normalisation ───────────────────────────────────────────────
+/**
+ * Borne une valeur entre [lo, hi]. Arrête la propagation de NaN.
+ */
+const clamp = (v, lo, hi) =>
+	Number.isFinite(v) ? Math.min(Math.max(v, lo), hi) : lo;
 
-	/**
-	 * Calcule les pourcentages, met à jour les CSS vars et l'état ARIA.
-	 * Passage unique sur les valeurs : CSS vars + ARIA dans la même boucle.
-	 * @param {Element} container - Élément `.range` ou `.range-multithumb`.
-	 */
-	const updateRangeEntity = (container) => {
-		const inputs = container.querySelectorAll("input");
-		const output = container.querySelector("output");
-		const min = parseFloat(inputs[0].min);
-		const max = parseFloat(inputs[0].max);
-		const delta = max - min;
-
-		// Guard fail-fast : delta nul ou invalide signale une configuration HTML incorrecte
-		// (min >= max ou attributs manquants). On arrête le pipeline plutôt que de masquer
-		// l'erreur avec un fallback — le warn permet à l'intégrateur de la détecter.
-		if (!delta || !isFinite(delta)) {
-			console.warn(
-				"[range] Configuration invalide : min >= max ou attributs absents.",
-				container,
-			);
-			return;
-		}
-
-		const formatter = getFormatter(
-			container.dataset.intl,
-			container.dataset.currency,
+/**
+ * Récupère ou instancie un Intl.NumberFormat.
+ */
+const getFormatter = (loc, cur) => {
+	const key = `${loc}-${cur}`;
+	if (!formatters.has(key)) {
+		formatters.set(
+			key,
+			new Intl.NumberFormat(
+				loc || undefined,
+				cur ? { style: "currency", currency: cur } : {},
+			),
 		);
-		const isMulti = inputs.length > 1;
-		const values = Array.from(inputs).map((i) =>
-			clamp(parseFloat(i.value), min, max),
-		);
-
-		// Passage unique : CSS vars + état ARIA (évite une double traversée du tableau)
-		values.forEach((v, idx) => {
-			const percent = ((v - min) / delta) * 100;
-			const varName = isMulti
-				? idx === 0
-					? "--start"
-					: "--stop"
-				: "--percent";
-			container.style.setProperty(varName, `${percent}%`);
-
-			// A11y data layer : synchronisation de l'état sémantique
-			const input = inputs[idx];
-			input.setAttribute("aria-valuemin", min);
-			input.setAttribute("aria-valuemax", max);
-			input.setAttribute("aria-valuenow", v);
-			input.setAttribute("aria-valuetext", formatter.format(v));
-		});
-
-		// Rendu texte de l'output (Data-to-String)
-		// Guard : output peut être absent en cas d'intégration partielle du DOM.
-		if (output)
-			output.textContent = values.map((v) => formatter.format(v)).join(" • ");
-	};
-
-	// ─── Input System (Event Delegation globale) ─────────────────────────────────
-
-	/**
-	 * Traite les événements input/change comme un flux de données.
-	 * Applique la contrainte de collision avant de relancer le pipeline.
-	 * @param {Event} e
-	 */
-	const handleInput = (e) => {
-		const rangeContainer = e.target.closest(".range, .range-multithumb");
-		if (!rangeContainer) return;
-
-		const inputs = rangeContainer.querySelectorAll("input");
-
-		if (inputs.length > 1) {
-			const min = parseFloat(inputs[0].min);
-			const max = parseFloat(inputs[0].max);
-			// minGap lu depuis le cache AOT — zéro parsing à chaud.
-			// Guard : containerConfig peut être absent si le container a été injecté
-			// dynamiquement après init() (ex. SPA). Fallback silencieux sur step.
-			const step = parseFloat(inputs[0].step) || 1;
-			const config = containerConfig.get(rangeContainer);
-			const minGap = config ? config.minGap : step;
-
-			const v1 = parseFloat(inputs[0].value);
-			const v2 = parseFloat(inputs[1].value);
-
-			// Comportement "push" : le pouce actif déplace le pouce passif
-			if (e.target === inputs[0] && v1 >= v2) {
-				inputs[1].value = clamp(v1 + minGap, min, max);
-			}
-			if (e.target === inputs[1] && v2 <= v1) {
-				inputs[0].value = clamp(v2 - minGap, min, max);
-			}
-		}
-
-		updateRangeEntity(rangeContainer);
-	};
-
-	// ─── Initialisation (AOT layout) ─────────────────────────────────────────────
-
-	/**
-	 * Prépare chaque container : nettoyage structurel, ARIA initial, état CSS.
-	 * Exécuté une seule fois au chargement.
-	 */
-	const init = () => {
-		document
-			.querySelectorAll(".range, .range-multithumb")
-			.forEach((container) => {
-				const inputs = container.querySelectorAll("input");
-				const output = container.querySelector("output");
-				const isMulti = inputs.length > 1;
-
-				inputs.forEach((input, idx) => {
-					// Nettoyage structurel : suppression du tabindex natif redondant
-					input.removeAttribute("tabindex");
-
-					// Labels ARIA pour différencier les thumbs (multithumb uniquement)
-					// Défini une seule fois ici pour ne pas écraser une valeur HTML explicite
-					if (isMulti && !input.hasAttribute("aria-label")) {
-						input.setAttribute("aria-label", idx === 0 ? "Minimum" : "Maximum");
-					}
-				});
-
-				// aria-live sur l'output : annonce les changements aux lecteurs d'écran
-				// "polite" : attend la fin de la lecture en cours (non interruptif)
-				if (output && !output.hasAttribute("aria-live")) {
-					output.setAttribute("aria-live", "polite");
-				}
-
-				// Pré-calcul de minGap (AOT) : évite le re-parsing à chaque événement input.
-				// Stocké dans containerConfig (WeakMap) — pas de sérialisation dans le DOM.
-				if (inputs.length > 1) {
-					const step = parseFloat(inputs[0].step) || 1;
-					const minGap = Math.max(Number(container.dataset.minGap) || 0, step);
-					containerConfig.set(container, { minGap });
-				}
-
-				updateRangeEntity(container);
-			});
-
-		document.addEventListener("input", handleInput);
-		document.addEventListener("change", handleInput);
-	};
-
-	if (document.readyState === "loading") {
-		document.addEventListener("DOMContentLoaded", init);
-	} else {
-		init();
 	}
-}
+	return formatters.get(key);
+};
+
+// ─── Pipeline de Rendu (Hot Path - Zero Allocation) ──────────────────────────
+
+/**
+ * Met à jour le DOM (CSS & ARIA) directement depuis les données de l'entité.
+ * @param {Object} entity - Configuration pré-calculée du slider.
+ */
+const updateVisuals = (entity) => {
+	const { container, inputs, output, min, delta, isMulti, formatter } = entity;
+
+	// Lecture native directe (évite parseFloat)
+	const v0 = inputs[0].valueAsNumber;
+	const p0 = ((v0 - min) / delta) * 100;
+
+	container.style.setProperty(isMulti ? "--start" : "--percent", `${p0}%`);
+	inputs[0].setAttribute("aria-valuenow", v0);
+	inputs[0].setAttribute("aria-valuetext", formatter.format(v0));
+
+	let outText = formatter.format(v0);
+
+	if (isMulti) {
+		const v1 = inputs[1].valueAsNumber;
+		const p1 = ((v1 - min) / delta) * 100;
+
+		container.style.setProperty("--stop", `${p1}%`);
+		inputs[1].setAttribute("aria-valuenow", v1);
+		inputs[1].setAttribute("aria-valuetext", formatter.format(v1));
+
+		// Concaténation scalaire directe au lieu de tableau.join()
+		outText += ` • ${formatter.format(v1)}`;
+	}
+
+	if (output) {
+		output.textContent = outText;
+	}
+};
+
+// ─── Input System (O(1) Dispatch) ────────────────────────────────────────────
+
+/**
+ * Traite le flux de données de l'événement input/change.
+ * Complexité : O(1) via WeakMap. Aucune allocation mémoire.
+ */
+const handleInput = (e) => {
+	// Accès direct à l'entité pré-calculée. Élimine l'appel coûteux à e.target.closest()
+	const entity = inputEntityRegistry.get(e.target);
+	if (!entity) return;
+
+	const { inputs, min, max, minGap, isMulti } = entity;
+
+	if (isMulti) {
+		const v0 = inputs[0].valueAsNumber;
+		const v1 = inputs[1].valueAsNumber;
+
+		// Comportement "push" avec contrainte d'écart
+		if (e.target === inputs[0] && v0 >= v1) {
+			inputs[1].value = clamp(v0 + minGap, min, max);
+		} else if (e.target === inputs[1] && v1 <= v0) {
+			inputs[0].value = clamp(v1 - minGap, min, max);
+		}
+	}
+
+	updateVisuals(entity);
+};
+
+// ─── API Publique (Initialisation & Cycle de vie) ────────────────────────────
+
+/**
+ * Monte un container spécifique. Extrait et met en cache ses invariants structurels.
+ * @param {HTMLElement} container
+ */
+export const mountSlider = (container) => {
+	const inputs = Array.from(container.querySelectorAll("input"));
+	const output = container.querySelector("output");
+	const min = parseFloat(inputs[0].min);
+	const max = parseFloat(inputs[0].max);
+	const delta = max - min;
+
+	// Guard fail-fast : validation stricte de l'invariant sans coercition implicite
+	if (!delta || !Number.isFinite(delta)) {
+		console.warn(
+			"[range] Invariants invalides (min >= max ou absents).",
+			container,
+		);
+		return;
+	}
+
+	const isMulti = inputs.length > 1;
+	const step = parseFloat(inputs[0].step) || 1;
+	const minGap = isMulti
+		? Math.max(Number(container.dataset.minGap) || 0, step)
+		: 0;
+
+	const formatter = getFormatter(
+		container.dataset.intl,
+		container.dataset.currency,
+	);
+
+	// Entity Layout : Conteneur d'état statique et d'invariants (AOT)
+	const entity = {
+		container,
+		inputs,
+		output,
+		min,
+		max,
+		delta,
+		minGap,
+		isMulti,
+		formatter,
+	};
+
+	inputs.forEach((input, idx) => {
+		// Nettoyage DOM structurel
+		input.removeAttribute("tabindex");
+
+		if (isMulti && !input.hasAttribute("aria-label")) {
+			input.setAttribute("aria-label", idx === 0 ? "Minimum" : "Maximum");
+		}
+
+		// Enregistrement O(1) de l'input vers son entité pour court-circuiter le DOM
+		inputEntityRegistry.set(input, entity);
+	});
+
+	if (output && !output.hasAttribute("aria-live")) {
+		output.setAttribute("aria-live", "polite");
+	}
+
+	// Premier passage dans le pipeline de rendu visuel
+	updateVisuals(entity);
+};
+
+/**
+ * Scanne le DOM et monte tous les sliders trouvés.
+ * Idéal pour l'initialisation bootstrap ou les transitions de vue.
+ */
+export const mountAllSliders = () => {
+	document.querySelectorAll(".range, .range-multithumb").forEach(mountSlider);
+};
+
+/**
+ * Attache les écouteurs d'événements globaux.
+ * Découplé du chargement du module pour éviter les effets de bord inattendus.
+ */
+export const setupSliderEvents = () => {
+	if (isEventSystemMounted) return;
+
+	document.addEventListener("input", handleInput);
+	document.addEventListener("change", handleInput);
+	isEventSystemMounted = true;
+};
