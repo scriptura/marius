@@ -1,92 +1,54 @@
 /**
- * @summary Web Component SVG de graphique en camembert (simple/donut), animé,
- *          avec labels positionnés et interaction hover par section.
+ * @summary Web Component SVG de graphique en camembert (simple/donut), animé.
+ *          Refonte Data-Oriented avec zéro allocation dans la boucle de rendu.
  * @see https://grafikart.fr/tutoriels/graph-pie-camembert-1965
  *
  * @strategy
- *   – `total` extrait comme invariant AOT après parsing des données : jamais
- *     recalculé dans la boucle d'animation (supprime un Array.reduce par frame).
- *   – Paths et lines pré-alloués dans le constructeur : zéro allocation pendant
- *     le rendu. La boucle draw() ne fait que des setAttribute (mutations pures).
- *   – La constante `patch` (epsilon géométrique) compense la limite de précision
- *     des flottants sur les arcs SVG à 360° : un path couvrant exactement 100%
- *     du cercle produit un arc dégénéré (start === end) que le moteur SVG ignore.
+ *   – `_ratios` pré-calculés en AOT (Float64Array contigu) : élimine les opérations
+ *     de division (valeur / total) et le parsing dans la boucle critique.
+ *   – Positionnement des labels résolu en AOT : le calcul trigonométrique des coordonnées
+ *     des labels est exécuté une seule fois dans le constructeur au lieu d'attendre
+ *     la fin de l'animation ou d'évaluer une condition `if (progress === 1)` à chaque frame.
+ *   – Paths et lines pré-alloués : zéro allocation (zéro instanciation de Point) pendant
+ *     le rendu. La boucle `_draw()` effectue uniquement des mutations pures via setAttribute.
+ *   – La constante `PATCH` (epsilon géométrique) compense la limite de précision
+ *     des flottants sur les arcs SVG à 360° pour éviter les arcs dégénérés.
  *
  * @architectural-decision
- *   – Custom Elements conservés : connectedCallback est le hook natif correct
- *     pour déclencher l'animation à l'entrée dans le DOM. L'alternative
- *     (IntersectionObserver + init manuel) produit le même résultat avec plus
- *     de code et sans bénéfice de performance à cette échelle d'instanciation.
- *   – Shadow DOM conservé : l'encapsulation CSS est légitime — les styles du
- *     graphe ne doivent ni fuiter dans la page ni être affectés par elle.
- *     La customisation externe passe par des CSS variables
- *     (ex. --pie-chart-color-label) sans nécessiter de percer l'encapsulation.
- *   – Couleurs des segments non exposées en CSS variables : elles sont déclarées
- *     via l'attribut HTML `colors` (séparateur `;`), ce qui suffit pour le cas
- *     d'usage actuel et évite une API CSS plus complexe.
+ *   – Custom Elements conservés : connectedCallback déclenche l'animation
+ *     via le timestamp natif déterministe de requestAnimationFrame.
+ *   – Shadow DOM conservé : isolation stricte des styles du graphe.
+ *   – Délégation d'événements (Event Delegation) : centralisation des écouteurs
+ *     mouseover/mouseout sur le nœud parent `g`. Évite l'allocation de N closures
+ *     individuelles et prévient les fuites de mémoire lors du cycle de vie du composant.
  */
 
 // ---------------------------------------------------------------------------
-// Utilitaires
+// Utilitaires purs (Hors structure mémoire de l'instance)
 // ---------------------------------------------------------------------------
 
-/**
- * Parse une chaîne HTML/SVG et retourne le premier nœud enfant.
- * @param {string} str
- * @returns {Node}
- */
 const strToDom = (str) =>
 	document.createRange().createContextualFragment(str).firstChild;
 
-/**
- * Courbe d'accélération exponentielle décroissante.
- * @param {number} x - Progression [0, 1]
- * @returns {number}
- */
 const easeOutExpo = (x) => (x === 1 ? 1 : 1 - 2 ** (-10 * x));
 
-// ---------------------------------------------------------------------------
-// Point
-// ---------------------------------------------------------------------------
-
-/**
- * Représente un point 2D dans l'espace SVG normalisé [-1, 1].
- * @property {number} x
- * @property {number} y
- */
-class Point {
-	constructor(x, y) {
-		this.x = x;
-		this.y = y;
-	}
-
-	toSvgPath() {
-		return `${this.x} ${this.y}`;
-	}
-
-	static fromAngle(angle) {
-		return new Point(Math.cos(angle), Math.sin(angle));
-	}
-}
+// Constantes AOT
+const SVG_NS = "http://www.w3.org/2000/svg";
+const PI2 = Math.PI * 2;
+const PI_MINUS_HALF = Math.PI / -2;
+const PATCH = 0.0000001; // Epsilon géométrique
 
 // ---------------------------------------------------------------------------
-// PieChart
+// Composant
 // ---------------------------------------------------------------------------
 
-/**
- * @property {number[]}        data   - Valeurs brutes des sections
- * @property {number}          total  - Somme des valeurs (invariant AOT)
- * @property {SVGPathElement[]} paths  - Sections SVG pré-allouées
- * @property {SVGLineElement[]} lines  - Séparateurs SVG pré-alloués
- * @property {HTMLDivElement[]} labels - Labels positionnés
- */
-class PieChart extends HTMLElement {
+export class PieChart extends HTMLElement {
 	constructor() {
 		super();
 		const shadow = this.attachShadow({ mode: "open" });
 
-		// — Lecture des attributs (AOT, avant tout rendu) —
-		const labels = this.getAttribute("labels")?.split(";") ?? [];
+		// — Lecture des attributs et AOT —
+		const rawLabels = this.getAttribute("labels")?.split(";") ?? [];
 		const donut = this.getAttribute("donut") ?? "0.7";
 		const gap = this.getAttribute("gap") ?? "0.04";
 		const colors = this.getAttribute("colors")?.split(";") ?? [
@@ -96,184 +58,182 @@ class PieChart extends HTMLElement {
 			"hsl(69,100%,64%)",
 			"hsl(89,100%,64%)",
 			"hsl(109,100%,64%)",
-			"hsl(129,100%,64%)",
-			"hsl(149,100%,64%)",
-			"hsl(169,100%,64%)",
-			"hsl(189,100%,64%)",
 		];
 
-		this.data = this.getAttribute("data").split(";").map(parseFloat);
-		// Invariant AOT : calculé une fois, jamais recalculé dans la boucle draw()
-		this.total = this.data.reduce((acc, v) => acc + v, 0);
+		const rawData = this.getAttribute("data").split(";").map(parseFloat);
+		const total = rawData.reduce((acc, v) => acc + v, 0);
+		const len = rawData.length;
+
+		// Data Layout : Tableau contigu de flottants pour pré-calculer les divisions (SoA)
+		this._ratios = new Float64Array(len);
+		for (let i = 0; i < len; i++) {
+			this._ratios[i] = rawData[i] / total;
+		}
 
 		// — Structure SVG —
 		const svg = strToDom(`<svg viewBox="-1 -1 2 2">
-      <g mask="url(#graphMask)"></g>
-      <mask id="graphMask">
-        <rect fill="white" x="-1" y="-1" width="2" height="2"/>
-        <circle r="${donut}" fill="black"/>
-      </mask>
-    </svg>`);
+			<g mask="url(#graphMask)"></g>
+			<mask id="graphMask">
+				<rect fill="white" x="-1" y="-1" width="2" height="2"/>
+				<circle r="${donut}" fill="black"/>
+			</mask>
+		</svg>`);
 
 		const pathGroup = svg.querySelector("g");
 		const maskGroup = svg.querySelector("mask");
 
-		// — Pré-allocation des paths (sections) —
-		this.paths = this.data.map((_, k) => {
-			const path = document.createElementNS(
-				"http://www.w3.org/2000/svg",
-				"path",
-			);
-			path.setAttribute("fill", colors[k % colors.length].trim());
-			path.addEventListener("mouseover", () => this.handlePathHover(k));
-			path.addEventListener("mouseout", () => this.handlePathOut(k));
-			pathGroup.appendChild(path);
-			return path;
-		});
+		// Délégation d'événements (Event Delegation) : 2 écouteurs au lieu de 2*N
+		pathGroup.addEventListener("mouseover", this._handleHover.bind(this));
+		pathGroup.addEventListener("mouseout", this._handleOut.bind(this));
 
-		// — Pré-allocation des lignes (séparateurs) —
-		this.lines = this.data.map(() => {
-			const line = document.createElementNS(
-				"http://www.w3.org/2000/svg",
-				"line",
-			);
+		this.paths = new Array(len);
+		this.lines = new Array(len);
+		this.labels = new Array(len);
+
+		let currentAngle = PI_MINUS_HALF;
+
+		// — Pré-allocation et calculs statiques —
+		for (let k = 0; k < len; k++) {
+			const ratio = this._ratios[k];
+
+			// 1. Instanciation des sections (paths)
+			const path = document.createElementNS(SVG_NS, "path");
+			path.setAttribute("fill", colors[k % colors.length].trim());
+			path.dataset.index = k; // Index pour la délégation d'événement
+			pathGroup.appendChild(path);
+			this.paths[k] = path;
+
+			// 2. Instanciation des séparateurs (lines)
+			const line = document.createElementNS(SVG_NS, "line");
 			line.setAttribute("stroke", "#000");
 			line.setAttribute("stroke-width", gap);
 			line.setAttribute("x1", "0");
 			line.setAttribute("y1", "0");
 			maskGroup.appendChild(line);
-			return line;
-		});
+			this.lines[k] = line;
 
-		// — Labels —
-		this.labels = labels.map((label, id) => {
-			const div = document.createElement("div");
-			div.id = `label${id}`;
-			div.textContent = label;
-			div.setAttribute("tabindex", "0");
-			shadow.appendChild(div);
-			return div;
-		});
+			// 3. Labels et Positionnement AOT (hors du pipeline de rendu)
+			if (rawLabels[k]) {
+				const div = document.createElement("div");
+				div.id = `label${k}`;
+				div.textContent = rawLabels[k];
+				div.setAttribute("tabindex", "0");
+
+				// Calcul de l'angle médian pour positionner le label
+				const labelAngle = currentAngle + ratio * Math.PI;
+				const lx = Math.cos(labelAngle) * 0.5 + 0.5;
+				const ly = Math.sin(labelAngle) * 0.5 + 0.5;
+
+				div.style.top = `${ly * 100}%`;
+				div.style.left = `${lx * 100}%`;
+				shadow.appendChild(div);
+				this.labels[k] = div;
+			}
+
+			// Avancement de l'angle pour la prochaine section
+			currentAngle += ratio * PI2 - PATCH;
+		}
 
 		// — Styles encapsulés —
 		const style = document.createElement("style");
 		style.textContent = `
-:host {
-  display: block;
-  position: relative;
-}
-svg {
-  width: 100%;
-  height: 100%;
-}
-path {
-  cursor: pointer;
-  transition: filter .3s;
-}
-path:hover,
-path.active {
-  filter: invert(1);
-}
-div {
-  position: absolute;
-  top: 0;
-  left: 0;
-  padding: .2em .5em;
-  white-space: nowrap;
-  transform: translate(-50%, -50%);
-  background-color: var(--pie-chart-color-label, #222);
-  opacity: 0;
-  transition: opacity .3s;
-  pointer-events: none;
-}
-div:focus,
-div:active,
-div.active {
-  opacity: 1;
-  outline: none;
-}
-`;
+			:host { display: block; position: relative; }
+			svg { width: 100%; height: 100%; }
+			path { cursor: pointer; transition: filter .3s; }
+			path:hover, path.active { filter: invert(1); }
+			div {
+				position: absolute;
+				padding: .2em .5em;
+				white-space: nowrap;
+				transform: translate(-50%, -50%);
+				background-color: var(--pie-chart-color-label, #222);
+				opacity: 0;
+				transition: opacity .3s;
+				pointer-events: none;
+			}
+			div:focus, div:active, div.active { opacity: 1; outline: none; }
+		`;
 		shadow.appendChild(style);
 		shadow.appendChild(svg);
 	}
 
 	connectedCallback() {
-		const start = Date.now();
 		const duration = 1000;
+		let start = null;
 
-		const tick = () => {
-			const t = (Date.now() - start) / duration;
+		// Utilisation du timestamp natif de rAF, pipeline déterministe
+		const tick = (timestamp) => {
+			if (!start) start = timestamp;
+			const elapsed = timestamp - start;
+			const t = Math.min(elapsed / duration, 1);
+
+			this._draw(easeOutExpo(t));
+
 			if (t < 1) {
-				this.draw(easeOutExpo(t));
 				requestAnimationFrame(tick);
-			} else {
-				this.draw(1);
 			}
 		};
 		requestAnimationFrame(tick);
 	}
 
 	/**
-	 * Dessine toutes les sections du graphique à un état de progression donné.
+	 * Pipeline de rendu (hot loop).
+	 * Zéro allocation d'objet. Zéro branchement conditionnel complexe.
 	 * @param {number} progress - [0, 1]
 	 */
-	draw(progress = 1) {
-		// Epsilon géométrique : un arc à exactement 360° produit un chemin dégénéré
-		// (point de départ === point d'arrivée) que le moteur SVG ignore visuellement.
-		const PATCH = 0.0000001;
-		let angle = Math.PI / -2;
-		let start = new Point(0, -1);
+	_draw(progress) {
+		let angle = PI_MINUS_HALF;
+		let startX = 0;
+		let startY = -1;
+		const len = this._ratios.length;
 
-		for (let k = 0; k < this.data.length; k++) {
-			this.lines[k].setAttribute("x2", start.x);
-			this.lines[k].setAttribute("y2", start.y);
+		for (let k = 0; k < len; k++) {
+			// Mutation directe : écriture DOM
+			this.lines[k].setAttribute("x2", startX);
+			this.lines[k].setAttribute("y2", startY);
 
-			const ratio = (this.data[k] / this.total) * progress;
+			const arcRatio = this._ratios[k] * progress;
+			angle += arcRatio * PI2 - PATCH;
 
-			if (progress === 1) {
-				this.positionLabel(this.labels[k], angle + ratio * Math.PI);
-			}
+			// Mathématiques résolues localement (pas d'allocation de struct 'Point')
+			const endX = Math.cos(angle);
+			const endY = Math.sin(angle);
+			const largeFlag = arcRatio > 0.5 ? "1" : "0";
 
-			angle += ratio * 2 * Math.PI - PATCH;
-			const end = Point.fromAngle(angle);
-			const largeFlag = ratio > 0.5 ? "1" : "0";
-
+			// Concaténation de la string SVG (seule allocation inévitable imposée par l'API DOM)
 			this.paths[k].setAttribute(
 				"d",
-				`M 0 0 L ${start.toSvgPath()} A 1 1 0 ${largeFlag} 1 ${end.toSvgPath()} L 0 0`,
+				`M 0 0 L ${startX} ${startY} A 1 1 0 ${largeFlag} 1 ${endX} ${endY} L 0 0`,
 			);
-			start = end;
+
+			// Transfert des registres pour l'itération suivante
+			startX = endX;
+			startY = endY;
 		}
 	}
 
 	/**
-	 * Active visuellement la section k et émet un événement personnalisé.
-	 * @param {number} k
+	 * Résolution des événements via délégation
 	 */
-	handlePathHover(k) {
-		this.dispatchEvent(new CustomEvent("sectionhover", { detail: k }));
-		this.labels[k]?.classList.add("active");
+	_handleHover(e) {
+		const index = e.target.dataset.index;
+		if (index !== undefined) {
+			this.dispatchEvent(
+				new CustomEvent("sectionhover", { detail: parseInt(index, 10) }),
+			);
+			this.labels[index]?.classList.add("active");
+		}
 	}
 
-	/**
-	 * Désactive visuellement la section k.
-	 * @param {number} k
-	 */
-	handlePathOut(k) {
-		this.labels[k]?.classList.remove("active");
-	}
-
-	/**
-	 * Positionne un label sur le rayon médian de sa section.
-	 * @param {HTMLDivElement|undefined} label
-	 * @param {number|undefined} angle - En radians
-	 */
-	positionLabel(label, angle) {
-		if (!label || angle == null) return;
-		const point = Point.fromAngle(angle);
-		label.style.setProperty("top", `${(point.y * 0.5 + 0.5) * 100}%`);
-		label.style.setProperty("left", `${(point.x * 0.5 + 0.5) * 100}%`);
+	_handleOut(e) {
+		const index = e.target.dataset.index;
+		if (index !== undefined) {
+			this.labels[index]?.classList.remove("active");
+		}
 	}
 }
 
-customElements.define("pie-chart", PieChart);
+// Enregistrement optionnel du composant au chargement du module
+if (!customElements.get("pie-chart")) {
+	customElements.define("pie-chart", PieChart);
+}
