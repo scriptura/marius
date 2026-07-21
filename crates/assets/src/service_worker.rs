@@ -12,10 +12,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::ServiceWorkerConfig;
-use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
 use crate::js_minify::minify_javascript;
+use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
 use crate::resolve::resolve_asset_reference;
-use crate::scripts::{JsPipelineError, find_unescaped_quote, skip_block_comment, skip_line_comment};
+use crate::scripts::{
+    JsPipelineError, find_unescaped_quote, skip_block_comment, skip_line_comment,
+};
 
 // =============================================================================
 // Pipeline [service_worker] — Handoff §3. `serviceWorker.js` est traité
@@ -239,7 +241,8 @@ pub(crate) fn run_service_worker_pipeline(
         )
     })?;
 
-    let pass1_resolved = scan_and_resolve_service_worker(&raw, manifest_url_registry, &source_path)?;
+    let pass1_resolved =
+        scan_and_resolve_service_worker(&raw, manifest_url_registry, &source_path)?;
 
     // Chantier 4 — minification, APRÈS la résolution textuelle des
     // chemins mais AVANT le bootstrap du hash en 2 passes ci-dessous : le
@@ -289,7 +292,6 @@ pub(crate) fn run_service_worker_pipeline(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,7 +321,10 @@ mod tests {
     fn resolve_service_worker_literal_exempts_root_and_html_routes() {
         let registry = AssetUrlRegistry::new();
         let ctx = Path::new("sw.js");
-        assert_eq!(resolve_service_worker_literal("/", &registry, ctx).unwrap(), "/");
+        assert_eq!(
+            resolve_service_worker_literal("/", &registry, ctx).unwrap(),
+            "/"
+        );
         assert_eq!(
             resolve_service_worker_literal("/offline.html", &registry, ctx).unwrap(),
             "/offline.html"
@@ -347,7 +352,11 @@ mod tests {
         let ctx = Path::new("sw.js");
         let err = resolve_service_worker_literal("/scripts/index.js", &registry, ctx).unwrap_err();
         match err {
-            ServiceWorkerError::AssetNotFound { specifier, filename, .. } => {
+            ServiceWorkerError::AssetNotFound {
+                specifier,
+                filename,
+                ..
+            } => {
                 assert_eq!(specifier, "/scripts/index.js");
                 assert_eq!(filename, "index.js");
             }
@@ -403,10 +412,7 @@ mod tests {
         let ctx = Path::new("sw.js");
         let src = "if (m !== 'GET') return '/sprites/utils.svg';";
         let out = scan_and_resolve_service_worker(src, &registry, ctx).unwrap();
-        assert_eq!(
-            out,
-            "if (m !== 'GET') return '/sprites/utils.4c4e9.svg';"
-        );
+        assert_eq!(out, "if (m !== 'GET') return '/sprites/utils.4c4e9.svg';");
     }
 
     /// Trouve la première sous-chaîne de 64 caractères hexadécimaux dans
@@ -542,5 +548,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(&sandbox);
     }
-
 }

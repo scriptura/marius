@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension, path_to_slash};
+use crate::manifest::{
+    AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension, path_to_slash,
+};
 
 // =============================================================================
 // Pipeline [static.verbatim] — copie brute, hachage, entrée de manifeste.

@@ -86,7 +86,10 @@ pub(crate) fn minify_javascript(source: &str, path_hint: &Path) -> Result<String
             .errors()
             .map(std::string::ToString::to_string)
             .collect();
-        return Err(MinifyError::Parse(path_hint.to_path_buf(), messages.join("; ")));
+        return Err(MinifyError::Parse(
+            path_hint.to_path_buf(),
+            messages.join("; "),
+        ));
     }
 
     let mut program = parser_ret.program;
@@ -166,7 +169,8 @@ mod tests {
     /// minifier sans erreur.
     #[test]
     fn minify_javascript_handles_plain_script_source() {
-        let src = "const CACHE_NAME = 'MARIUS_CACHE_HASH';\nself.addEventListener('install', () => {});";
+        let src =
+            "const CACHE_NAME = 'MARIUS_CACHE_HASH';\nself.addEventListener('install', () => {});";
         let out = minify_javascript(src, Path::new("serviceWorker.js")).unwrap();
         assert!(out.contains("MARIUS_CACHE_HASH"));
     }

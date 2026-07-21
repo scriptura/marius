@@ -194,5 +194,4 @@ mod tests {
             Err("logo.svg".to_string())
         );
     }
-
 }

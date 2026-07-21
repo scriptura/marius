@@ -1217,7 +1217,6 @@ pub(crate) fn run_styles_pipeline(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1431,5 +1430,4 @@ mod tests {
             ".foo { color: red; }"
         );
     }
-
 }

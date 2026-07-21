@@ -97,7 +97,9 @@ pub(crate) fn serialize_start(
 /// (camelCase exact) — `viewbox` ou `VIEWBOX` ne matcheraient pas, ce
 /// qui est correct : ce ne serait de toute façon pas l'attribut SVG
 /// standard.
-pub(crate) fn extract_view_box(e: &quick_xml::events::BytesStart) -> Result<Option<String>, SpriteError> {
+pub(crate) fn extract_view_box(
+    e: &quick_xml::events::BytesStart,
+) -> Result<Option<String>, SpriteError> {
     for attr in e.attributes() {
         let attr = attr.map_err(|err| SpriteError(format!("attribut XML invalide : {err}")))?;
         if attr.key.as_ref() == b"viewBox" {
@@ -418,5 +420,4 @@ mod tests {
         let out = svg_file_to_symbol("icon", src).unwrap();
         assert!(!out.contains("viewBox"));
     }
-
 }

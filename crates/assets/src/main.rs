@@ -48,8 +48,8 @@ use std::fs;
 use std::path::PathBuf;
 
 mod config;
-mod manifest;
 mod js_minify;
+mod manifest;
 mod resolve;
 mod scripts;
 mod service_worker;

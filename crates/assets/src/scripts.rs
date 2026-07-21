@@ -15,8 +15,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
 use crate::js_minify::minify_javascript;
+use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
 use crate::resolve::resolve_asset_reference;
 
 // =============================================================================
@@ -143,7 +143,11 @@ pub(crate) fn skip_line_comment(source: &[u8], i: usize) -> usize {
         .unwrap_or(source.len())
 }
 
-pub(crate) fn skip_block_comment(source: &[u8], i: usize, ctx: &Path) -> Result<usize, JsPipelineError> {
+pub(crate) fn skip_block_comment(
+    source: &[u8],
+    i: usize,
+    ctx: &Path,
+) -> Result<usize, JsPipelineError> {
     let mut j = i + 2;
     while j < source.len() {
         if source[j] == b'*' && source.get(j + 1) == Some(&b'/') {
@@ -496,7 +500,6 @@ fn topological_order_leaves_first(arena: &[JsModule]) -> Result<Vec<usize>, JsPi
     Ok(order)
 }
 
-
 // ── Patch + hash — bottom-up, dans l'ordre de la Passe 2 ───────────────────
 
 /// Métadonnées d'un module patché, retournées à l'appelant pour qu'il
@@ -555,8 +558,8 @@ fn patch_and_hash_modules(
         // le hash doit porter sur les octets RÉELLEMENT servis, pas sur
         // un brouillon intermédiaire plus volumineux qui ne sera jamais
         // écrit sur disque.
-        let minified = minify_javascript(&patched, &module.path)
-            .map_err(|e| format!("scripts   : {e}"))?;
+        let minified =
+            minify_javascript(&patched, &module.path).map_err(|e| format!("scripts   : {e}"))?;
         let bytes = minified.into_bytes();
         let (full_hash, short_hash) = hash_content(&bytes);
 
@@ -680,7 +683,6 @@ pub(crate) fn run_scripts_pipeline(
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -918,7 +920,11 @@ mod tests {
         assert!(manifest.contains_key("main.js"));
         assert!(manifest.contains_key("more.js"));
         assert!(manifest.contains_key("navigation.js"));
-        assert!(manifest["navigation.js"].url.starts_with("/scripts/navigation."));
+        assert!(
+            manifest["navigation.js"]
+                .url
+                .starts_with("/scripts/navigation.")
+        );
         assert!(manifest["navigation.js"].url.ends_with(".js"));
 
         let main_url = &manifest["main.js"].url;
@@ -989,5 +995,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(&sandbox);
     }
-
 }
