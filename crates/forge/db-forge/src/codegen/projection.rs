@@ -1,5 +1,5 @@
 // =============================================================================
-// marius-db-forge · codegen/projection.rs
+// marius-db-forge · crates/forge/db-forge/src/codegen/projection.rs
 // Génération du stub impl Projection pour une table.
 // =============================================================================
 
@@ -64,6 +64,28 @@ pub fn write_projection_stub(
         );
     }
 
+    // pk_col_name : calculé ici (avant le FROM/JOIN, qui en a besoin — Constat
+    // n°2) plutôt qu'après comme dans la version précédente du générateur.
+    // Échec de build explicite (Article Zéro §0.1bis) si une jointure varlena
+    // est combinée à une PK composite : meta.component_varlena_join ne stocke
+    // qu'un seul nom de colonne (fk_col) — la seule sémantique généralisable
+    // est « FK enfant → PK parent », qui exige une PK à colonne unique côté
+    // table composant. Générer un JOIN sur un stub de PK composite produirait
+    // un SQL invalide, silencieusement, à l'exécution plutôt qu'à la
+    // compilation — inacceptable pour un compilateur AOT.
+    if varlena_join.is_some() && matches!(pk, PrimaryKey::Composite) {
+        panic!(
+            "DB-Forge [{schema}.{table}]: jointure varlena (meta.component_varlena_join) \
+             combinée à une clé primaire composite n'est pas supportée par le générateur \
+             actuel — le JOIN suppose une clé primaire à colonne unique côté table \
+             composant. Ouvrir un Contrat d'Implémentation dédié avant d'introduire ce cas."
+        );
+    }
+    let pk_col_name: &str = match pk {
+        PrimaryKey::Single(col) => col.as_str(),
+        PrimaryKey::Composite => fixed_cols.first().copied().unwrap_or("id"),
+    };
+
     // ── Construction SELECT + FROM (Voie d'Extraction — fetch_from_pg) ────────
     // Ces variables alimentent le corps SQLx de fetch_from_pg ci-dessous.
     // Non utilisées par fetch_batch (Voie d'Exécution mmap).
@@ -75,8 +97,15 @@ pub fn write_projection_stub(
             .map(|c| format!("{schema}.{table}.{c}"))
             .chain(varlena_cols)
             .collect();
+        // Constat n°2, corrigé : le générateur précédent supposait fk_col
+        // identiquement nommée des deux côtés du JOIN (`{schema}.{table}.{_fk}
+        // = {vs}.{vt}.{_fk}`), invalide dès que fk_col est la PK de la table
+        // jointe référençant une PK de nom différent côté composant (cas
+        // content.body : fk_column='document_id', PK de content.document='id').
+        // Sémantique correcte, conforme aux FK relationnelles standard :
+        // fk_col de l'enfant référence la PK du parent.
         let from = format!(
-            "{schema}.{table} LEFT JOIN {vs}.{vt} ON {schema}.{table}.{_fk} = {vs}.{vt}.{_fk}"
+            "{schema}.{table} LEFT JOIN {vs}.{vt} ON {schema}.{table}.{pk_col_name} = {vs}.{vt}.{_fk}"
         );
         (all_cols.join(", "), from)
     } else {
@@ -97,10 +126,7 @@ pub fn write_projection_stub(
     let field_specs: Vec<FieldSpec> = crate::build_field_specs(columns);
 
     // pk_field : résolution pour record_id() (invariant : PK Single dans field_specs).
-    let pk_col_name: &str = match pk {
-        PrimaryKey::Single(col) => col.as_str(),
-        PrimaryKey::Composite => fixed_cols.first().copied().unwrap_or("id"),
-    };
+    // pk_col_name déjà calculé ci-dessus.
     let pk_field: &FieldSpec = field_specs
         .iter()
         .find(|f| f.name == pk_col_name)
@@ -147,18 +173,24 @@ pub fn write_projection_stub(
     // Constantes au niveau module (pas dans le bloc impl).
     writeln!(out, "{cap_consts}").unwrap();
 
-    // ── OnceLock statique — PackfileReader monté au premier appel de fetch_batch ──
+    // ── StoreRegistry statique — remplace l'ancien OnceLock<PackfileReader> ──
     // Déclaration au niveau module : durée de vie 'static garantie.
-    // OnceLock est thread-safe sans verrou — Mmap est Send + Sync.
-    writeln!(out,
-        "static {screaming}_STORE: std::sync::OnceLock<\
-         marius_projection::packfile_reader::PackfileReader<{proj_name}>> = std::sync::OnceLock::new();"
-    ).unwrap();
+    // Contrairement à OnceLock, remplaçable après le premier montage — c'est
+    // précisément ce que le pipeline réactif (ingest_and_swap) exige.
+    // Cf. DESIGN-store-registry.md — StoreRegistry<P> est mono-slot par
+    // Projection (pas de HashMap/clé), cohérent avec le fait que fetch_batch
+    // est monomorphisé sur P à la compilation.
+    writeln!(
+        out,
+        "static {screaming}_STORE: marius_projection::StoreRegistry<{proj_name}> = \
+         marius_projection::StoreRegistry::new();"
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     writeln!(
         out,
-        "// Phase 2 AOT : _pool ignoré — lecture via OnceLock<PackfileReader>."
+        "// Phase 2 AOT : _pool ignoré — lecture via StoreRegistry<PackfileReader>."
     )
     .unwrap();
     writeln!(out, "// RLS         : voir 09_rls/01_policies.sql").unwrap();
@@ -188,22 +220,10 @@ pub fn write_projection_stub(
         )
         .unwrap();
     } else {
-        // Montage du PackfileReader au premier appel — OnceLock garantit l'unicité.
-        writeln!(
-            out,
-            "        let reader = {screaming}_STORE.get_or_init(|| {{"
-        )
-        .unwrap();
-        writeln!(out,
-            "            marius_projection::packfile_reader::PackfileReader::open(&{proj_name}::store_path())"
-        ).unwrap();
-        writeln!(
-            out,
-            "                .expect(\"[fetch_batch:{schema}.{table}] store.bin absent \
-             — exécuter marius-dump avant de démarrer le serveur\")"
-        )
-        .unwrap();
-        writeln!(out, "        }});").unwrap();
+        // Un seul load() par appel — jamais dans la boucle sur `ids` (INV-5,
+        // DESIGN-store-registry.md §7) : tout le batch est résolu contre une
+        // unique version de store.bin, jamais deux générations mélangées.
+        writeln!(out, "        let reader = {screaming}_STORE.load();").unwrap();
         writeln!(out).unwrap();
 
         // Itération sur les ids demandés — lookup O(log N) par binary search.
@@ -468,6 +488,19 @@ pub fn write_projection_stub(
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // ── store_registry() — point d'entrée générique vers {SCREAMING}_STORE ──
+    // Requis par le trait (pas seulement cold_start_store, inhérente) pour
+    // que du code générique <P: Projection> (ingest_and_swap) puisse
+    // atteindre la static propre à cette Projection sans la nommer.
+    writeln!(
+        out,
+        "    fn store_registry() -> &'static marius_projection::StoreRegistry<Self> {{"
+    )
+    .unwrap();
+    writeln!(out, "        &{screaming}_STORE").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
     // ── varlena_field_count() + encode_varlena() ─────────────────────────────
     // Émis uniquement si la table a des colonnes varlena.
     // Sans ces overrides, le trait applique les defaults (0 / no-op) →
@@ -511,5 +544,23 @@ pub fn write_projection_stub(
         writeln!(out, "    }}").unwrap();
     }
 
+    writeln!(out, "}}\n").unwrap();
+
+    // ── cold_start_store() — provisionnement à froid du StoreRegistry ────────
+    // Fonction inhérente (hors trait Projection) : appelée une fois au
+    // bootstrap (main.rs), avant tout Dispatcher/serveur Axum. Fail-fast si
+    // store.bin est absent/invalide — cf. DESIGN-store-registry.md §5.
+    writeln!(out, "impl {proj_name} {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn cold_start_store() -> ::std::io::Result<()> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        {screaming}_STORE.cold_start(&{proj_name}::store_path())"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
     writeln!(out, "}}\n").unwrap();
 }

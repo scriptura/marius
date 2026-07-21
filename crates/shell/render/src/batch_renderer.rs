@@ -161,9 +161,9 @@ mod tests {
     // Zéro dépendance DB. Simule une table à deux champs fixed-length.
 
     #[repr(C)]
-    #[derive(Clone, Copy, Default)]
+    #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
     struct StubRecord {
-        id: i32,
+        id: i64, // i32 -> i64 : derive(Pod) refuse un padding de repr(C) (i32+i64) — cf. rapport
         price: i64,
     }
 
@@ -207,6 +207,12 @@ mod tests {
         fn store_path() -> ::std::path::PathBuf {
             ::std::path::PathBuf::from("stub_store.bin")
         }
+
+        fn store_registry() -> &'static marius_projection::StoreRegistry<Self> {
+            static REGISTRY: marius_projection::StoreRegistry<StubProjection> =
+                marius_projection::StoreRegistry::new();
+            &REGISTRY
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -216,7 +222,7 @@ mod tests {
             .map(|i| {
                 (
                     StubRecord {
-                        id: i as i32,
+                        id: i as i64,
                         price: i as i64 * 100,
                     },
                     (),
@@ -289,14 +295,14 @@ mod tests {
         let records: Vec<(StubRecord, ())> = vec![
             (
                 StubRecord {
-                    id: i32::MIN,
+                    id: i32::MIN as i64,
                     price: i64::MIN,
                 },
                 (),
             ),
             (
                 StubRecord {
-                    id: i32::MAX,
+                    id: i32::MAX as i64,
                     price: i64::MAX,
                 },
                 (),

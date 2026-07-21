@@ -9,6 +9,8 @@ mod sweep;
 pub mod batch_renderer;
 pub mod dispatcher;
 pub mod dumper;
+pub mod ingest_and_swap;
+pub mod merge_store;
 pub mod pack_html_format;
 pub mod pack_html_index;
 pub mod packfile_builder;
@@ -27,6 +29,8 @@ pub use packfile_builder::PackfileBuilder;
 // `crate::regenerate::regenerate_and_swap` — cohérent avec son usage
 // `crate::BatchRenderer` déjà en place pour batch_renderer.
 pub use regenerate::regenerate_and_swap;
+
+pub use ingest_and_swap::ingest_and_swap;
 
 // ensure_provisioned, ProvisionOutcome — même convention que
 // regenerate_and_swap ci-dessus (fonction/type principal d'un module,

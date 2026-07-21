@@ -1,4 +1,4 @@
-// marius-render · dispatcher.rs
+// marius-render · crates/shell/render/src/dispatcher.rs
 // Dispatcher (Reactive Orchestrator) — Shell uniquement.
 // Dépend de Tokio, SQLx : ne peut pas être dans le Core.
 //
@@ -6,14 +6,22 @@
 // Le Collector<MAX, WORDS> reste dans le Core (marius-collector, zéro dépendance).
 // Le Dispatcher vit ici, dans le Shell, car il orchestre les I/O.
 //
-// ─── Écriture (Phase 4, état résolu) ──────────────────────────────────────────
+// ─── Écriture (Phase 4, état résolu ; étendu Étape 6 — pipeline CoW) ─────────
 //
-//   run() ne fait jamais d'écriture directe : chaque tick délègue à
-//   regenerate_and_swap (regenerate.rs), qui réalise fetch_batch par chunk,
-//   merge_sweep, écriture .tmp + fsync + rename atomique, puis
-//   LiveRegistry::store(). Compatible par construction avec le modèle
-//   mmap/ArcSwap de registry.rs (Phase 2) — aucune écriture en place,
-//   aucun footer manquant.
+//   run() ne fait jamais d'écriture directe : chaque tick délègue à deux
+//   étages séquentiels, jamais l'inverse, jamais en parallèle :
+//     1. ingest_and_swap (Shell, ingest_and_swap.rs) — fetch_from_pg SQL
+//        live, merge_store, écriture store.bin.tmp + fsync + validation +
+//        rename + StoreRegistry::swap.
+//     2. regenerate_and_swap (regenerate.rs) — fetch_batch (désormais lu
+//        depuis le store.bin fraîchement rafraîchi par l'étage 1, plus un
+//        instantané figé au dernier marius-dump), merge_sweep, écriture
+//        .tmp + fsync + rename atomique, puis LiveRegistry::store().
+//   Un échec à l'étage 1 interrompt le tick avant l'étage 2 (cf. run()) :
+//   régénérer pack.bin depuis un store.bin non rafraîchi produirait un
+//   résultat silencieusement incohérent avec le delta courant.
+//   Compatible par construction avec le modèle mmap/ArcSwap de registry.rs
+//   (Phase 2) — aucune écriture en place, aucun footer manquant.
 //
 //   Deux champs portent ce câblage : `registry` (Arc partagé avec la
 //   frontière Axum de lecture, main.rs — cloné avant le tokio::spawn de ce
@@ -49,7 +57,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::{LiveRegistry, regenerate_and_swap};
+use crate::{LiveRegistry, ingest_and_swap, regenerate_and_swap};
 
 use tokio::sync::Notify;
 use tokio::time::interval;
@@ -118,7 +126,13 @@ pub struct Dispatcher<P: Projection, const MAX: usize, const WORDS: usize> {
     io_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
-impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WORDS> {
+impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WORDS>
+where
+    // Requis par ingest_and_swap (Étage 1, Étape 6) — merge_store/PackfileBuilder
+    // exigent P::Record: Pod pour le cast mmap brut. regenerate_and_swap (Étage 2)
+    // n'en avait pas besoin ; ce bloc impl le porte désormais pour les deux étages.
+    P::Record: bytemuck::Pod,
+{
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         collector: &'static Collector<MAX, WORDS>,
@@ -179,6 +193,19 @@ impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WOR
             ids.sort_unstable();
 
             let t0 = Instant::now();
+
+            // ── Étage 1 : ingestion DOD (Étape 6, Contrat d'Implémentation) ──
+            // Doit précéder l'étage 2 et réussir avant lui : regenerate_and_swap
+            // lit store.bin via P::fetch_batch (mmap, cf. StoreRegistry) — le
+            // régénérer à partir d'un store.bin non rafraîchi produirait un
+            // pack.bin silencieusement incohérent avec le delta du tick courant.
+            if let Err(e) = ingest_and_swap::<P>(&self.pool, &ids, &self.io_semaphore).await {
+                eprintln!(
+                    "[dispatcher] ingest_and_swap (\"{}\"): {e}",
+                    self.packfile_key
+                );
+                continue; // étage 2 jamais exécuté sur un échec de l'étage 1
+            }
 
             if let Err(e) = regenerate_and_swap::<P>(
                 &self.pool,

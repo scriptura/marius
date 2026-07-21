@@ -1,4 +1,4 @@
-// marius-projection
+// marius-projection — crates/core/projection/src/lib.rs
 // Trait Projection — interface canonique entre l'Orchestrator et les
 // implémentations générées par Bridge-Forge + Fragment-Forge.
 //
@@ -60,6 +60,17 @@ pub trait Projection: Sized + Send + Sync + 'static {
     fn packfile_path() -> PathBuf;
 
     fn store_path() -> PathBuf;
+
+    /// Accès générique au registre atomiquement remplaçable de cette
+    /// Projection — nécessaire à tout code générique `<P: Projection>`
+    /// (`ingest_and_swap`) qui doit appeler `.swap()` sans connaître la
+    /// `static` propre à P, invisible depuis une fonction générique.
+    /// `cold_start_store()` (généré, méthode inhérente hors trait) et cette
+    /// méthode ciblent la même `static` — cf. codegen/projection.rs.
+    fn store_registry() -> &'static StoreRegistry<Self>
+    where
+        Self: Sized,
+        Self::Record: bytemuck::Pod;
 
     #[inline(always)]
     fn varlena_field_count() -> u16 {
@@ -125,6 +136,9 @@ pub const fn align8(x: u64) -> u64 {
 // =============================================================================
 // PackfileReader — lecteur zero-copie via memmap2
 // =============================================================================
+
+mod store_registry;
+pub use store_registry::StoreRegistry;
 
 pub mod packfile_reader {
     use std::fs::File;
@@ -252,27 +266,39 @@ pub mod packfile_reader {
             })
         }
 
+        /// Tranche brute des enregistrements, triée par position (pas par id).
+        /// Exposé pour merge_store (marius-render) — memcpy de runs, zéro copie.
         #[inline(always)]
-        fn records(&self) -> &[P::Record] {
+        pub fn records(&self) -> &[P::Record] {
             let end = self.rows_offset + self.row_count * mem::size_of::<P::Record>();
             bytemuck::cast_slice(&self.mmap[self.rows_offset..end])
         }
 
+        /// Index des ids, trié croissant — invariant déjà exploité par `lookup`.
         #[inline(always)]
-        fn id_index(&self) -> &[i64] {
+        pub fn id_index(&self) -> &[i64] {
             let end = self.id_index_offset + self.row_count * mem::size_of::<i64>();
             bytemuck::cast_slice(&self.mmap[self.id_index_offset..end])
         }
 
+        /// TOC varlena brut, `row_count * varlena_field_count` entrées.
         #[inline(always)]
-        fn toc(&self) -> &[VarlenSlot] {
+        pub fn toc(&self) -> &[VarlenSlot] {
             let len = self.row_count * self.varlena_field_count * mem::size_of::<VarlenSlot>();
             bytemuck::cast_slice(&self.mmap[self.toc_offset..self.toc_offset + len])
         }
 
+        /// Heap varlena brut, tassé — les offsets du TOC y pointent directement.
         #[inline(always)]
-        fn heap(&self) -> &[u8] {
+        pub fn heap(&self) -> &[u8] {
             &self.mmap[self.heap_offset..self.heap_offset + self.heap_len]
+        }
+
+        /// Nombre de champs varlena par ligne — nécessaire à l'appelant pour
+        /// calculer les bornes d'un slice `toc()` par plage de lignes.
+        #[inline(always)]
+        pub fn varlena_field_count(&self) -> usize {
+            self.varlena_field_count
         }
 
         /// Recherche par ID — O(log N) binary search.

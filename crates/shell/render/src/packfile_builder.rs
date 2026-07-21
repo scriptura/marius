@@ -1,5 +1,5 @@
 // =============================================================================
-// marius-render · packfile_builder.rs
+// marius-render · crates/shell/render/src/packfile_builder.rs
 //
 // Écrit les StorageRow + varlena d'une table dans un fichier binaire mmap-ready.
 // Format : Header(64B) | StorageRow[] | ID Index | Varlena TOC | Varlena Heap
@@ -60,6 +60,72 @@ where
             self.records.push(*record);
             P::encode_varlena(owned, &mut self.varlena_heap, &mut self.varlena_toc);
         }
+        debug_assert_eq!(self.records.len(), self.id_index.len());
+        debug_assert_eq!(
+            self.varlena_toc.len(),
+            self.records.len() * P::varlena_field_count() as usize,
+        );
+    }
+
+    /// Ingère un run de lignes déjà encodées, telles que lues depuis un
+    /// `PackfileReader` existant — memcpy pur (`extend_from_slice`), aucun
+    /// passage par `P::encode_varlena`, aucune allocation `String` ni `Vec`
+    /// intermédiaire.
+    ///
+    /// # Invariant d'API — contrat logique, non vérifié par le type système
+    ///
+    /// Cette fonction est l'équivalent logique d'une fonction `unsafe` : rien
+    /// dans les types ne peut garantir que `heap` correspond exactement à
+    /// `heap_base_offset`/`toc`. Le vérifier ici obligerait à recalculer ce
+    /// que l'appelant a déjà calculé — annulant l'intérêt même de la fonction
+    /// (zéro-copie). La sûreté ne vient donc pas d'une vérification interne,
+    /// mais d'un unique appelant, `merge_store`, qui construit ces trois
+    /// paramètres à partir du même `PackfileReader` source et est couvert par
+    /// des tests dédiés au recalcul de shift (cf. `merge_store.rs::tests`).
+    /// `push_raw_run` n'est pas destinée à un second appelant sans revoir ce
+    /// contrat.
+    ///
+    /// Le contrat exact que l'appelant doit garantir :
+    /// - `records` et `toc` respectent `toc.len() == records.len() *
+    ///   P::varlena_field_count()` (même contrat que `push_batch`, vérifié
+    ///   en `debug_assert`, pas en production).
+    /// - `heap` est exactement la tranche du heap source couverte par `toc`
+    ///   (du plus petit `offset` au plus grand `offset+len`, sentinelles
+    ///   `u32::MAX` exclues).
+    /// - `heap_base_offset` est l'offset absolu, dans le heap source, du
+    ///   premier octet de `heap`.
+    ///
+    /// Toute violation produit un TOC silencieusement incohérent — pas un
+    /// panic, pas une erreur, une corruption de données à la prochaine
+    /// lecture. C'est le prix accepté pour rester zéro-allocation sur le
+    /// chemin de fusion ; documenté ici plutôt que traité comme une dette,
+    /// puisqu'aucune vérification interne ne peut exister sans dupliquer le
+    /// calcul de l'appelant.
+    pub fn push_raw_run(
+        &mut self,
+        records: &[P::Record],
+        toc: &[VarlenSlot],
+        heap_base_offset: u32,
+        heap: &[u8],
+    ) {
+        let shift = self.varlena_heap.len() as u32;
+
+        self.id_index
+            .extend(records.iter().map(|r| P::record_id(r)));
+        self.records.extend_from_slice(records);
+
+        self.varlena_toc.extend(toc.iter().map(|slot| {
+            if slot.offset == u32::MAX {
+                *slot // sentinelle (champ NULL) : jamais décalée
+            } else {
+                VarlenSlot {
+                    offset: (slot.offset - heap_base_offset) + shift,
+                    len: slot.len,
+                }
+            }
+        }));
+        self.varlena_heap.extend_from_slice(heap);
+
         debug_assert_eq!(self.records.len(), self.id_index.len());
         debug_assert_eq!(
             self.varlena_toc.len(),

@@ -690,9 +690,9 @@ mod tests {
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy, Default)]
+    #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
     struct StubRecord {
-        id: i32,
+        id: i64, // i32 -> i64 : derive(Pod) refuse un padding de repr(C) (i32+i64) — cf. rapport
         generation: i64,
     }
 
@@ -727,7 +727,7 @@ mod tests {
                         .map(|&(rid, generation)| {
                             (
                                 StubRecord {
-                                    id: rid as i32,
+                                    id: rid as i64,
                                     generation,
                                 },
                                 (),
@@ -754,6 +754,12 @@ mod tests {
 
         fn store_path() -> PathBuf {
             PathBuf::from("unused_stub_store.bin")
+        }
+
+        fn store_registry() -> &'static marius_projection::StoreRegistry<Self> {
+            static REGISTRY: marius_projection::StoreRegistry<StubProjection> =
+                marius_projection::StoreRegistry::new();
+            &REGISTRY
         }
     }
 
@@ -793,6 +799,12 @@ mod tests {
 
         fn store_path() -> PathBuf {
             PathBuf::from("unused_failing_store.bin")
+        }
+
+        fn store_registry() -> &'static marius_projection::StoreRegistry<Self> {
+            static REGISTRY: marius_projection::StoreRegistry<FailingProjection> =
+                marius_projection::StoreRegistry::new();
+            &REGISTRY
         }
     }
 

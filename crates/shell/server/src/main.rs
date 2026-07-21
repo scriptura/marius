@@ -312,6 +312,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ROUTE_TABLE.len()
     );
 
+    // ── StoreRegistry — provisionnement à froid (Étape 7, Contrat
+    // d'Implémentation Phase 1 réactivité CoW) ──────────────────────────────
+    // Doit précéder toute construction de Dispatcher, ci-dessous :
+    // ingest_and_swap (appelé par Dispatcher::run) lit P::store_registry() et
+    // panique si aucun cold_start n'a eu lieu (invariant AOT : un registre
+    // non provisionné est un bug d'intégration, pas un état à tolérer en
+    // service — cf. DESIGN-store-registry.md §4, INV-2).
+    //
+    // Contrairement à ensure_provisioned (pack.bin) ci-dessus, aucun fichier
+    // vide n'est auto-généré ici : store.bin ne peut être obtenu qu'en
+    // interrogeant PostgreSQL (marius-dump), jamais conjuré vide — un
+    // store.bin absent est donc directement fatal (`?`), pas un état initial
+    // légitime comme l'est un espace de projection pack.bin vierge.
+    ContentCoreProjection::cold_start_store()?;
+    CommerceProductCoreProjection::cold_start_store()?;
+    eprintln!("[marius-server] StoreRegistry provisionné — 2 shard(s)");
+
     // ── Dispatcher — shard content_core ─────────────────────────────────────
     // Un seul Arc<Notify> par shard, jamais reconstruit. Phase 5.2 lui donne
     // un second consommateur (run_pg_listener, même Arc) : .clone() ici,
