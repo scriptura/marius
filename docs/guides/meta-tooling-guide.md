@@ -1,16 +1,25 @@
 # Meta Tooling Guide — Marius
 
-> **Créé le 17 juin 2026. Vérifié et daté le 7 juillet 2026.**
-> **Note de statut** : le §1 (dernière étape) et le §5 (étape 10) décrivent un
-> modèle de service obsolète — résolution _à la requête_ depuis `store.bin`
-> directement (`OnceLock`/`fetch_batch` au premier appel HTTP). Ce modèle a été
-> explicitement écarté par ADR-008 (22 juin 2026, postérieur à la dernière
-> révision de ce guide) au profit d'une résolution _à l'écriture_ : un pack
-> HTML pré-rendu (`{table}.bin`, distinct de `{table}_store.bin`), régénéré
-> uniquement sur `NOTIFY` Postgres, servi par `pread`. Le reste de ce document
-> (registre, annotations, format binaire de `store.bin`, procédure d'ajout de
-> composant) reste exact et complémentaire — voir `guide-cycle-de-vie-runtime.md`
-> pour le modèle de service réel.
+> **Créé le 17 juin 2026. Vérifié et daté le 7 juillet 2026. Note de statut
+> corrigée le 22 juillet 2026.**
+> **Note de statut, corrigée** : le §1 (dernière étape) et le §5 (étape 10)
+> décrivaient un modèle de service obsolète — résolution _à la requête_
+> depuis `store.bin` directement (`OnceLock`/`fetch_batch` au premier appel
+> HTTP). La note précédente affirmait que ce modèle avait été « explicitement
+> écarté par ADR-008 » au profit d'une résolution _à l'écriture_. **C'était
+> inexact au niveau du code, bien que correct au niveau de l'intention** :
+> `ADR-008` actait la décision, mais `codegen/projection.rs` généra
+> effectivement, jusqu'à une session de correction du 20-22 juillet 2026, un
+> `fetch_batch` lisant `store.bin` via un `OnceLock` monté une seule fois —
+> exactement le modèle qu'ADR-008 était censé avoir écarté. Corrigé depuis :
+> `StoreRegistry<P>` (registre atomiquement remplaçable) remplace le
+> `OnceLock`, et un second artefact doit désormais être rafraîchi de façon
+> réactive avant `store.bin` puisse nourrir la régénération de
+> `{table}.bin` — voir `DFS-phase1-reactivite-cow.md` et
+> `PHASE1-CLOSURE.md`, qui font désormais autorité sur ce point, plus
+> `guide-cycle-de-vie-runtime.md`. Le reste de ce document (registre,
+> annotations, format binaire de `store.bin`, procédure d'ajout de
+> composant) reste exact et complémentaire.
 
 Guide opérationnel du pipeline AOT. Destiné au développeur qui ajoute, modifie
 ou débogue un composant dans Marius. Ne documente pas les internals de la Forge
@@ -33,11 +42,21 @@ generated_schema.rs              ← types, From impl, Projection impl
     ▼ cargo run --bin marius-dump
 {schema}_{table}_store.bin       ← dump binaire AOT (StorageRow + varlena)
     │
-    ▼ [OBSOLÈTE — voir note de statut ci-dessus]
-    ▼ Le service réel passe par regenerate_and_swap() → pack HTML,
-    ▼ déclenché par NOTIFY Postgres, pas par cargo run --bin marius-server
-    ▼ ni par un fetch_batch() à la première requête. Détail complet :
-    ▼ guide-cycle-de-vie-runtime.md, schéma global.
+    ▼ NOTIFY Postgres (UPDATE/INSERT/DELETE sur la table source)
+    ▼ ÉTAGE 1 — ingest_and_swap() : fetch SQL live, fusion (merge_store),
+    ▼ réécrit {schema}_{table}_store.bin, bascule StoreRegistry (atomique).
+    ▼ Corrige un défaut réel du code antérieur au 22 juillet 2026 : sans cet
+    ▼ étage, store.bin restait figé au dernier marius-dump, et l'étage
+    ▼ suivant régénérait un pack HTML à partir d'une donnée périmée.
+    ▼
+    ▼ ÉTAGE 2 — regenerate_and_swap() : lit store.bin (désormais frais) via
+    ▼ StoreRegistry/fetch_batch, rend, bascule LiveRegistry (atomique).
+    ▼ Détail complet des deux étages : DFS-phase1-reactivite-cow.md,
+    ▼ guide-cycle-de-vie-runtime.md.
+    │
+    ▼ requête HTTP → pread sur {table}.bin via LiveRegistry — zéro SQL,
+    ▼ zéro allocation, jamais store.bin, jamais fetch_batch au moment de la
+    ▼ requête. Ceci reste exact et n'a jamais été remis en cause.
 ```
 
 `cargo build` est le seul outil qui touche `generated_schema.rs`.
@@ -247,13 +266,18 @@ cargo run --bin marius-verify
 
 # 10. Démarrer (ou redémarrer) le serveur
 cargo run --bin marius
-# [OBSOLÈTE, voir note de statut en tête de document] Ceci ne charge PAS le
-# pack HTML au premier fetch_batch(). Le serveur ouvre au démarrage
-# (cold_start) les packs déjà présents sur disque, régénérés uniquement sur
-# NOTIFY Postgres — jamais à la première requête HTTP. Si le pack n'existe
-# pas encore pour ce composant, voir guide-cycle-de-vie-runtime.md §5 :
-# marius-dump doit aussi appeler regenerate_and_swap, pas seulement écrire
-# le store.bin.
+# Le serveur ouvre au démarrage (cold_start) les packs déjà présents sur
+# disque, régénérés uniquement sur NOTIFY Postgres — jamais à la première
+# requête HTTP. Si le pack n'existe pas encore pour ce composant :
+# cargo run --bin marius-dump appelle déjà regenerate_and_swap après avoir
+# écrit le store.bin (pas seulement écrire le store.bin) — mais doit
+# d'abord provisionner et monter le StoreRegistry de ce composant
+# (ensure_store_provisioned + cold_start_store, Phase 1 réactivité CoW,
+# 22 juillet 2026), sans quoi regenerate_and_swap panique en tentant de
+# relire un store.bin via un registre jamais monté. Ce câblage est déjà en
+# place dans le binaire marius-dump réel du projet — rien à faire de
+# spécial ici, mentionné pour comprendre l'ordre des opérations si le
+# binaire échoue. Détail : PHASE1-CLOSURE.md.
 ```
 
 ---
@@ -309,4 +333,4 @@ cargo test -p marius-schema
 
 ---
 
-_Créé le 17 Juin 2026 (Phase 4 db-forge). Vérifié et daté le 7 juillet 2026 — voir note de statut en tête de document._
+_Créé le 17 Juin 2026 (Phase 4 db-forge). Vérifié et daté le 7 juillet 2026. Corrigé le 22 juillet 2026 après la session de correction de la réactivité varlena — voir note de statut en tête de document._

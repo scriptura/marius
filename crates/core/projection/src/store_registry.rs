@@ -1,6 +1,6 @@
 // marius-projection — crates/core/projection/src/store_registry.rs
 //
-// StoreRegistry — cf. DESIGN-store-registry.md
+// cf. DESIGN-store-registry.md
 //
 // Registre mono-slot, atomiquement remplaçable, pour un PackfileReader<P>.
 // Remplace le `static OnceLock<PackfileReader<P>>` généré aujourd'hui par
@@ -83,6 +83,19 @@ where
     }
 }
 
+impl<P: Projection> Default for StoreRegistry<P>
+where
+    P::Record: Pod,
+{
+    /// Délègue à `new()` — même état initial (aucune version montée).
+    /// Satisfait `clippy::new_without_default` ; ne remplace pas `new()`
+    /// comme point de construction dans une `static` (`Default::default()`
+    /// n'est pas `const`).
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +136,15 @@ mod tests {
 
         fn store_path() -> PathBuf {
             PathBuf::new()
+        }
+
+        fn store_registry() -> &'static StoreRegistry<Self> {
+            // Les tests de ce module construisent leurs propres instances
+            // locales de StoreRegistry (voir chaque test) pour isoler les
+            // scénarios — cette static n'est un point d'entrée générique
+            // requis que par la forme du trait, pas exercée directement ici.
+            static REGISTRY: StoreRegistry<TestProj> = StoreRegistry::new();
+            &REGISTRY
         }
     }
 

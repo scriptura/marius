@@ -1,3 +1,5 @@
+// crates/shell/render/src/bin/dump.rs
+//
 // Exécuté manuellement au déploiement : cargo run --bin marius-dump
 // Jamais par cargo build, jamais par le Dispatcher.
 
@@ -35,6 +37,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         all_ids.len() + all_ids.len() / 5,
     )
     .await?;
+
+    // StoreRegistry — provisionnement à froid, local à ce binaire (Phase 1,
+    // réactivité CoW). Doit suivre dump_table (qui vient d'écrire
+    // artifacts/content_core_store.bin) et précéder tout appel à
+    // regenerate_and_swap ci-dessous : celui-ci lit store.bin via
+    // fetch_batch/StoreRegistry, jamais via une requête SQL directe (cf.
+    // DFS-phase1-reactivite-cow.md §3-4) — sans ce cold_start, fetch_batch
+    // panique (StoreRegistry non provisionné), exactement ce que ce binaire
+    // a déclenché avant ce correctif : dump_table réussit, écrit le fichier,
+    // puis regenerate_and_swap panique en tentant de le relire via un
+    // registre jamais monté dans ce process.
+    ContentCoreProjection::cold_start_store()?;
 
     // Pack HTML — invariant manquant jusqu'ici. Provisioning + cold_start
     // locaux à ce process, jetables : ce binaire ne sert aucune requête,

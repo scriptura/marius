@@ -1,4 +1,6 @@
-// ingest_and_swap — cf. DFS-phase1-reactivite-cow.md §3.4, §6
+// marius-render · crates/shell/render/src/ingest_and_swap.rs
+//
+// cf. DFS-phase1-reactivite-cow.md §3.4, §6
 //
 // Étage 1 du pipeline réactif : fetch_from_pg(pool, ids) → merge_store →
 // écriture .tmp + fsync → VALIDATION → rename atomique → swap StoreRegistry.
@@ -315,7 +317,14 @@ mod tests {
 
         let held_before = IngestTestProj::store_registry().load(); // INV-3, sur le vrai chemin
 
-        let pool = sqlx::PgPool;
+        // connect_lazy : ne se connecte pas immédiatement (parse l'URL
+        // seulement), valide même sans base réelle disponible — ces tests
+        // n'exécutent jamais de requête via ce pool (Projection de test,
+        // fetch_from_pg contrôlé par état en mémoire). sqlx::PgPool est un
+        // type alias (Pool<Postgres>), pas une struct unitaire : ne jamais
+        // écrire `sqlx::PgPool` comme valeur.
+        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/marius_test")
+            .expect("connect_lazy ne doit jamais échouer avant la première requête");
         let sem = tokio::sync::Semaphore::new(1);
         let report = ingest_and_swap::<IngestTestProj>(&pool, &[2, 3, 4], &sem)
             .await
@@ -359,7 +368,14 @@ mod tests {
 
         let before = all_rows_on_disk(&path);
 
-        let pool = sqlx::PgPool;
+        // connect_lazy : ne se connecte pas immédiatement (parse l'URL
+        // seulement), valide même sans base réelle disponible — ces tests
+        // n'exécutent jamais de requête via ce pool (Projection de test,
+        // fetch_from_pg contrôlé par état en mémoire). sqlx::PgPool est un
+        // type alias (Pool<Postgres>), pas une struct unitaire : ne jamais
+        // écrire `sqlx::PgPool` comme valeur.
+        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/marius_test")
+            .expect("connect_lazy ne doit jamais échouer avant la première requête");
         let sem = tokio::sync::Semaphore::new(1);
         let result = ingest_and_swap::<IngestTestProj>(&pool, &[1], &sem).await;
 
@@ -388,7 +404,14 @@ mod tests {
         *STORE_PATH.lock().unwrap() = Some(PathBuf::from("/chemin/inexistant/store.bin"));
         *FETCH_RESULT.lock().unwrap() = vec![(1, 999, Some("ecrasee".to_string()))];
 
-        let pool = sqlx::PgPool;
+        // connect_lazy : ne se connecte pas immédiatement (parse l'URL
+        // seulement), valide même sans base réelle disponible — ces tests
+        // n'exécutent jamais de requête via ce pool (Projection de test,
+        // fetch_from_pg contrôlé par état en mémoire). sqlx::PgPool est un
+        // type alias (Pool<Postgres>), pas une struct unitaire : ne jamais
+        // écrire `sqlx::PgPool` comme valeur.
+        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/marius_test")
+            .expect("connect_lazy ne doit jamais échouer avant la première requête");
         let sem = tokio::sync::Semaphore::new(1);
         let result = ingest_and_swap::<IngestTestProj>(&pool, &[1], &sem).await;
 

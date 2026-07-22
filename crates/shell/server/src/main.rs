@@ -312,19 +312,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ROUTE_TABLE.len()
     );
 
-    // ── StoreRegistry — provisionnement à froid (Étape 7, Contrat
-    // d'Implémentation Phase 1 réactivité CoW) ──────────────────────────────
+    // ── StoreRegistry — provisionnement à froid (Étape 7, corrigé après un
+    // échec réel en environnement vierge — cf. store_provisioning.rs) ───────
     // Doit précéder toute construction de Dispatcher, ci-dessous :
     // ingest_and_swap (appelé par Dispatcher::run) lit P::store_registry() et
     // panique si aucun cold_start n'a eu lieu (invariant AOT : un registre
     // non provisionné est un bug d'intégration, pas un état à tolérer en
     // service — cf. DESIGN-store-registry.md §4, INV-2).
     //
-    // Contrairement à ensure_provisioned (pack.bin) ci-dessus, aucun fichier
-    // vide n'est auto-généré ici : store.bin ne peut être obtenu qu'en
-    // interrogeant PostgreSQL (marius-dump), jamais conjuré vide — un
-    // store.bin absent est donc directement fatal (`?`), pas un état initial
-    // légitime comme l'est un espace de projection pack.bin vierge.
+    // CORRIGÉ : contrairement à l'affirmation initiale de cette section
+    // (« aucun fichier vide n'est auto-généré ici »), un store.bin vide
+    // (row_count = 0) est un fichier valide, constructible sans PostgreSQL —
+    // exactement symétrique à ensure_provisioned pour pack.bin ci-dessus.
+    // ensure_store_provisioned garantit sa présence (vide si absent, jamais
+    // touché si déjà présent) avant que cold_start_store() ne le monte.
+    marius_render::ensure_store_provisioned::<ContentCoreProjection>().await?;
+    marius_render::ensure_store_provisioned::<CommerceProductCoreProjection>().await?;
     ContentCoreProjection::cold_start_store()?;
     CommerceProductCoreProjection::cold_start_store()?;
     eprintln!("[marius-server] StoreRegistry provisionné — 2 shard(s)");

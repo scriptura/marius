@@ -1,4 +1,6 @@
-// merge_store — cf. DFS-phase1-reactivite-cow.md §3.3
+// merge_store — crates/shell/render/src/merge_store.rs
+//
+// cf. DFS-phase1-reactivite-cow.md §3.3
 //
 // Fusionne un ancien store.bin (mmap, via PackfileReader) avec un delta
 // (insertions/mises à jour depuis fetch_from_pg) et une liste d'ids
@@ -205,6 +207,12 @@ mod tests {
 
         fn store_path() -> PathBuf {
             PathBuf::new()
+        }
+
+        fn store_registry() -> &'static marius_projection::StoreRegistry<Self> {
+            static REGISTRY: marius_projection::StoreRegistry<TestProj> =
+                marius_projection::StoreRegistry::new();
+            &REGISTRY
         }
 
         fn varlena_field_count() -> u16 {

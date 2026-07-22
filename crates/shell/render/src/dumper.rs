@@ -1,5 +1,5 @@
 // =============================================================================
-// marius-render · dumper.rs
+// marius-render · crates/shell/render/src/dumper.rs
 //
 // Full dump AOT : lit toutes les entités d'une table via Projection::fetch_from_pg,
 // les sérialise en binary store (PackfileBuilder), écrit le fichier une fois.

@@ -1,8 +1,9 @@
 // =============================================================================
-// crates/shell/server/tests/phase5_3_supervision.rs
+// crates/shell/server/tests/server_supervision_and_provisioning.rs
 //
-// Phase 5.3 — Supervision & Résilience. Deux tests, deux modèles distincts,
-// volontairement non mélangés (cf. handoff Phase 5.3, arbitrage point 3) :
+// Renommé — "Phase 5.3" ne correspond plus à aucun repère actif du projet
+// (terminologie d'une itération antérieure). Contenu inchangé : trois tests,
+// trois contrats distincts, volontairement non mélangés :
 //
 //   1. fail_fast_panic_in_dispatcher_terminates_process (#[test], synchrone)
 //      Sous-processus réel : binaire marius complet, observation externe via
@@ -12,7 +13,18 @@
 //   2. startup_order_does_not_lose_pending_signal (#[tokio::test])
 //      In-process, concentré exclusivement sur Notify et Collector — aucun
 //      Dispatcher réel, aucun PgPool, aucun socket. Prouve les deux contrats
-//      du §8 de la spec indépendamment de tout consommateur.
+//      indépendants de tout consommateur.
+//
+//   3. provisioning_on_empty_environment_starts_cleanly_and_serves_404
+//      (#[test], sous-processus réel) — démarrage de bout en bout sur un
+//      environnement entièrement vierge. Ce test a révélé, au cours de la
+//      Phase 1 (réactivité CoW), qu'un ajout non symétrique
+//      (cold_start_store() sans équivalent de ensure_provisioned côté
+//      store.bin) cassait ce contrat préexistant. Corrigé par
+//      ensure_store_provisioned (store_provisioning.rs) — store.bin vide
+//      auto-provisionné, symétrique à pack.bin. Aucune modification de ce
+//      fichier de test n'a été nécessaire : le contrat qu'il vérifie n'a pas
+//      changé, seule l'implémentation défaillante a été corrigée.
 // =============================================================================
 
 use std::process::Command;
