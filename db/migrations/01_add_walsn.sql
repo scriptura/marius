@@ -62,7 +62,7 @@ FOR EACH ROW EXECUTE FUNCTION meta.stamp_walsn();
 -- de chaque ligne est perdu). Acceptable pour Phase 1 — le resync Phase 2
 -- utilisera ces valeurs uniquement comme point de départ.
 
-UPDATE content.core        SET walsn = pg_current_wal_lsn();
+UPDATE content.core          SET walsn = pg_current_wal_lsn();
 UPDATE commerce.product_core SET walsn = pg_current_wal_lsn();
 
 COMMIT;
