@@ -25,18 +25,26 @@
 -- ==============================================================================
 
 -- PRODUCT CORE — prix et stock (HAUTE fréquence) · fillfactor=80 pour HOT updates
--- Layout (ADR-006 + ADR-026) :
---   price_cents INT8 (offset 0, 8B) · id INT4 (8) · stock INT4 (12) · media_id INT4 (16)
---   · is_available BOOL (20, 1B) · 3B pad (21-23)
+-- Layout (ADR-006 + ADR-026 + WAL-sync) :
+--   walsn pg_lsn (offset 0, 8B) · price_cents INT8 (8, 8B)
+--   · id INT4 (16, 4B) · stock INT4 (20, 4B) · media_id INT4 (24, 4B)
+--   · is_available BOOL (28, 1B) · 3B pad (29-31) → Total Data 32B.
 -- HOT path : UPDATE stock → non indexé → HOT-eligible.
 -- FK cross-schéma RETIRÉE :
 --   media_id → content.media_core(id) ON DELETE SET NULL (→ 07_cross_fk)
 CREATE TABLE commerce.product_core (
+  -- Bloc 8 octets (Alignement strict)
+  walsn         pg_lsn   NOT NULL DEFAULT '0/0'::pg_lsn,
   price_cents   INT8     NULL                  CHECK (price_cents >= 0),
+  
+  -- Bloc 4 octets
   id            INT      GENERATED ALWAYS AS IDENTITY,
   stock         INT      NOT NULL DEFAULT 0    CHECK (stock >= 0),
   media_id      INT      NULL,
+  
+  -- Bloc 1 octet
   is_available  BOOLEAN  NOT NULL DEFAULT true,
+  
   PRIMARY KEY (id)
   -- FOREIGN KEY (media_id) REFERENCES content.media_core(id) ON DELETE SET NULL → 07_cross_fk
 ) WITH (fillfactor = 80);

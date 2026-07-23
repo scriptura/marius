@@ -512,3 +512,13 @@ SELECT
    JOIN   content.core co ON co.document_id = ct.content_id
    WHERE  ct.tag_id = t.id AND co.status = 1) AS article_count
 FROM content.tag t;
+
+-- ==============================================================================
+-- WAL SYNC — content (ADR-030 / SHM Invalidation)
+-- Inscription du pg_current_wal_lsn() sur chaque mutation de composant.
+-- ==============================================================================
+
+CREATE TRIGGER content_core_walsn
+BEFORE INSERT OR UPDATE ON content.core
+FOR EACH ROW EXECUTE FUNCTION meta.stamp_walsn();
+

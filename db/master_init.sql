@@ -68,6 +68,10 @@
 \ir 11_audit/01_v_performance_sentinel.sql
 \ir 11_audit/02_v_master_health_audit.sql
 
+-- ── 12. Pipeline réactif ───────────────────────────────────────────────────
+-- Triggers LISTEN/NOTIFY pour le Collector backend (server/main.rs).
+\ir 12_notify/01_triggers.sql
+
 -- ==============================================================================
 -- FIN DE MASTER_INIT
 -- Pour les données de test : psql -U postgres -d marius -f master_schema_dml.pgsql

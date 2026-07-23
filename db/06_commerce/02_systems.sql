@@ -284,3 +284,16 @@ GROUP BY
   tpay.paid_at, tpay.billing_place_id,
   tdel.delivery_status, tdel.shipping_place_id, tdel.carrier,
   tdel.tracking_number, tdel.shipped_at, tdel.estimated_at, tdel.delivered_at;
+
+-- ==============================================================================
+-- WAL SYNC — commerce (ADR-030 / SHM Invalidation)
+-- Inscription du pg_current_wal_lsn() sur chaque mutation de composant commerce.
+-- ==============================================================================
+
+CREATE TRIGGER commerce_product_core_walsn
+BEFORE INSERT OR UPDATE ON commerce.product_core
+FOR EACH ROW EXECUTE FUNCTION meta.stamp_walsn();
+
+CREATE TRIGGER commerce_product_identity_walsn
+BEFORE INSERT OR UPDATE ON commerce.product_identity
+FOR EACH ROW EXECUTE FUNCTION meta.stamp_walsn();

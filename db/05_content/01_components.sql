@@ -78,21 +78,30 @@ CREATE TABLE content.media_content (
 -- ==============================================================================
 
 -- CONTENT CORE — status / dates / auteur (TRÈS HAUTE fréquence)
--- Layout : 3×TIMESTAMPTZ · document_id INT4 · author_entity_id INT4 · status SMALLINT
+-- Layout : pg_lsn · 3×TIMESTAMPTZ · document_id INT4 · author_entity_id INT4 · status SMALLINT
 --          · 3×BOOL
--- Tuple 64 B → ~127 tuples/page. fillfactor retiré (Audit 3 : zéro HOT path).
+-- Tuple 72 B (Data 45B alignée sur 48B + Header 24B) → ~113 tuples/page. fillfactor retiré.
 -- FK cross-schéma RETIRÉE :
 --   author_entity_id → identity.entity(id) ON DELETE SET NULL (→ 07_cross_fk)
 CREATE TABLE content.core (
+  -- Bloc 8 octets (Alignement strict)
+  walsn               pg_lsn        NOT NULL DEFAULT '0/0'::pg_lsn,
   published_at        TIMESTAMPTZ   NULL,
   created_at          TIMESTAMPTZ   NOT NULL DEFAULT now(),
   modified_at         TIMESTAMPTZ   NULL,
+  
+  -- Bloc 4 octets
   document_id         INT           NOT NULL,
   author_entity_id    INT           NULL,
+  
+  -- Bloc 2 octets
   status              SMALLINT      NOT NULL DEFAULT 0,
+  
+  -- Bloc 1 octet
   is_readable         BOOLEAN       NOT NULL DEFAULT true,
   is_commentable      BOOLEAN       NOT NULL DEFAULT false,
   is_visible_comments BOOLEAN       NOT NULL DEFAULT true,
+  
   PRIMARY KEY (document_id),
   FOREIGN KEY (document_id) REFERENCES content.document(id) ON DELETE CASCADE,
   -- FOREIGN KEY (author_entity_id) REFERENCES identity.entity(id) ON DELETE SET NULL → 07_cross_fk
@@ -131,13 +140,18 @@ ALTER TABLE content.identity ALTER COLUMN alternative_headline SET STORAGE MAIN;
 
 -- CONTENT BODY — corps HTML (BASSE fréquence) · TOAST EXTENDED systématique
 CREATE TABLE content.body (
-  document_id  INT   NOT NULL,
-  content      TEXT  NULL,
+  document_id  INT            NOT NULL,
+  content      VARCHAR(32000) NULL,
   PRIMARY KEY (document_id),
   FOREIGN KEY (document_id) REFERENCES content.document(id) ON DELETE CASCADE
 ) WITH (toast_tuple_target = 128);
 
+-- Forçage du stockage hors-ligne (out-of-line) pour préserver le cache CPU de la table
 ALTER TABLE content.body ALTER COLUMN content SET STORAGE EXTENDED;
+
+-- Tag méta-compilateur : certifie que le contenu est du HTML pré-constitué (EscapePolicy::Raw).
+-- Directement exploité par introspect.rs pour court-circuiter l'échappement au runtime.
+COMMENT ON COLUMN content.body.content IS 'marius:raw';
 
 
 -- CONTENT REVISION — cold storage des snapshots éditoriaux

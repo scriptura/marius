@@ -487,3 +487,25 @@ COMMENT ON FUNCTION meta.f_compile_entity_profile() IS
 -- PUBLIC ne doit pas pouvoir recompiler le profil depuis un contexte applicatif.
 -- GRANT TO marius_admin : emis en 08_dcl/01_grants.sql (role inexistant a ce stade).
 REVOKE ALL ON FUNCTION meta.f_compile_entity_profile() FROM PUBLIC;
+
+-- ==============================================================================
+-- meta.stamp_walsn
+-- Architecture ECS/DOD · Projet Marius · WAL Sync
+--
+-- Fonction trigger commune : peuple la colonne walsn avec le LSN WAL courant.
+-- S'exécute dans le contexte de la transaction appelante (pas de SECURITY DEFINER).
+-- ==============================================================================
+
+CREATE OR REPLACE FUNCTION meta.stamp_walsn()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    NEW.walsn := pg_current_wal_lsn();
+    RETURN NEW;
+END;
+$$;
+
+COMMENT ON FUNCTION meta.stamp_walsn() IS
+    'Fonction trigger : met à jour la colonne walsn via pg_current_wal_lsn() pour la synchronisation SHM/Logical Decoding.';
