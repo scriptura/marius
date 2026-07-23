@@ -20,7 +20,11 @@ use marius_fragment_forge::{FieldSpec, TemplateMetrics, VarlenField};
 ///      - render() avec corps généré par Fragment-Forge
 ///      - artifact_path()
 ///
-/// `varlena_join` : Option<(schema, table, fk_col)> — None si pas de JOIN.
+/// `varlena_join` : &[(schema, table, fk_col)] — un triplet par slot
+/// (join_slot_idx croissant, cf. registry.rs). Tranche vide = aucun JOIN.
+/// CONTRAT-implementation-multi-slot-varlena.md, Étape 4 : remplace
+/// l'ancien Option<(schema, table, fk_col)>, limité à un seul JOIN par
+/// composant (limite Phase 1, jamais comblée avant cette révision).
 ///
 /// `render` : Option<(render_body, metrics)> — résultat du pipeline Voie B
 /// (scan → parse_tokens → validate_ast → resolve_and_measure → generate_aot_snippet),
@@ -37,7 +41,7 @@ pub fn write_projection_stub(
     columns: &[Column],
     pk: &PrimaryKey,
     varlena: &[VarlenField],
-    varlena_join: Option<(&str, &str, &str)>,
+    varlena_join: &[(&str, &str, &str)],
     render: Option<(&str, &TemplateMetrics)>,
 ) {
     let name = to_pascal(&format!("{schema}_{table}"));
@@ -73,7 +77,7 @@ pub fn write_projection_stub(
     // table composant. Générer un JOIN sur un stub de PK composite produirait
     // un SQL invalide, silencieusement, à l'exécution plutôt qu'à la
     // compilation — inacceptable pour un compilateur AOT.
-    if varlena_join.is_some() && matches!(pk, PrimaryKey::Composite) {
+    if !varlena_join.is_empty() && matches!(pk, PrimaryKey::Composite) {
         panic!(
             "DB-Forge [{schema}.{table}]: jointure varlena (meta.component_varlena_join) \
              combinée à une clé primaire composite n'est pas supportée par le générateur \
@@ -89,24 +93,32 @@ pub fn write_projection_stub(
     // ── Construction SELECT + FROM (Voie d'Extraction — fetch_from_pg) ────────
     // Ces variables alimentent le corps SQLx de fetch_from_pg ci-dessous.
     // Non utilisées par fetch_batch (Voie d'Exécution mmap).
-    let (select, from_clause) = if let Some((vs, vt, _fk)) = varlena_join {
-        let varlena_cols: Vec<String> =
-            varlena.iter().map(|v| format!("{vt}.{}", v.name)).collect();
+    let (select, from_clause) = if !varlena_join.is_empty() {
+        // Qualification de chaque champ varlena par SA table de provenance
+        // (VarlenField::ref_table, Étape 2 du Contrat multi-slot) — corrige le
+        // bug Phase 1 où un unique `vt` capturé hors boucle était appliqué à
+        // tort à tous les champs, quel que soit leur slot d'origine réel.
+        let varlena_cols: Vec<String> = varlena
+            .iter()
+            .map(|v| format!("{}.{}", v.ref_table, v.name))
+            .collect();
         let all_cols: Vec<String> = fixed_cols
             .iter()
             .map(|c| format!("{schema}.{table}.{c}"))
             .chain(varlena_cols)
             .collect();
-        // Constat n°2, corrigé : le générateur précédent supposait fk_col
-        // identiquement nommée des deux côtés du JOIN (`{schema}.{table}.{_fk}
-        // = {vs}.{vt}.{_fk}`), invalide dès que fk_col est la PK de la table
-        // jointe référençant une PK de nom différent côté composant (cas
-        // content.body : fk_column='document_id', PK de content.document='id').
-        // Sémantique correcte, conforme aux FK relationnelles standard :
-        // fk_col de l'enfant référence la PK du parent.
-        let from = format!(
-            "{schema}.{table} LEFT JOIN {vs}.{vt} ON {schema}.{table}.{pk_col_name} = {vs}.{vt}.{_fk}"
-        );
+        // Une clause LEFT JOIN par slot (join_slot_idx croissant, ordre déjà
+        // garanti par registry.rs), enchaînées sur la même table pivot.
+        // Sémantique par jointure inchangée depuis le correctif Phase 1
+        // (Constat n°2) : fk_col de l'enfant référence la PK du parent —
+        // {schema}.{table}.{pk_col_name} = {vs}.{vt}.{fk}, jamais l'inverse.
+        let joins: Vec<String> = varlena_join
+            .iter()
+            .map(|(vs, vt, fk)| {
+                format!("LEFT JOIN {vs}.{vt} ON {schema}.{table}.{pk_col_name} = {vs}.{vt}.{fk}")
+            })
+            .collect();
+        let from = format!("{schema}.{table} {}", joins.join(" "));
         (all_cols.join(", "), from)
     } else {
         (fixed_cols.join(", "), format!("{schema}.{table}"))

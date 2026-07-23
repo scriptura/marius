@@ -45,9 +45,13 @@
 //
 //   Champ normal    : facteur × 5  (pire cas : '&' → '&amp;', 5 chars)
 //   Champ pre_escaped : facteur × 1  (tag COMMENT ON COLUMN 'marius:pre_escaped')
+//   Champ raw         : facteur × 1, ET jamais échappé au runtime (tag
+//                        'marius:raw' — HTML déjà constitué, injecté tel quel,
+//                        distinct de pre_escaped qui échappe quand même sans
+//                        rien avoir à échapper). Voir EscapePolicy.
 //
-//   La détection du tag est effectuée dans build.rs à l'introspection.
-//   Fragment-Forge reçoit l'information via VarlenField::pre_escaped.
+//   La détection du tag est effectuée dans introspect.rs à l'introspection.
+//   Fragment-Forge reçoit l'information via VarlenField::escape_policy.
 //
 // ─── Contraintes (directives Session 5 / no_std-attitude) ───────────────────
 //
@@ -57,13 +61,6 @@
 //   - Capacité calculée statiquement : STATIC_CAP + DYNAMIC_CAP = borne supérieure exacte.
 //   - Les fonctions de ce module sont pure Rust (pas d'I/O, pas d'alloc dynamique propre).
 //
-// =============================================================================
-
-// pub mod orchestrator;
-// pub mod prologue;
-// pub mod body;
-// pub mod generator;
-
 // =============================================================================
 // I. Types internes
 // =============================================================================
@@ -189,8 +186,18 @@ pub struct FieldSpec {
 ///   Facteur pre_escaped : 1
 ///     Le commentaire SQL `COMMENT ON COLUMN ... IS 'marius:pre_escaped'`
 ///     certifie que le contenu est déjà sanitisé (slugs, titres normalisés…).
-///     build.rs lit pg_description pour détecter ce tag.
+///     introspect.rs lit pg_description pour détecter ce tag.
 ///     Un facteur de 1 évite la sur-estimation de DYNAMIC_CAP pour ces champs.
+///     Échappé quand même au runtime (défense en profondeur) — seule la
+///     capacité déclarée change, pas le comportement d'échappement.
+///
+///   Facteur raw : 1, ET jamais échappé au runtime
+///     Le commentaire SQL `COMMENT ON COLUMN ... IS 'marius:raw'` certifie que
+///     le contenu est du HTML déjà constitué, à injecter tel quel — distinct
+///     de pre_escaped : le contenu contient potentiellement beaucoup de
+///     caractères spéciaux intentionnels (balises), ce n'est pas leur absence
+///     qui justifie l'exemption, c'est leur nature de balisage voulu tel quel.
+///     Voir EscapePolicy.
 ///
 /// ─── Ownership des données ───────────────────────────────────────────────────
 ///
@@ -203,6 +210,18 @@ pub struct FieldSpec {
 pub struct VarlenField {
     /// Nom de la colonne dans la table jointe.
     pub name: String,
+    /// Schéma de la table jointe source de ce champ (ex: "content").
+    ///
+    /// CONTRAT-implementation-multi-slot-varlena.md, Étape 2 : nécessaire dès
+    /// qu'un composant porte plusieurs joins varlena (join_slot_idx > 0) — sans
+    /// cette provenance, codegen/projection.rs ne peut pas qualifier
+    /// correctement chaque colonne dans un SELECT multi-JOIN (un seul `vt`
+    /// capturé hors boucle appliqué à tort à tous les champs, bug corrigé à
+    /// l'Étape 4). Sert aussi de matière première aux messages de collision
+    /// de l'Étape 3 (nommer les deux tables sources en conflit).
+    pub ref_schema: String,
+    /// Table jointe source de ce champ (ex: "body"). Voir `ref_schema`.
+    pub ref_table: String,
     /// Borne supérieure en octets, si elle existe dans le schéma PostgreSQL
     /// (VARCHAR(N) via atttypmod, ou TEXT avec CHECK(length(col) <= N) parsable).
     ///
@@ -213,9 +232,12 @@ pub struct VarlenField {
     /// Aucun fallback numérique n'est jamais substitué à None — une absence
     /// de borne reste une absence de borne jusqu'à la frontière de résolution.
     pub max_len: Option<usize>,
-    /// true si le contenu est certifié pré-échappé (tag 'marius:pre_escaped').
-    /// Facteur de capacité = 1 au lieu de HTML_ESCAPE_FACTOR.
-    pub pre_escaped: bool,
+    /// Politique d'échappement — état fermé, aucune combinaison invalide
+    /// représentable (CONTRAT-implementation-varlena-raw.md, Étape 2,
+    /// arbitrage du 22/07/2026 : option (b), enum plutôt que deux booléens
+    /// couplés `pre_escaped`/`raw` dont l'état simultané `true`/`true` serait
+    /// une aberration sémantique sans le typage fermé). Voir `EscapePolicy`.
+    pub escape_policy: EscapePolicy,
     /// true si la colonne DDL est nullable (Option<String> dans VarlenOwned).
     /// En v1, toujours true (LEFT JOIN produit systématiquement Option).
     /// Réservé v2 : champ NOT NULL → String directe, court-circuite l'Option.
@@ -225,6 +247,31 @@ pub struct VarlenField {
     /// Sans effet si `max_len` est également `None` — il n'y a alors rien à
     /// surcharger, `max_escaped_len()` retourne None indépendamment de ce champ.
     pub max_escaped_len_override: Option<usize>,
+}
+
+/// Politique d'échappement d'un champ varlena au runtime — trois états
+/// mutuellement exclusifs par construction (enum fermé, pas deux booléens
+/// couplés). CONTRAT-implementation-varlena-raw.md, Étape 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscapePolicy {
+    /// Texte quelconque, cas par défaut. Échappé au runtime
+    /// (`marius_html_escape`), facteur de capacité `HTML_ESCAPE_FACTOR` (6).
+    Escaped,
+    /// Contenu certifié sans caractères spéciaux à échapper
+    /// (tag SQL `COMMENT ON COLUMN ... IS 'marius:pre_escaped'`) — titres,
+    /// slugs normalisés. Échappé quand même au runtime (défense en profondeur
+    /// — le contenu réel n'est jamais vérifié mécaniquement, seulement
+    /// déclaré sans danger par le schéma), facteur de capacité 1.
+    PreEscaped,
+    /// HTML déjà constitué, à injecter tel quel (tag SQL
+    /// `COMMENT ON COLUMN ... IS 'marius:raw'`) — ex. `content.body.content`.
+    /// JAMAIS échappé au runtime (`buf.push_str` direct, aucun appel à
+    /// `marius_html_escape`), facteur de capacité 1. Distinct de `PreEscaped` :
+    /// le contenu contient au contraire potentiellement beaucoup de
+    /// caractères spéciaux intentionnels (balises) — ce n'est pas leur absence
+    /// qui justifie l'exemption d'échappement, c'est leur nature de balisage
+    /// déjà voulu tel quel.
+    Raw,
 }
 
 impl VarlenField {
@@ -238,11 +285,11 @@ impl VarlenField {
     /// Longueur maximale après escape HTML, en octets — si elle est connue.
     ///
     /// Composante varlena de DYNAMIC_CAP.
-    /// Priorité : max_escaped_len_override > pre_escaped > facteur HTML.
+    /// Priorité : max_escaped_len_override > escape_policy.
     ///
     /// Retourne `None` si `max_len` est `None` (ADR-007) : il n'existe pas de
     /// borne à propager, quelle que soit la valeur de `max_escaped_len_override`
-    /// ou `pre_escaped`. L'appelant (resolve_and_measure) est responsable de
+    /// ou `escape_policy`. L'appelant (resolve_and_measure) est responsable de
     /// traiter ce `None` selon la table de vérité Hot/Cold/Erreur — cette
     /// méthode ne décide jamais d'une valeur de repli.
     pub fn max_escaped_len(&self) -> Option<usize> {
@@ -250,10 +297,12 @@ impl VarlenField {
             return Some(override_len);
         }
         let n = self.max_len?;
-        Some(if self.pre_escaped {
-            n
-        } else {
-            n * Self::HTML_ESCAPE_FACTOR
+        // match exhaustif — un futur variant d'EscapePolicy casserait la
+        // compilation ici plutôt que de tomber silencieusement dans un
+        // mauvais facteur par défaut (garantie du typage fermé, Étape 2).
+        Some(match self.escape_policy {
+            EscapePolicy::Escaped => n * Self::HTML_ESCAPE_FACTOR,
+            EscapePolicy::PreEscaped | EscapePolicy::Raw => n,
         })
     }
 }
@@ -1952,8 +2001,13 @@ mod tests_phase_2_1 {
     fn unbounded_field(name: &str) -> VarlenField {
         VarlenField {
             name: name.to_string(),
+            // Provenance non pertinente pour ces tests (Hot/Cold/Erreur, pas
+            // qualification SQL) — placeholder neutre, jamais lu par
+            // resolve_and_measure ni par les assertions de ce module.
+            ref_schema: "test".to_string(),
+            ref_table: "joined".to_string(),
             max_len: None,
-            pre_escaped: false,
+            escape_policy: EscapePolicy::Escaped,
             nullable: true,
             max_escaped_len_override: None,
         }
@@ -1962,8 +2016,10 @@ mod tests_phase_2_1 {
     fn bounded_field(name: &str, max_len: usize) -> VarlenField {
         VarlenField {
             name: name.to_string(),
+            ref_schema: "test".to_string(),
+            ref_table: "joined".to_string(),
             max_len: Some(max_len),
-            pre_escaped: false,
+            escape_policy: EscapePolicy::Escaped,
             nullable: true,
             max_escaped_len_override: None,
         }
@@ -2275,13 +2331,33 @@ pub fn generate_aot_snippet<'src, 'r>(
             }
 
             FlatPageToken::Field { field, .. } => {
-                if schema.find_varlena(field).is_some() {
-                    writeln!(
-                        out,
-                        "{}if let Some(s) = {field}_ref {{ marius_html_escape(s, buf); }}",
-                        indent,
-                    )
-                    .unwrap();
+                if let Some(v) = schema.find_varlena(field) {
+                    // CONTRAT-implementation-varlena-raw.md, Étape 4 : match
+                    // exhaustif sur EscapePolicy — Raw ne passe JAMAIS par
+                    // marius_html_escape (contenu HTML déjà constitué, à
+                    // injecter tel quel) ; Escaped et PreEscaped conservent le
+                    // comportement existant (l'échappement runtime ne dépend
+                    // que du contenu réel étant du texte, pas de la capacité
+                    // déclarée — seul PreEscaped change le facteur de
+                    // capacité, jamais le comportement d'échappement lui-même).
+                    match v.escape_policy {
+                        EscapePolicy::Raw => {
+                            writeln!(
+                                out,
+                                "{}if let Some(s) = {field}_ref {{ buf.push_str(s); }}",
+                                indent,
+                            )
+                            .unwrap();
+                        }
+                        EscapePolicy::Escaped | EscapePolicy::PreEscaped => {
+                            writeln!(
+                                out,
+                                "{}if let Some(s) = {field}_ref {{ marius_html_escape(s, buf); }}",
+                                indent,
+                            )
+                            .unwrap();
+                        }
+                    }
                 } else {
                     writeln!(
                         out,
@@ -2812,8 +2888,12 @@ mod tests_phase_2_2 {
         ];
         let varlena = vec![VarlenField {
             name: "body".to_string(),
+            // Provenance non pertinente ici — generate_aot_snippet ne lit
+            // jamais ref_schema/ref_table (seulement .name, via find_varlena).
+            ref_schema: "test_schema".to_string(),
+            ref_table: "test_table".to_string(),
             max_len: Some(1000),
-            pre_escaped: false,
+            escape_policy: EscapePolicy::Escaped,
             nullable: true,
             max_escaped_len_override: None,
         }];
@@ -2877,6 +2957,46 @@ mod tests_phase_2_2 {
         assert!(
             !got.contains("buf.reserve"),
             "buf.reserve ne doit pas être dans le snippet:\n{got}"
+        );
+    }
+
+    /// CONTRAT-implementation-varlena-raw.md, Étape 4 : un champ
+    /// EscapePolicy::Raw produit `buf.push_str(s)` direct, JAMAIS
+    /// `marius_html_escape` — HTML déjà constitué, injecté tel quel.
+    #[test]
+    fn test_generate_aot_snippet_raw_field_bypasses_html_escape() {
+        let fixed: Vec<FieldSpec> = vec![];
+        let varlena = vec![VarlenField {
+            name: "content".to_string(),
+            ref_schema: "content".to_string(),
+            ref_table: "body".to_string(),
+            max_len: Some(32_000),
+            escape_policy: EscapePolicy::Raw,
+            nullable: true,
+            max_escaped_len_override: None,
+        }];
+        let schema = make_schema(&fixed, &varlena);
+
+        let tokens: &[FlatPageToken<'_>] = &[FlatPageToken::Field {
+            entity: "varlena",
+            field: "content",
+        }];
+
+        let got = generate_aot_snippet(tokens, &schema, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        });
+
+        assert!(
+            got.contains("let content_ref: Option<&str> = varlena.content.as_deref();"),
+            "déclaration varlena absente:\n{got}"
+        );
+        assert!(
+            got.contains("if let Some(s) = content_ref { buf.push_str(s); }"),
+            "buf.push_str direct absent (Raw ne doit jamais échapper):\n{got}"
+        );
+        assert!(
+            !got.contains("marius_html_escape"),
+            "marius_html_escape ne doit JAMAIS apparaître pour un champ Raw:\n{got}"
         );
     }
 

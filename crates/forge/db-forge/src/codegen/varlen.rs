@@ -1,12 +1,12 @@
 // =============================================================================
-// marius-db-forge · codegen/varlen.rs
+// marius-db-forge · crates/forge/db-forge/src/codegen/varlen.rs
 // Génération de {Name}VarlenOwned.
 // =============================================================================
 
 use std::fmt::Write as _;
 
 use crate::naming::to_pascal;
-use marius_fragment_forge::VarlenField;
+use marius_fragment_forge::{EscapePolicy, VarlenField};
 
 /// Génère {Name}VarlenOwned : struct possédée portant les données varlena.
 ///
@@ -53,20 +53,19 @@ pub fn write_varlen_owned_struct(
             Some(n) => format!("VARCHAR({n})"),
             None => "TEXT (non borné — Cold sauf si référencé)".to_string(),
         };
+        // CONTRAT-implementation-varlena-raw.md, Étape 5 : match exhaustif —
+        // Raw distinct de PreEscaped dans le commentaire généré (même facteur
+        // de capacité 1, mais Raw n'est JAMAIS échappé au runtime, alors que
+        // PreEscaped l'est quand même par défense en profondeur).
+        let (escape_descr, escape_factor) = match v.escape_policy {
+            EscapePolicy::Escaped => ("escape HTML, facteur", VarlenField::HTML_ESCAPE_FACTOR),
+            EscapePolicy::PreEscaped => ("pré-échappé (échappé quand même), facteur", 1),
+            EscapePolicy::Raw => ("brut — HTML pré-rendu, jamais échappé, facteur", 1),
+        };
         writeln!(
             out,
             "    /// {} — {} × {}.",
-            bound_descr,
-            if v.pre_escaped {
-                "pré-échappé, facteur"
-            } else {
-                "escape HTML, facteur"
-            },
-            if v.pre_escaped {
-                1
-            } else {
-                VarlenField::HTML_ESCAPE_FACTOR
-            },
+            bound_descr, escape_descr, escape_factor,
         )
         .unwrap();
         writeln!(out, "    pub {}: Option<String>,", v.name).unwrap();

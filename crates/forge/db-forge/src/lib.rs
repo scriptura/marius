@@ -1,5 +1,5 @@
 // =============================================================================
-// marius-db-forge · lib.rs
+// marius-db-forge · crates/forge/db-forge/src/lib.rs
 //
 // API publique du crate.
 // Exposé comme build-dependency de crates/core/schema/build.rs.
@@ -36,8 +36,8 @@ pub use introspect::{fetch_columns, fetch_max_id, fetch_pk_column, fetch_varlena
 // ── Registre (Phase 1 : + fetch_component_list) ───────────────────────────────
 pub use crate::registry::{ComponentConfig, VarlenJoin, fetch_component_list};
 
-// ── Validation layout (Phase 2) ───────────────────────────────────────────────
-pub use validate::validate_layout;
+// ── Validation layout (Phase 2) + collision de nom (multi-slot, Étape 3) ─────
+pub use validate::{check_no_name_collision, validate_layout};
 
 // ── Génération des artefacts ──────────────────────────────────────────────────
 pub use codegen::{

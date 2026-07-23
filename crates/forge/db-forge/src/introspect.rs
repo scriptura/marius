@@ -1,13 +1,12 @@
 // =============================================================================
-// marius-db-forge · introspect.rs
+// marius-db-forge · crates/forge/db-forge/src/introspect.rs
 // Requêtes SQLx d'introspection pg_catalog / information_schema / pg_stats.
-// Extrait de crates/core/schema/build.rs (Phase 0 — extraction isofonctionnelle).
 // =============================================================================
 
 use sqlx::Row as _;
 
 use crate::mapping::{Column, PrimaryKey};
-use marius_fragment_forge::VarlenField;
+use marius_fragment_forge::{EscapePolicy, VarlenField};
 
 // =============================================================================
 // I. Colonnes fixed-length (pg_attribute)
@@ -164,10 +163,13 @@ pub async fn fetch_max_id(
 ///   validation est différée à la résolution (ResolverError::UnboundedField
 ///   si jamais référencé sans borne).
 ///
-/// ─── Politique pre_escaped ─────────────────────────────────────────────────
+/// ─── Politique escape_policy (EscapePolicy) ──────────────────────────────────
 ///
-///   Si COMMENT ON COLUMN ... IS 'marius:pre_escaped' → facteur escape = 1.
-///   Sinon : facteur = VarlenField::HTML_ESCAPE_FACTOR (6).
+///   Si COMMENT ON COLUMN ... IS 'marius:pre_escaped' → PreEscaped, facteur 1,
+///     échappé quand même au runtime (défense en profondeur).
+///   Si COMMENT ON COLUMN ... IS 'marius:raw' → Raw, facteur 1, JAMAIS échappé
+///     au runtime (HTML déjà constitué — CONTRAT-implementation-varlena-raw.md).
+///   Sinon → Escaped, facteur VarlenField::HTML_ESCAPE_FACTOR (6).
 pub async fn fetch_varlena_cols(
     pool: &sqlx::PgPool,
     schema: &str,
@@ -206,7 +208,15 @@ pub async fn fetch_varlena_cols(
         let typmod: i32 = row.get(1);
         let description: String = row.get(2);
 
-        let pre_escaped = description.trim() == "marius:pre_escaped";
+        // CONTRAT-implementation-varlena-raw.md, Étape 1+2 : EscapePolicy
+        // (enum fermé) remplace l'ancien bool pre_escaped isolé — mutuellement
+        // exclusif de facto, `description` ne peut être égal qu'à une seule
+        // chaîne à la fois.
+        let escape_policy = match description.trim() {
+            "marius:pre_escaped" => EscapePolicy::PreEscaped,
+            "marius:raw" => EscapePolicy::Raw,
+            _ => EscapePolicy::Escaped,
+        };
 
         // ── Résolution de max_len — Option<usize>, jamais de fallback ─────────
         let max_len: Option<usize> = if typmod > 4 {
@@ -279,11 +289,26 @@ pub async fn fetch_varlena_cols(
         // ── Validation AOT : seuil absolu 64 KB ──────────────────────────────
         // Seulement si une borne existe — un champ non borné n'a rien à valider
         // ici ; sa validation est différée à resolve_and_measure (Étape 3).
+        //
+        // TODO (identifié 22/07/2026, non planifié) : restaurer l'invariant
+        // cache L1 pour les composants portant un varlena volumineux
+        // (content.body : 200 000B) nécessiterait, à terme, un découpage en
+        // chunks côté PostgreSQL — directement dans la table (colonne
+        // segmentée) ou via un mécanisme de triggers de fragmentation — plutôt
+        // que de laisser grossir {NAME}_TOTAL_CAP au-delà de ce que le
+        // buffer unique réutilisé (manifest-reactive-projection.md §5) peut
+        // absorber sans dégrader la localité de cache. Aucune conception
+        // engagée à ce jour — à traiter comme un Contrat d'Implémentation
+        // séparé le moment venu, pas comme un ajustement de seuil.
         if let Some(n) = max_len {
-            let escape_factor = if pre_escaped {
-                1
-            } else {
-                VarlenField::HTML_ESCAPE_FACTOR
+            // Étape 3 (CONTRAT-implementation-varlena-raw.md) : PreEscaped et
+            // Raw partagent le même facteur de capacité (1) — la différence
+            // entre les deux n'est jamais dans ce calcul, seulement dans le
+            // comportement runtime (échappé quand même vs jamais échappé),
+            // décidé plus loin dans le pipeline (codegen, fragment-forge).
+            let escape_factor = match escape_policy {
+                EscapePolicy::Escaped => VarlenField::HTML_ESCAPE_FACTOR,
+                EscapePolicy::PreEscaped | EscapePolicy::Raw => 1,
             };
             let max_escaped = n * escape_factor;
             if max_escaped > 65_536 {
@@ -324,10 +349,16 @@ pub async fn fetch_varlena_cols(
         // nullable=true : toujours le cas en v1, LEFT JOIN peut produire NULL.
         // max_escaped_len_override=None : valeur calculée (max_len × facteur),
         // pas de surcharge manuelle pour l'instant.
+        // ref_schema/ref_table : provenance du champ (CONTRAT-implementation-
+        // multi-slot-varlena.md, Étape 2) — schema/table sont ici les
+        // paramètres de fetch_varlena_cols, c'est-à-dire la table jointe
+        // elle-même, pas le composant appelant.
         fields.push(VarlenField {
             name,
+            ref_schema: schema.to_string(),
+            ref_table: table.to_string(),
             max_len,
-            pre_escaped,
+            escape_policy,
             nullable: true,
             max_escaped_len_override: None,
         });

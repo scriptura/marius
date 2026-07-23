@@ -1,7 +1,6 @@
 // =============================================================================
 // marius-db-forge · mapping.rs
 // Mapping SQL → Rust : types, layout, sentinels.
-// Extrait de crates/core/schema/build.rs (Phase 0 — extraction isofonctionnelle).
 // =============================================================================
 
 /// Colonne issue de pg_attribute.

@@ -18,10 +18,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use marius_db_forge::{
-    PrimaryKey, build_field_specs, fetch_columns, fetch_component_list, fetch_max_id,
-    fetch_pk_column, fetch_varlena_cols, validate_layout, write_collector, write_from_impl,
-    write_projection_stub, write_row_struct, write_section_header, write_store_struct,
-    write_varlen_owned_struct,
+    PrimaryKey, build_field_specs, check_no_name_collision, fetch_columns, fetch_component_list,
+    fetch_max_id, fetch_pk_column, fetch_varlena_cols, validate_layout, write_collector,
+    write_from_impl, write_projection_stub, write_row_struct, write_section_header,
+    write_store_struct, write_varlen_owned_struct,
 };
 
 use marius_fragment_forge::{
@@ -1764,10 +1764,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             PrimaryKey::Composite => None,
         };
 
-        let varlena = match &comp.varlena_join {
-            Some(j) => fetch_varlena_cols(&pool, &j.schema, &j.table).await?,
-            None => vec![],
-        };
+        // Assemblage multi-slot (CONTRAT-implementation-multi-slot-varlena.md,
+        // Étape 4) : comp.varlena_join est désormais Vec<VarlenJoin> (registry.rs,
+        // Étape 1) — un appel à fetch_varlena_cols par slot, concaténés dans
+        // l'ordre join_slot_idx croissant déjà garanti par registry.rs.
+        let mut varlena: Vec<VarlenField> = Vec::new();
+        for join in &comp.varlena_join {
+            varlena.extend(fetch_varlena_cols(&pool, &join.schema, &join.table).await?);
+        }
+
+        // ── Collision de nom (Étape 3) ─────────────────────────────────────────
+        // Échec de build explicite si un champ varlena entre en collision avec
+        // un autre slot ou avec une colonne propre du composant — politique
+        // DDL-driven arbitrée le 22/07/2026, aucune désambiguïsation automatique.
+        {
+            let component_id = format!("{}.{}", comp.schema, comp.table);
+            if let Err(msg) = check_no_name_collision(&component_id, &columns, &varlena) {
+                println!("cargo:error=DB-Forge [{component_id}] : {msg}");
+                std::process::exit(1);
+            }
+        }
 
         // ── Phase 2 : validation layout ───────────────────────────────────────
         if comp.intent_density != 0
@@ -1807,6 +1823,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             write_collector(&mut output, &comp.schema, &comp.table, col, max);
         }
 
+        let varlena_join_tuples: Vec<(&str, &str, &str)> = comp
+            .varlena_join
+            .iter()
+            .map(|j| (j.schema.as_str(), j.table.as_str(), j.fk_col.as_str()))
+            .collect();
+
         write_projection_stub(
             &mut output,
             &comp.schema,
@@ -1814,9 +1836,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &columns,
             &pk,
             &varlena,
-            comp.varlena_join
-                .as_ref()
-                .map(|j| (j.schema.as_str(), j.table.as_str(), j.fk_col.as_str())),
+            &varlena_join_tuples,
             render
                 .as_ref()
                 .map(|(body, metrics)| (body.as_str(), metrics)),

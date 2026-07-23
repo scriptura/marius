@@ -1,14 +1,14 @@
 // =============================================================================
-// marius-db-forge · validate.rs
+// marius-db-forge · crates/forge/db-forge/src/validate.rs
 //
 // Validation AOT : layout calculé depuis pg_attribute vs intent_density_bytes
 // enregistré dans meta.containment_intent.
 //
-// Phase 0 : présent, non appelé (intent_density = 0 dans la liste hardcodée).
-// Phase 2 : appelé dans build.rs après fetch_component_list().
+// Appelé dans build.rs après fetch_component_list().
 // =============================================================================
 
 use crate::mapping::{Column, map_type};
+use marius_fragment_forge::VarlenField;
 
 /// Vérifie que le layout `#[repr(C)]` calculé depuis `pg_attribute`
 /// correspond à `intent_density_bytes` enregistré dans `meta.containment_intent`.
@@ -71,10 +71,84 @@ pub fn validate_layout(columns: &[Column], intent_density: i16) -> Result<(), St
     Ok(())
 }
 
+// =============================================================================
+// Validation AOT : collision de nom — varlena multi-slot (CONTRAT-implementation-
+// multi-slot-varlena.md, Étape 3).
+//
+// Politique DDL-driven (arbitrage du 22/07/2026) : échec de build explicite,
+// jamais de désambiguïsation automatique côté généré. Toute collision de nom
+// est une erreur de modélisation SQL à corriger dans le schéma.
+//
+// Deux vérifications distinctes :
+//
+//   1. Collision inter-slots : deux VarlenField de tables jointes différentes
+//      (même composant) partageant le même nom de colonne.
+//
+//   2. Collision varlena / colonne propre du composant : un VarlenField dont
+//      le nom coïncide avec une colonne de `own_columns` (colonnes propres du
+//      composant — fixed-length OU varlena inline, sans distinction). Portée
+//      volontairement plus large que « fixed » seul : row.rs génère un champ
+//      Rust nommé d'après col.name pour TOUTE colonne du composant, fixed ou
+//      varlena directe (non jointe) — une collision ici produirait le même
+//      champ dupliqué qu'entre deux slots (cf. row.rs, branches
+//      "varlena table principale" / "varlena NULLABLE table principale").
+// =============================================================================
+
+/// Vérifie l'absence de collision de nom pour un composant donné.
+///
+/// `own_columns` : TOUTES les colonnes propres du composant (fixed-length et
+/// varlena inline confondues) — pas seulement le sous-ensemble fixed-length
+/// filtré ailleurs (`fixed_cols` dans codegen/projection.rs) pour la
+/// construction du SELECT. `varlena` : tous les VarlenField assemblés pour ce
+/// composant, tous slots confondus (join_slot_idx croissant), avec provenance
+/// (ref_schema/ref_table) déjà renseignée — cf. Étape 2.
+///
+/// Message d'erreur nommant explicitement : le composant, la colonne en
+/// conflit, et l'origine des deux occurrences — même niveau d'exigence
+/// diagnostique que le garde-fou PK composite déjà en place dans
+/// codegen/projection.rs.
+pub fn check_no_name_collision(
+    component_id: &str,
+    own_columns: &[Column],
+    varlena: &[VarlenField],
+) -> Result<(), String> {
+    // Cas 2 : varlena vs colonne propre du composant.
+    for v in varlena {
+        if let Some(col) = own_columns.iter().find(|c| c.name == v.name) {
+            return Err(format!(
+                "collision de nom sur «{}» : colonne propre de {component_id} \
+                 (type SQL «{}») en conflit avec le champ varlena joint depuis \
+                 {}.{}. Renommer l'une des deux colonnes dans le schéma SQL — \
+                 aucune désambiguïsation automatique n'est effectuée par le générateur.",
+                v.name, col.sql_type, v.ref_schema, v.ref_table
+            ));
+        }
+    }
+
+    // Cas 1 : collision inter-slots (comparaison par paires, O(n²) — au plus
+    // quelques champs varlena par composant en pratique, cf. registry.rs).
+    for (i, a) in varlena.iter().enumerate() {
+        for b in &varlena[i + 1..] {
+            if a.name == b.name {
+                return Err(format!(
+                    "collision de nom sur «{}» dans {component_id} : présent à la fois \
+                     dans le join {}.{} et dans le join {}.{}. Renommer l'une des deux \
+                     colonnes dans le schéma SQL — aucune désambiguïsation automatique \
+                     n'est effectuée par le générateur.",
+                    a.name, a.ref_schema, a.ref_table, b.ref_schema, b.ref_table
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mapping::Column;
+    use marius_fragment_forge::EscapePolicy;
 
     fn col(name: &str, sql_type: &str, is_notnull: bool) -> Column {
         Column {
@@ -158,6 +232,89 @@ mod tests {
         assert!(
             err.contains("diverge"),
             "message doit mentionner la divergence"
+        );
+    }
+
+    // ── check_no_name_collision ─────────────────────────────────────────────
+
+    fn varlen(name: &str, ref_schema: &str, ref_table: &str) -> VarlenField {
+        VarlenField {
+            name: name.to_string(),
+            ref_schema: ref_schema.to_string(),
+            ref_table: ref_table.to_string(),
+            max_len: Some(100),
+            escape_policy: EscapePolicy::Escaped,
+            nullable: true,
+            max_escaped_len_override: None,
+        }
+    }
+
+    /// Cas nominal (content.core réel, session du 22/07/2026) : aucune
+    /// collision entre identity (slug/headline/alternative_headline/
+    /// description), body (content) et les colonnes propres de content.core.
+    #[test]
+    fn accepts_no_collision() {
+        let own = vec![
+            col("document_id", "int4", true),
+            col("author_entity_id", "int4", false),
+            col("status", "int2", true),
+        ];
+        let varlena = vec![
+            varlen("slug", "content", "identity"),
+            varlen("headline", "content", "identity"),
+            varlen("content", "content", "body"),
+        ];
+        assert!(check_no_name_collision("content.core", &own, &varlena).is_ok());
+    }
+
+    /// Cas 1 : collision inter-slots — deux tables jointes différentes
+    /// partageant un nom de colonne (jamais rencontré dans le schéma réel à
+    /// ce jour — cas synthétique dédié, cf. Contrat Étape 3).
+    #[test]
+    fn rejects_collision_between_two_slots() {
+        let own = vec![col("document_id", "int4", true)];
+        let varlena = vec![
+            varlen("name", "content", "identity"),
+            varlen("name", "content", "body"),
+        ];
+        let err = check_no_name_collision("content.core", &own, &varlena).unwrap_err();
+        assert!(
+            err.contains("name"),
+            "message doit nommer la colonne : {err}"
+        );
+        assert!(
+            err.contains("content.identity") && err.contains("content.body"),
+            "message doit nommer les deux tables sources : {err}"
+        );
+    }
+
+    /// Cas 2 : collision varlena vs colonne propre du composant (fixed).
+    #[test]
+    fn rejects_collision_with_own_fixed_column() {
+        let own = vec![col("status", "int2", true)];
+        let varlena = vec![varlen("status", "content", "identity")];
+        let err = check_no_name_collision("content.core", &own, &varlena).unwrap_err();
+        assert!(
+            err.contains("status"),
+            "message doit nommer la colonne : {err}"
+        );
+        assert!(
+            err.contains("content.core") && err.contains("content.identity"),
+            "message doit nommer le composant et la table source : {err}"
+        );
+    }
+
+    /// Cas 2bis : collision varlena vs colonne propre varlena inline (non
+    /// jointe) — portée étendue au-delà de fixed_cols (row.rs génère un champ
+    /// pour toute colonne propre, fixed ou varlena directe).
+    #[test]
+    fn rejects_collision_with_own_inline_varlena_column() {
+        let own = vec![col("summary", "text", false)];
+        let varlena = vec![varlen("summary", "content", "body")];
+        let err = check_no_name_collision("content.some_table", &own, &varlena).unwrap_err();
+        assert!(
+            err.contains("summary"),
+            "message doit nommer la colonne : {err}"
         );
     }
 }
