@@ -1,47 +1,40 @@
 // crates/assets/src/main.rs
-//
-// marius-assets — compilateur AOT d'assets statiques du thème Marius.
-// Outil de build hôte exclusivement (aucune trace runtime dans le Shell ni
-// le Core no_std) — voir marius-assets-specification.md et
-// marius-assets-HANDOFF.md pour le contexte complet.
-//
-// Étape 1 de la roadmap d'implémentation : pipelines [static.verbatim],
-// [styles] (variables `$`, boucles `@for`, url() généralisée — Phase 5,
-// Roadmap §1.8 tranchée), [sprites] (Phase 4), [webmanifest] (Phase 6) et
-// [scripts.components] (Phase 7, ES Modules natifs, arène DOD).
-//
-// Le contenu de `build_root` est intégralement régénéré à chaque
-// invocation (voir `main`, purge avant tout pipeline) : aucun fichier de
-// build n'a de raison de survivre à un build dont il n'est plus issu.
-//
-// Invariant DOD respecté : traitement séquentiel, un seul passage par
-// fichier, aucune structure de données hiérarchique, aucun trait dynamique.
-// Ce n'est PAS le chemin chaud du Shell (§9 de la spec) : les allocations
-// (String, Vec, HashMap) sont acceptées ici sans restriction — ce
-// programme s'exécute une fois, sur la machine hôte, jamais par requête.
-//
-// Découpage en modules par responsabilité (session de refactor) — chaque
-// pipeline `[section]` de `theme.toml` a son propre fichier. Frontières de
-// module délibérément alignées sur les sections déjà présentes dans
-// l'ancien fichier unique, pas redessinées : ce refactor déplace du code,
-// il n'en change aucune logique.
-//
-//   config.rs          — désérialisation de theme.toml
-//   manifest.rs         — manifeste (E/S), AssetUrlRegistry, hash, MIME,
-//                         utilitaires de chemin — partagé par tous
-//   resolve.rs           — résolution d'URL partagée (CSS/JS/SW/webmanifest)
-//   verbatim.rs          — [static.verbatim]
-//   webmanifest.rs        — [webmanifest]
-//   sprites.rs            — [sprites]
-//   styles.rs             — [styles] ($variables, @for, url(), lightningcss)
-//   scripts.rs            — [scripts.components] (lexer JS + arène ESM DOD)
-//   js_minify.rs          — minification oxc, partagée scripts/service_worker
-//   service_worker.rs     — [service_worker] (réutilise le lexer de scripts.rs)
-//
-// Chaque module conserve ses propres tests unitaires (`#[cfg(test)] mod
-// tests`), co-localisés avec le code privé qu'ils exercent — pas un seul
-// fichier de tests global, pour ne pas exiger `pub(crate)` sur des
-// fonctions qui n'ont autrement aucune raison de sortir de leur module.
+
+//! # Marius Assets — Compilateur AOT d'Assets Statiques
+//!
+//! Outil de build hôte exclusivement (aucune trace runtime dans le Shell ni le Core `no_std`).
+//! Références : `marius-assets-specification.md` et `marius-assets-HANDOFF.md`.
+//!
+//! ## Invariants d'Exécution & Modèle Mémoire
+//!
+//! - **Profil Hôte vs Chemin Chaud :** Exécuté une seule fois à la compilation sur la machine hôte.
+//!   Les allocations dynamiques (`String`, `Vec`, `HashMap`) y sont acceptées sans restriction
+//!   (contrairement au chemin chaud du Shell / Core).
+//! - **Discipline Data-Oriented :** Traitement séquentiel, passage unique par fichier,
+//!   aucune structure de données hiérarchique, zéro indirection dynamique (`dyn Trait`).
+//! - **Purge & Idempotence :** Le répertoire `build_root` est intégralement vidé au démarrage
+//!   dans `main()` avant l'exécution des pipelines.
+//!
+//! ## Cartographie des Modules (`theme.toml`)
+//!
+//! | Module | Section `theme.toml` | Responsabilité |
+//! | :--- | :--- | :--- |
+//! | `config.rs` | Racine | Désérialisation du fichier de configuration `theme.toml`. |
+//! | `manifest.rs` | Partagé | Gestion du manifeste (E/S), `AssetUrlRegistry`, hachage, MIME et utilitaires de chemin. |
+//! | `resolve.rs` | Partagé | Résolution d'URL partagée (CSS, JS, SW, Webmanifest). |
+//! | `verbatim.rs` | `[static.verbatim]` | Copie et transfert brut des actifs statiques. |
+//! | `webmanifest.rs` | `[webmanifest]` | Pipeline de génération du Web App Manifest. |
+//! | `sprites.rs` | `[sprites]` | Assemblage AOT des sprites. |
+//! | `styles.rs` | `[styles]` | Transformation CSS (résolution de `$variables`, boucles `@for`, `url()` et LightningCSS). |
+//! | `scripts.rs` | `[scripts.components]` | Lexer JS + arène ESM (Data-Oriented). |
+//! | `js_minify.rs` | Partagé | Passe finale de minification `oxc` (partagée entre scripts et Service Worker). |
+//! | `service_worker.rs` | `[service_worker]` | Assemblage du SW (réutilise le lexer de `scripts.rs`). |
+//!
+//! ## Encapsulation & Visibilité des Tests
+//!
+//! Les suites de tests (`#[cfg(test)] mod tests`) sont systématiquement co-localisées dans
+//! chaque fichier de module. Cela évite d'exposer la visibilité en `pub(crate)` sur des
+//! fonctions qui doivent rester privées à leur sous-système.
 
 use std::collections::HashMap;
 use std::fs;

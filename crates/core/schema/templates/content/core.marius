@@ -3,9 +3,23 @@
 {% block head_description %}{{ record.description }}{% endblock %}
 {% block head_title %}{{ record.description }}{% endblock %}
 
-{% block main_content %}<article class="content-core" id="{{ record.document_id }}">
-    <h1>{{ record.headline }}</h1>
-    <h2>{{ record.alternative_headline }}</h2>
-    {% if record.is_readable %}<p class="description">{{ record.description }}</p>{% endif %}
-    {{ record.content }}
+{% block main_content %}<article class="article" id="{{ record.document_id }}">
+    <header role="banner">
+        <h1 class="main-heading">{{ record.headline }}</h1>
+        <!-- record.alternative_headline -->
+        <div class="sub-header">
+            <div class="avatar" style="--img:url(/medias/images/uploads/henri-de-lubac-w100.webp)"></div>
+            <address><a href="/content/3">Henri de Lubac</a></address>
+            <time datetime="2017-04-23 20:33:21">Le 23 avril 2017 à 20h33</time>
+        </div>
+        <ul class="tags">
+            <li><a href="/content/3">Écriture &amp; Tradition</a></li>
+            <li><a href="/content/3">Apologétique</a></li>
+            <li> <a href="/content/3">Sur le mal</a></li>
+            <li> <a href="/content/3">Métaphysique</a></li>
+        </ul>
+    </header>
+    <div class="wrapper add-line-marks links add-drop-cap decorative-hr text-justify">
+        {% if record.is_readable %}{{ record.content }}{% endif %}
+    </div>
 </article>{% endblock %}

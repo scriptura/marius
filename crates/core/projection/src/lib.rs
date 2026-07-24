@@ -26,6 +26,76 @@ use std::path::PathBuf;
 pub type BatchResult<P> =
     Result<Vec<(<P as Projection>::Record, <P as Projection>::VarlenOwned)>, sqlx::Error>;
 
+/// Un fragment ordonné du résultat d'un rendu — CONTRAT-implementation-
+/// projection-segmentee.md, Étape 2 (corrigé en session, 23/07/2026 : ce type
+/// vit dans `marius_projection`, pas dans `marius_fragment_forge` — c'est ici
+/// que le trait `Projection` le consomme, et `marius_render`/le crate généré
+/// dépendent déjà de ce crate ; `fragment-forge` est un outil de build-time,
+/// jamais une dépendance runtime).
+///
+/// Généralise au-delà du cas des varlena volumineux (ADR-010 §7) : `Segment`
+/// ne code en dur aucune notion de « gros champ HTML » — un composant sans
+/// champ `marius:large_content` produit toujours un unique `Segment::Buffered`
+/// couvrant tout `buf` (implémentation par défaut de
+/// `Projection::render_segments` ci-dessous), sans changement de comportement.
+///
+/// Pourquoi `Buffered { start, end }` et non `Buffered(&'a str)` (arbitré en
+/// session, 23/07/2026) : `render_segments` continue d'écrire dans `buf`
+/// après avoir logiquement « produit » un premier segment (ex. en-tête déjà
+/// écrit, pied écrit plus tard dans le même appel). Un `&'a str` emprunté sur
+/// `buf` et conservé dans la séquence de segments retournée maintiendrait un
+/// prêt immuable vivant pendant que la fonction continue de faire
+/// `buf.push_str(...)` pour la suite — prêt immuable et mutation simultanés
+/// sur le même `buf`, rejeté par le borrow checker à raison : `String` peut
+/// réallouer, ce qui invaliderait toute `&str` prise avant la dernière
+/// écriture. Les indices diffèrent la vue en `&str` jusqu'à ce que `buf` soit
+/// stable — après le retour de `render_segments`, quand l'appelant (qui
+/// possède déjà `buf` dans son intégralité) peut re-trancher
+/// `&buf[start..end]` sans risque. Ce n'est pas une fuite de représentation
+/// interne : l'appelant ne gagne aucune information qu'il ne pourrait déjà
+/// déduire, puisqu'il possède `buf`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Segment<'a> {
+    /// Plage déjà écrite dans le buffer partagé réutilisé (`buf[start..end]`).
+    /// Jamais valide après que `buf` a été vidé/réutilisé pour l'enregistrement
+    /// suivant — à consommer avant le prochain appel à `render_segments`.
+    Buffered { start: usize, end: usize },
+    /// Référence empruntée, zéro copie — jamais recopiée dans `buf`. Portée
+    /// par la donnée déjà possédée du composant (`VarlenOwned`), jamais par
+    /// `buf` lui-même.
+    Borrowed(&'a str),
+}
+
+#[cfg(test)]
+mod tests_segment {
+    use super::Segment;
+
+    #[test]
+    fn buffered_variants_compare_by_value() {
+        let a = Segment::Buffered { start: 0, end: 10 };
+        let b = Segment::Buffered { start: 0, end: 10 };
+        let c = Segment::Buffered { start: 0, end: 11 };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn borrowed_variants_compare_by_value() {
+        let a = Segment::Borrowed("abc");
+        let b = Segment::Borrowed("abc");
+        let c = Segment::Borrowed("abcd");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn buffered_and_borrowed_are_never_equal() {
+        let a = Segment::Buffered { start: 0, end: 3 };
+        let b = Segment::Borrowed("abc");
+        assert_ne!(a, b);
+    }
+}
+
 pub trait Projection: Sized + Send + Sync + 'static {
     type Record: Sized + Send + 'static;
     type VarlenOwned: Sized + Send + 'static;
@@ -54,6 +124,58 @@ pub trait Projection: Sized + Send + Sync + 'static {
     ) -> impl std::future::Future<Output = BatchResult<Self>> + Send;
 
     fn render(record: &Self::Record, varlena: &Self::VarlenOwned, buf: &mut String);
+
+    /// Nombre maximal de segments produits par un enregistrement de ce
+    /// composant — CONTRAT-implementation-projection-segmentee.md, Étape 3.
+    /// Connu statiquement, généré par db-forge/fragment-forge selon le
+    /// template compilé (propriété du template, exprimée ici via le
+    /// mécanisme de surcharge du trait — `impl Projection for {Name}Projection`
+    /// est lui-même entièrement généré). Défaut `1` : un composant sans champ
+    /// `marius:large_content` produit toujours exactement un segment.
+    /// Permet à `BatchRenderer` de pré-allouer son `Vec<Segment>` une seule
+    /// fois, jamais de resize en boucle de rendu (même discipline que
+    /// `buf`/`total_cap`, INV-5/INV-6 de `PackfileBuilder`).
+    const MAX_SEGMENTS: usize = 1;
+
+    /// Par défaut, délègue à `render()` — un seul segment `Buffered` couvrant
+    /// tout `buf`. Composants sans champ `marius:large_content` : comportement
+    /// inchangé, coût additionnel négligeable (un `push()` dans un `Vec`
+    /// pré-alloué à `MAX_SEGMENTS`).
+    ///
+    /// Les composants générés avec un champ `marius:large_content` reçoivent
+    /// une implémentation réelle multi-segments (générée par
+    /// `fragment-forge`/`db-forge`, Étape 5 du Contrat) qui ne délègue jamais
+    /// à cette valeur par défaut — le champ volumineux y devient un
+    /// `Segment::Borrowed` autonome, jamais concaténé dans `buf`.
+    ///
+    /// **Contrat sur `buf` (précisé en session, 23/07/2026)** : `buf` arrive
+    /// déjà vide — le nettoyage est la responsabilité exclusive de
+    /// l'appelant (`BatchRenderer::render_batch`), jamais de cette méthode ni
+    /// de `render()`, exactement comme aujourd'hui pour `render()` seul. Ce
+    /// n'est pas cosmétique : une implémentation multi-segments doit pouvoir
+    /// écrire l'en-tête dans `buf`, laisser `buf` intact pendant qu'un segment
+    /// emprunté est produit, puis **continuer à écrire** le pied à la suite
+    /// dans le même `buf` sans le vider entre-temps — sans quoi le premier
+    /// `Segment::Buffered` référencerait des octets déjà écrasés. Un
+    /// `buf.clear()` interne à cette méthode casserait ce cas pour toute
+    /// implémentation réelle multi-segments.
+    ///
+    /// `render()` reste la seule méthode que `render_segments` appelle pour
+    /// produire du contenu dans le cas par défaut — cette méthode ne connaît
+    /// toujours que `&mut String`, jamais `Write`/socket/fichier (invariant
+    /// préservé, cf. ADR-010 §3).
+    fn render_segments<'a>(
+        record: &Self::Record,
+        varlena: &'a Self::VarlenOwned,
+        buf: &mut String,
+        segments: &mut Vec<Segment<'a>>,
+    ) {
+        Self::render(record, varlena, buf);
+        segments.push(Segment::Buffered {
+            start: 0,
+            end: buf.len(),
+        });
+    }
 
     fn record_id(record: &Self::Record) -> i64;
 

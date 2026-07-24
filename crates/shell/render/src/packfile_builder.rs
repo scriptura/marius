@@ -1,18 +1,37 @@
-// =============================================================================
 // marius-render · crates/shell/render/src/packfile_builder.rs
-//
-// Écrit les StorageRow + varlena d'une table dans un fichier binaire mmap-ready.
-// Format : Header(64B) | StorageRow[] | ID Index | Varlena TOC | Varlena Heap
-//
-// INV-5 : pré-allocation à `capacity` dès new() — aucun resize en hot path.
-// INV-6 : un seul open() + BufWriter<File> passé en paramètre à write().
-// INV-7 : StorageRow est #[repr(C)] + bytemuck::Pod → cast_slice sans unsafe.
-//
-// ── Source de vérité binaire ──────────────────────────────────────────────────
-// PackfileStoreHeader et align8 sont définis dans marius_projection et importés
-// ici. PackfileReader (aussi dans marius_projection) utilise les mêmes types.
-// Toute modification de layout se propage automatiquement aux deux côtés.
-// =============================================================================
+
+//! Constructeur de Fichiers Binaires d'Acheminement (*Packfile Store Builder*).
+//!
+//! Formatage et assemblage séquentiel AOT de la structure `store.bin`.
+//! Génère un layout binaire strictement aligné, prêt pour la projection mémoire (*mmap*) $O(1)$.
+//!
+//! ## Topologie Mémoire du Fichier (*Header-Based Layout*)
+//!
+//! ```text
+//! +-----------------------------------------------------------------------+
+//! | PackfileStoreHeader (64 octets fixes)                                 |
+//! +-----------------------------------------------------------------------+
+//! | Table de Lignes fixes : StorageRow[] (N × sizeof(P::Record))          |
+//! +-----------------------------------------------------------------------+
+//! | Table d'Index des IDs : id_index[] (N × 8 octets, ID ASC)             |
+//! +-----------------------------------------------------------------------+
+//! | Table des Sommets Varlena : VarlenSlot[] (N × K × 16 octets)          |
+//! +-----------------------------------------------------------------------+
+//! | Section Heap Dynamique : Varlena Data (Blobs textuels contigus)       |
+//! +-----------------------------------------------------------------------+
+//! ```
+//!
+//! ## Invariants & Discipline de Performance
+//!
+//! - **Stabilité Mémoire (INV-5) :** Le vecteur interne est pré-alloué dès l'instanciation (`new(capacity)`).
+//!   Garantit zéro réallocation/relogement (*resize*) durant la phase d'accumulation des lignes (*Hot Path*).
+//! - **Optimisation I/O POSIX (INV-6) :** L'écriture s'effectue via un unique passage séquentiel sur un 
+//!   `BufWriter<File>` injecté, minimisant le nombre d'appels système `write()` et éliminant tout `seek()`.
+//! - **Sûreté Typée Zero-Copy (INV-7) :** L'invariant `P::Record: Pod` permet de transformer la tranche 
+//!   typée en tranche d'octets brute via `bytemuck::cast_slice` sans bloc `unsafe`.
+//! - **Alignement Automatique :** Utilise les structures de contrôle (`PackfileStoreHeader`, `align8`) 
+//!   importées directement depuis `marius_projection`, garantissant la propagation atomique de toute 
+//!   mutation de layout vers `PackfileReader`.
 
 use std::io::{self, BufWriter, Write};
 use std::marker::PhantomData;

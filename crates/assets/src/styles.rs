@@ -1,8 +1,23 @@
 // crates/assets/src/styles.rs
-//
-// Pipeline [styles] — bundling + validation Fonts + minification, `$vars`
-// (dialecte Sass-like), boucles `@for`, url() généralisée, hachage du
-// résultat.
+
+//! Pipeline `[styles]`.
+//!
+//! Pipeline de transformation AOT des feuilles de styles : bundling, validation stricte
+//! des ressources typographiques, et minification via `lightningcss`.
+//!
+//! ## Modèle de Compilation & Hachage
+//!
+//! - **Empreinte de sortie :** Le calcul du hachage s'effectue sur le buffer de sortie transformé
+//!   (le payload qui sera effectivement servi au client), jamais sur les fichiers sources isolés.
+//! - **Aplatissement spatial :** Les sous-répertoires de *staging* (ex: `development/`) sont
+//!   délibérément absorbés. Le *data layout* de sortie est strictement plat sous `build_root/styles/`,
+//!   éliminant l'indirection des résolutions de chemins au runtime.
+//!
+//! ## Dialecte Étendu (Zero-Sass)
+//!
+//! Le pipeline implémente un visiteur d'AST `lightningcss` natif pour résoudre un dialecte minimaliste
+//! (variables `$vars`, boucles `@for`) sans subir l'empreinte mémoire ni l'opacité d'un préprocesseur
+//! externe lourd. La résolution des directives `url()` est interceptée et couplée au registre d'assets.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -20,20 +35,17 @@ use lightningcss::visitor::{Visit, VisitTypes, Visitor};
 use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
 use crate::resolve::resolve_asset_reference;
 
-// =============================================================================
-// Pipeline [styles] — bundling + validation Fonts + minification (voir
-// transform_css ci-dessous), hachage du résultat
-// transformé (pas de la source : le hash doit refléter ce qui est
-// effectivement servi), écriture aplatie sous build_root/styles/.
-//
-// Le sous-dossier de staging (`development/` dans l'exemple) est
-// délibérément absorbé : la sortie ne connaît qu'un seul niveau `styles/`.
-// =============================================================================
-
-/// Erreur de résolution d'URL CSS (spec §10.1, Roadmap §1.8) — ressource
-/// référencée par un `url()` absente du registre verbatim. Échec dur
-/// volontaire : pas de valeur par défaut, pas de passthrough silencieux
-/// vers une URL non versionnée.
+/// Erreur de résolution lors de l'évaluation d'une directive `url()` CSS (Spec §10.1, Roadmap §1.8).
+///
+/// ## Invariant structurel (Échec dur)
+///
+/// Se déclenche de manière déterministe si la ressource référencée est introuvable dans
+/// l'`AssetUrlRegistry`.
+///
+/// Le pipeline interdit tout repli silencieux (*passthrough*) vers une URL non versionnée.
+/// La résolution du graphe de dépendances statiques doit être garantie AOT pour s'assurer
+/// que chaque asset pointe vers un fragment mémoire validé, empêchant toute erreur réseau
+/// (HTTP 404) au runtime.
 #[derive(Debug)]
 struct CssUrlResolutionError(String);
 

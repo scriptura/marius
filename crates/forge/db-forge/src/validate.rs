@@ -1,44 +1,47 @@
-// =============================================================================
 // marius-db-forge · crates/forge/db-forge/src/validate.rs
-//
-// Validation AOT : layout calculé depuis pg_attribute vs intent_density_bytes
-// enregistré dans meta.containment_intent.
-//
-// Appelé dans build.rs après fetch_component_list().
-// =============================================================================
+
+//! Validation AOT de la densité mémoire (`intent_density_bytes`).
+//!
+//! Recoupe le layout `#[repr(C)]` calculé depuis `pg_attribute` avec
+//! l'empreinte enregistrée dans `meta.containment_intent`.
+//!
+//! S'exécute dans `build.rs` immédiatement après `fetch_component_list()`.
 
 use crate::mapping::{Column, map_type};
 use marius_fragment_forge::VarlenField;
 
-/// Vérifie que le layout `#[repr(C)]` calculé depuis `pg_attribute`
-/// correspond à `intent_density_bytes` enregistré dans `meta.containment_intent`.
+/// Vérifie la correspondance exacte entre le layout `#[repr(C)]` (`pg_attribute`)
+/// et la densité ciblée (`meta.containment_intent.intent_density_bytes`).
 ///
-/// ─── Formule header PostgreSQL (Pivot 2) ─────────────────────────────────────
+/// ## Formule Header PostgreSQL (Pivot 2)
 ///
-///   Le null bitmap du heap tuple contient un bit par colonne **totale**
-///   (fixed-length + varlena), pas seulement par colonne fixed.
-///   Utiliser n_fixed sous-évalue le header et produit un faux positif bloquant.
+/// Le null bitmap du heap tuple contient un bit par colonne **totale**
+/// ($n_{\text{total}} = \text{fixed} + \text{varlena}$), et non uniquement les colonnes fixes.
+/// Utiliser $n_{\text{fixed}}$ sous-évaluerait le header et générerait un faux positif bloquant.
 ///
-///   header_bytes = MAXALIGN(8)(23 + ceil(n_total / 8))
-///               = ((23 + (n_total + 7) / 8) + 7) / 8 * 8
+/// ```text
+/// header_bytes = MAXALIGN(8)(23 + ceil(n_total / 8))
+///              = ((23 + (n_total + 7) / 8) + 7) / 8 * 8
+/// ```
 ///
-///   Source : src/include/access/htup_details.h (HeapTupleHeaderData).
-///   Cohérent avec meta.f_generate_dod_template qui utilise n_total.
+/// *Source : `src/include/access/htup_details.h` (`HeapTupleHeaderData`),
+/// aligné sur `meta.f_generate_dod_template`.*
 ///
-/// ─── Formule payload ─────────────────────────────────────────────────────────
+/// ## Formule Payload
 ///
-///   Somme des size_bytes des colonnes fixed-length, padded au multiple de
-///   max_align — identique au calcul de write_store_struct().
+/// Somme des `size_bytes` des colonnes fixed-length, alignée au multiple de `max_align`
+/// (identique au calcul de `write_store_struct()`).
 ///
-/// ─── Comparaison ─────────────────────────────────────────────────────────────
+/// ## Validation & Échec
 ///
-///   computed_total = header_bytes + padded_payload
-///   si computed_total != intent_density → Err (→ cargo:error dans build.rs)
+/// `computed_total = header_bytes + padded_payload`
+///
+/// Si `computed_total != intent_density`, retourne une `Err` déclenchant `cargo:error` dans `build.rs`.
 ///
 /// # Arguments
 ///
-/// * `columns`        — toutes les colonnes de la table (fixed + varlena), triées par attnum.
-/// * `intent_density` — meta.containment_intent.intent_density_bytes.
+/// * `columns` — Colonnes de la table (fixed + varlena) triées par `attnum`.
+/// * `intent_density` — Valeur attendue (`meta.containment_intent.intent_density_bytes`).
 pub fn validate_layout(columns: &[Column], intent_density: i16) -> Result<(), String> {
     // n_total : toutes les colonnes du heap tuple (fixed + varlena, hors systèmes).
     let n_total = columns.len();
@@ -244,6 +247,7 @@ mod tests {
             ref_table: ref_table.to_string(),
             max_len: Some(100),
             escape_policy: EscapePolicy::Escaped,
+            is_segment: false,
             nullable: true,
             max_escaped_len_override: None,
         }

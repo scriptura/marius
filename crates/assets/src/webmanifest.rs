@@ -1,8 +1,31 @@
 // crates/assets/src/webmanifest.rs
-//
-// Pipeline [webmanifest] — Phase 6. Mutation ciblée d'un arbre JSON
-// générique : seul icons[].src est muté, tout le reste du document W3C
-// traverse intact.
+
+//! Pipeline `[webmanifest]` (Phase 6).
+//!
+//! Mutation ciblée d'un arbre JSON générique. Seul le nœud `icons[].src`
+//! est altéré (réécriture d'URL pour le cache-busting). L'intégralité du reste
+//! du document W3C est projetée de l'entrée vers la sortie de manière invariante.
+//!
+//! ## Ordonnancement & Dépendances AOT
+//!
+//! - **Couplage Minimal :** Ce pipeline s'appuie exclusivement sur l'`AssetUrlRegistry`
+//!   (déjà résolu par `[static.verbatim]`).
+//! - **Parallélisme Logique :** Son graphe d'exécution est strictement orthogonal aux
+//!   pipelines `[sprites]` et `[styles]`, permettant un ordonnancement libre vis-à-vis d'eux.
+//!
+//! ## Invariants & Décision Architecturale : Arbre Générique vs Mapping Strict
+//!
+//! L'implémentation utilise `serde_json::Value` et rejette délibérément l'usage
+//! d'une structure fortement typée avec `#[serde(flatten)]`.
+//!
+//! - **Schéma Ouvert :** Le standard Web App Manifest est une grammaire ouverte et
+//!   évolutive (clés propriétaires, spécifications futures comme `share_target` ou `protocol_handlers`).
+//! - **Zéro Destruction :** Un typage strict d'un format ouvert risque la perte ou le
+//!   réordonnancement silencieux des champs non mappés. `Value` opère comme un conteneur
+//!   agnostique : il ne fait aucune hypothèse sur le format au-delà du nœud explicitement muté.
+//! - **Contraste de Domaine :** Cette approche est asymétrique avec le traitement
+//!   de `theme.toml` dans la base de code, dont la grammaire est fermée et strictement
+//!   définie par notre domaine, justifiant alors un layout de données typé (*Struct of Arrays* ou équivalent).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -15,30 +38,9 @@ use crate::config::WebManifestConfig;
 use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
 use crate::resolve::resolve_asset_reference;
 
-// =============================================================================
-// Pipeline [webmanifest] — Phase 6. Dépend UNIQUEMENT de `AssetUrlRegistry`
-// (résolu par [static.verbatim], donc placé juste après lui — aucune
-// dépendance avec [sprites]/[styles], ordre libre vis-à-vis d'eux).
-//
-// Écart assumé par rapport au prompt suggestif reçu en session : il
-// proposait soit `serde_json::Value` soit une struct typée avec
-// `#[serde(flatten)]`. J'ai tranché pour `Value` sans hésitation — un Web
-// App Manifest W3C a des dizaines de clés optionnelles possibles (`name`,
-// `screenshots`, `shortcuts`, `share_target`, `protocol_handlers`,
-// extensions spécifiques aux navigateurs...), dont certaines pas encore
-// stables ou pas encore nées au moment de l'écriture. Une struct avec
-// `#[serde(flatten)]` demanderait quand même de lister explicitement tout
-// ce qu'on veut préserver de façon typée ; oublier une seule clé future la
-// ferait passer dans le fourre-tout `flatten` avec un risque de
-// réordonnancement ou de perte de nuance de type. `Value` ne fait
-// AUCUNE hypothèse sur la forme du document au-delà de ce qu'on mute
-// explicitement (`icons[].src`) — c'est la seule garantie honnête de
-// non-destruction pour un format dont le sur-ensemble de clés n'est pas
-// fermé, contrairement à `theme.toml` (grammaire interne, fermée, que
-// NOUS contrôlons) qui justifie au contraire des structs typées ailleurs
-// dans ce fichier.
-// =============================================================================
-
+/// Erreur survenant lors de la lecture, la mutation ou la sérialisation du manifeste W3C.
+///
+/// Remonte un échec dur si la résolution d'une icône locale échoue contre le registre AOT.
 #[derive(Debug)]
 pub(crate) struct WebManifestError(String);
 

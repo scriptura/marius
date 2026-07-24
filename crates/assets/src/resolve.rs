@@ -1,19 +1,27 @@
 // crates/assets/src/resolve.rs
-//
-// Résolution d'une référence de chemin contre `AssetUrlRegistry` — logique
-// PARTAGÉE entre [styles] (url() CSS), [scripts.components] (import ESM),
-// [service_worker] (littéraux de chaîne) et run_webmanifest_pipeline
-// (icons[].src JSON). Un seul point de vérité, jamais une réimplémentation
-// par pipeline qui pourrait diverger silencieusement sur un cas limite
-// (fragment, URL externe...).
+
+//! Résolution unifiée des chemins et URLs.
+//!
+//! Logique partagée entre :
+//! - `[styles]` (directives `url()` CSS)
+//! - `[scripts.components]` (imports ESM)
+//! - `[service_worker]` (littéraux de chaînes)
+//! - `[webmanifest]` (champs `icons[].src` JSON)
+//!
+//! Constitue le point de vérité unique évitant toute divergence de comportement
+//! entre les pipelines sur les cas limites (fragments `#`, URLs absolues `http://`, URLs *data*).
 
 use std::path::Path;
 
 use crate::manifest::AssetUrlRegistry;
 
-/// Sépare un `url()`/`src` en (chemin, fragment) — `"sprites/utils.svg#icon"`
-/// → `("sprites/utils.svg", "#icon")`, `"sprites/utils.svg"` → (inchangé,
-/// `""`). Fonction pure, testable indépendamment de tout AST CSS ou JSON.
+/// Sépare un chemin ou une URL de son fragment (ex: `#icon`).
+///
+/// Fonction pure, indépendante du contexte d'appel (AST CSS, parsing JSON, etc.).
+///
+/// ## Exemples
+/// - `"sprites/utils.svg#icon"` $\rightarrow$ `("sprites/utils.svg", "#icon")`
+/// - `"sprites/utils.svg"` $\rightarrow$ `("sprites/utils.svg", "")`
 pub(crate) fn split_url_fragment(source: &str) -> (&str, &str) {
     match source.find('#') {
         Some(idx) => (&source[..idx], &source[idx..]),
@@ -21,19 +29,18 @@ pub(crate) fn split_url_fragment(source: &str) -> (&str, &str) {
     }
 }
 
-/// Résolution d'une référence de chemin contre `AssetUrlRegistry` — logique
-/// PARTAGÉE entre le pipeline `[styles]` (`url()` CSS) et
-/// `run_webmanifest_pipeline` (`icons[].src` JSON, Phase 6) : même notion
-/// d'URL externe/fragment à ignorer, même extraction de nom de fichier,
-/// même échec dur si absent. Un seul point de vérité pour ce
-/// comportement — pas deux implémentations qui pourraient un jour diverger
-/// silencieusement sur un cas limite (fragment, URL externe...).
+/// Résout une référence (chemin ou URL) contre l'`AssetUrlRegistry`.
 ///
-/// `Ok(None)` : `source` est externe ou un fragment pur, rien à résoudre,
-/// ce n'est PAS une erreur. `Err(nom_de_fichier)` : référence locale
-/// absente du registre — c'est à l'appelant de l'envelopper dans son
-/// propre type d'erreur (`CssUrlResolutionError`, `WebManifestError`...),
-/// cette fonction reste agnostique du contexte appelant.
+/// Logique agnostique au contexte : elle gère uniformément l'extraction du nom de fichier,
+/// l'ignorance des URLs externes (`http://`, `data:`), et le couplage dur au registre des assets.
+///
+/// ## Comportement de Retour
+///
+/// - `Ok(Some(url))` : Résolution réussie en URL publique (ex: `/static/image.a81f9.png`).
+/// - `Ok(None)` : La cible est externe, encodée en base64, ou est un fragment pur.
+///   Ce n'est **pas** une erreur, le résolveur informe l'appelant de laisser la cible intacte.
+/// - `Err(nom_de_fichier)` : Cible locale introuvable dans le registre. C'est à l'appelant
+///   de l'envelopper dans son propre type d'erreur métier (`CssUrlResolutionError`, `WebManifestError`).
 pub(crate) fn resolve_asset_reference(
     source: &str,
     registry: &AssetUrlRegistry,

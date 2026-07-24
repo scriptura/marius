@@ -1,33 +1,26 @@
-// =============================================================================
 // crates/shell/render/src/registry.rs
-//
-// Registre vivant des PackHtmlIndex — specification-marius-render-shell.md
-// §5. Un ArcSwap<PackHtmlIndex> par packfile_key, jamais un singleton :
-// chaque route (ROUTE_TABLE, Phase 3) cible un packfile_key distinct, chacun
-// remplaçable indépendamment des autres. Tranché par lecture directe de la
-// spec §5 (HashMap<&'static str, ArcSwap<PackHtmlIndex>>), pas par
-// supposition — cf. handoff-render-shell-phase2.md.
-//
-// Invariant AOT structurant : la topologie des clés est figée à la
-// construction. Aucun insert()/remove() sur `indices` après with_indices() —
-// seuls les ArcSwap qu'elle contient sont mutés (store()). C'est cette
-// immutabilité de la table elle-même, pas un verrou, qui rend l'accès
-// concurrent sûr. D'où le champ `indices` privé et les méthodes
-// load()/store() enveloppantes ci-dessous — encapsulation retenue en Phase 2,
-// conservée telle quelle en Phase 3 (handlers.rs de marius-server passe
-// systématiquement par load()/store(), jamais par un accès direct au champ).
-//
-// cold_start() (Phase 3) — frontière de crate tranchée en session
-// (handoff-render-shell-phase3.md) : la spec §5 écrit `for entry in
-// ROUTE_TABLE { ... }` comme accès global implicite, mais ROUTE_TABLE est
-// écrite à la main dans crates/shell/server/src/main.rs (marius-server),
-// un crate qui DÉPEND de marius-render — jamais l'inverse (le sens contraire
-// créerait un cycle de dépendances, impossibilité structurelle du workspace,
-// pas un choix de style). Résolution retenue : cold_start() prend la table
-// en PARAMÈTRE (&'static [RouteEntry]), jamais comme global lu depuis ce
-// crate. RouteEntry/IdSource vivent donc ici (marius-render) — marius-server
-// les importe pour construire sa propre ROUTE_TABLE, pas l'inverse.
-// =============================================================================
+
+//! Registre Vivant des Index de Packfiles HTML (`LiveRegistry`).
+//!
+//! Implémente la spécification §5 (*Live Registry & Multi-Key Routing*). 
+//! Fournit un accès instantané et sans verrou (*lock-free*) aux index des fragments HTML,
+//! autorisant des rotations dynamiques et indépendantes par route au rythme des ticks réactifs.
+//!
+//! ## Invariants Structurants & Sympathie Concurrente
+//!
+//! - **Topologie Statique par Construction :** La cartographie des clés (`HashMap<String, ArcSwap<PackHtmlIndex>>`) 
+//!   est figée à l'initialisation (`with_indices`). Après la phase de construction, **aucune insertion 
+//!   ni suppression** n'est tolérée sur la table des index (`indices` privé). Seules les atomicités internes 
+//!   portées par les `ArcSwap` ciblés subissent des permutations via `store()`.
+//! - **Absence de Verrous Globaux :** C'est l'immutabilité topologique de la table elle-même, combinée 
+//!   à l'atomicité de substitution des pointeurs (`arc-swap`), qui garantit une lecture concurrente totalement 
+//!   non bloquante, sans contention d'accès sur le *Hot Path* HTTP.
+//! - **Encapsulation de la Frontière de Crate (Inversion de Dépendance) :**
+//!   Pour rompre tout risque de cycle de dépendances circulaires au sein du workspace Cargo 
+//!   (`marius-render` $\leftrightarrow$ `marius-server`), la table de routage globale `ROUTE_TABLE` 
+//!   n'est pas injectée ni lue en tant que variable globale cachée. La fonction de démarrage `cold_start()` 
+//!   reçoit la table par paramètre (`&'static [RouteEntry]`). Les structures de description (`RouteEntry`, 
+//!   `IdSource`) résident ici pour être importées par les frontières supérieures sans inversion de couplage.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;

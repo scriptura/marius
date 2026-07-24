@@ -1,7 +1,5 @@
-// =============================================================================
-// marius-db-forge · codegen/collector.rs
-// Génération du Collector<MAX, WORDS> statique.
-// =============================================================================
+//! marius-db-forge · codegen/collector.rs
+//! Génération du Collector<MAX, WORDS> statique.
 
 use std::fmt::Write as _;
 

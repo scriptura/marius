@@ -1,9 +1,9 @@
 -- ==============================================================================
--- db/12_notify/01_triggers.sql
+-- db/12_events/01_notify.sql
 -- Triggers LISTEN/NOTIFY pour le pipeline réactif Marius
 -- Projet Marius · PostgreSQL 18
 --
--- Exécution : psql -U postgres -d marius -h localhost -f db/12_notify/01_triggers.sql
+-- Exécution : psql -U postgres -d marius -h localhost -f db/12_events/01_notify.sql
 --
 -- Ces triggers alimentent le Collector<MAX, WORDS> via pg_notify.
 -- Le payload est l'ID entier de la ligne modifiée (texte).

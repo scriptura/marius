@@ -1,26 +1,26 @@
-// merge_store — crates/shell/render/src/merge_store.rs
-//
-// cf. DFS-phase1-reactivite-cow.md §3.3
-//
-// Fusionne un ancien store.bin (mmap, via PackfileReader) avec un delta
-// (insertions/mises à jour depuis fetch_from_pg) et une liste d'ids
-// supprimés, en alimentant un PackfileBuilder neuf.
-//
-// Discipline : aucune dépendance I/O/réseau/async — opère uniquement sur
-// des slices déjà en mémoire. Les runs de lignes non touchées sont copiées
-// par memcpy pur (push_raw_run) ; seules les lignes du delta passent par
-// P::encode_varlena (coût déjà payé à l'extraction SQL, pas introduit ici).
-//
-// TODO(architecture) — placement de crate à réévaluer une fois le pipeline
-// Phase 1 terminé (Étapes 1-9). merge_store vit ici (crates/shell/render)
-// uniquement parce que PackfileBuilder y vit aussi, et que ce fichier a
-// besoin des deux pour rester zéro-copie. Conceptuellement, merge_store est
-// un algorithme sur le format store.bin — au même titre que PackfileReader
-// et PackfileBuilder — et pourrait légitimement migrer vers
-// crates/core/projection si PackfileBuilder y migre un jour (ou si un
-// découplage équivalent apparaît). Ne rien changer maintenant : ce
-// commentaire existe pour que la question soit reposée explicitement à la
-// fin du Contrat d'Implémentation, pas pour trancher aujourd'hui.
+// marius-render · crates/shell/render/src/merge_store.rs
+
+//! Algorithme de Fusion Binaire AOT (*Merge Store*).
+//!
+//! Exécute la réconciliation Copy-on-Write entre une projection binaire existante (`store.bin`)
+//! et un delta SQL transitoire (insertions, mutations, suppressions) au sein du pipeline réactif.
+//!
+//! ## Invariants & Performance CPU
+//!
+//! - **Isolât Mémoire $O(1)$ I/O :** Algorithme purement synchrone et in-memory. Zéro dépendance réseau,
+//!   zéro appel système, zéro primitive asynchrone (`async`). Opère exclusivement sur des tranches
+//!   de mémoire contiguous (`&[u8]`).
+//! - **Copies d'Invariants par Bloc (*memcpy*) :** Les plages d'enregistrements non affectées par le delta
+//!   sont transférées directement d'un tampon mémoire à l'autre via `PackfileBuilder::push_raw_run`.
+//!   Aucun coût d'encodage ni de désérialisation n'est payé pour la donnée inerte.
+//! - **Encodage Sélectif :** Seules les lignes mutées issues du delta passent par la passe d'encodage
+//!   des variables de longueur dynamique (`P::encode_varlena`).
+//!
+//! ## Remarque d'Architecture (TODO Dette d'Emplacement)
+//!
+//! Déplacé temporairement dans `crates/shell/render` en raison de sa dépendance directe envers
+//! `PackfileBuilder`. Candidat naturel à une migration AOT vers `crates/core/projection` 
+//! lorsque le constructeur de paquets sera complètement extrait du Shell.
 
 use bytemuck::Pod;
 use marius_projection::packfile_reader::PackfileReader;

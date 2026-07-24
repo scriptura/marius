@@ -1,14 +1,19 @@
-// =============================================================================
 // crates/shell/render/src/pack_html_index.rs
-//
-// Lecteur d'un packfile HTML — symétrique de PackfileReader<P> (store.bin),
-// format différent (footer, pas header — voir pack_html_format.rs et
-// specification-marius-render-shell.md §3/§5).
-//
-// Principe directeur (spec §5) : tout mmap se fait au démarrage du processus
-// (LiveRegistry::cold_start, Phase 2), jamais au premier accès. Aucune
-// requête HTTP ne doit payer le coût d'un mmap().
-// =============================================================================
+
+//! Lecteur $O(1)$ Zero-Copy pour le Packfile HTML (`pack.bin`).
+//!
+//! Représente l'opposé symétrique de `PackfileReader<P>` (dédié à `store.bin`).
+//! Il consomme le layout binaire inversé avec en-tête terminal (*footer-based*, cf. `pack_html_format.rs`).
+//!
+//! ## Invariants de Performance & Sympathie Mécanique
+//!
+//! - **Injection Mémoire Préalable ($O(1)$ Cold Start) :** La projection mémoire (*mmap*) est
+//!   effectuée exhaustivement à l'initialisation de l'application (`LiveRegistry::cold_start`).
+//!   Aucun appel système `mmap()` n'est toléré dans la boucle de traitement des requêtes HTTP (*Hot Path*).
+//! - **Recherche Binaire Zéro Allocation :** L'index d'entrées étant trié par identifiant (`ID ASC`) 
+//!   et caster en tranche mémoire contiguë (`&[PackfileEntry]`), la localisation d'un fragment HTML 
+//!   s'exécute par recherche dichotomique en $O(\log N)$ instructions CPU, sans traversée de pointeurs 
+//!   ni allocation dans le *heap*.
 
 use std::io;
 use std::os::unix::fs::FileExt;

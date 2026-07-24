@@ -1,14 +1,27 @@
 // crates/assets/src/scripts.rs
-//
-// Pipeline [scripts.components] — Phase 7. ES Modules natifs, pas de
-// bundling par concaténation : chaque module source devient un fichier
-// `.js` haché indépendant, les `import ... from '...'` sont réécrits pour
-// pointer vers les URLs publiques des autres modules déjà hachés.
-//
-// Le lexer bas niveau (`skip_line_comment`, `skip_block_comment`,
-// `find_unescaped_quote`, `JsPipelineError`) est `pub(crate)` : réutilisé
-// tel quel par `crate::service_worker`, sans duplication de logique
-// (Handoff §3 — voir le commentaire de `service_worker.rs`).
+
+//! Pipeline `[scripts.components]` (Phase 7).
+//!
+//! Assemble et hache les composants en **ES Modules natifs**.
+//! Aucune concaténation de *bundling* n'est effectuée : chaque module source devient un fichier
+//! `.js` haché et indépendant. Les directives `import` sont réécrites à la volée pour pointer
+//! vers les URLs publiques des dépendances. Le graphe ESM est résolu nativement par le navigateur au runtime.
+//!
+//! ## Invariants & Cost Discipline
+//!
+//! - **Zéro Dépendance Cargo Ajoutée :** L'implémentation repose entièrement sur un lexer d'octets
+//!   `&[u8]` fait main, une arène plate de graphe (`Vec` + indices), et `blake3` (déjà présent).
+//! - **Partage de Logique :** Le lexer bas niveau (`skip_line_comment`, `find_unescaped_quote`, `JsPipelineError`)
+//!   est `pub(crate)` afin d'être réutilisé tel quel par `crate::service_worker` (cf. *Handoff §3*).
+//!
+//! ## Ordre Strict d'Éxecution (Discipline Data-Oriented)
+//!
+//! Pour garantir que l'URL d'une dépendance soit connue avant la substitution de son importateur,
+//! le pipeline impose 3 passes séquentielles isolées :
+//!
+//! 1. `build_module_arena` : Exploration (I/O + Lexing) et construction du graphe.
+//! 2. `topological_order_leaves_first` : Tri topologique pur (zéro I/O, zéro allocation textuelle). Détecte les cycles.
+//! 3. `patch_and_hash_modules` : Patch textuel et écriture sur le disque (ordre garanti *feuilles $\rightarrow$ racines* par l'étape 2).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -19,38 +32,15 @@ use crate::js_minify::minify_javascript;
 use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
 use crate::resolve::resolve_asset_reference;
 
-// =============================================================================
-// Pipeline [scripts.components] — Phase 7. ES Modules natifs, pas de
-// bundling par concaténation : chaque module source devient un fichier
-// `.js` haché indépendant, les `import ... from '...'` sont réécrits pour
-// pointer vers les URLs publiques des autres modules déjà hachés — le
-// navigateur assemble le graphe lui-même via ESM natif au runtime, ce
-// pipeline ne fait QUE renommer les chemins et garantir l'ordre de hachage
-// (une dépendance doit être hachée avant le module qui l'importe, puisque
-// son URL finale doit apparaître dans le texte patché de ce dernier).
-//
-// Aucune nouvelle dépendance Cargo : lexer fait main (octets), arène plate
-// (Vec + indices), BLAKE3 déjà présent pour le hash — rien à ajouter au
-// Cargo.toml pour cette Phase.
-//
-// Trois passes séparées, dans cet ordre strict, jamais fusionnées :
-//   1. `build_module_arena`          — exploration (I/O + lex), construit
-//                                       le graphe.
-//   2. `topological_order_leaves_first` — tri topologique pur (aucune I/O,
-//                                       aucune allocation de contenu),
-//                                       détecte les cycles.
-//   3. `patch_and_hash_modules`      — écrit sur disque, dans l'ordre
-//                                       feuilles → racines imposé par (2).
-// Même discipline que la séparation Passe A / Passe B déjà en place pour
-// `[styles]` (Phase 3) : chaque passe a une seule responsabilité, aucune
-// ne mélange "lire le graphe" et "l'ordonner" et "le matérialiser".
-// =============================================================================
-
-/// Position (octet, longueur) d'un chemin d'import littéral dans son texte
-/// source — guillemets exclus. Alias nommé pour la lisibilité et pour
-/// satisfaire `clippy::type_complexity` sur les signatures qui l'imbriquent
-/// (`Option<(ImportSpan, usize)>`) ; la structure reste un simple tuple,
-/// aucune sémantique supplémentaire par rapport à `(usize, usize)`.
+/// Position `(octet_depart, longueur)` d'un chemin d'import littéral dans son texte source.
+///
+/// ## Emprise
+///
+/// Les coordonnées ciblent exclusivement le chemin, **guillemets exclus**.
+///
+/// Cet alias sert purement à la lisibilité et à apaiser le lint `clippy::type_complexity`
+/// lors d'imbrications (ex: `Option<(ImportSpan, usize)>`). Sémantiquement, cela reste
+/// un simple tuple sans surcoût.
 pub(crate) type ImportSpan = (usize, usize);
 
 #[derive(Debug)]

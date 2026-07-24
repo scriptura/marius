@@ -15,9 +15,10 @@
     <link rel="icon" type="image/svg+xml" href="{% asset favicon.svg %}">
     <link rel="shortcut icon" href="{% asset favicon.ico %}">
     <link rel="apple-touch-icon" sizes="180x180" href="{% asset apple-touch-icon.png %}">
-
+    <!--
     {% script %}
     <script src="{% asset leaflet.js %}" type="module"></script>{% endscript %}
+    -->
     {% script %}
     <script src="{% asset main.js %}" type="module"></script>{% endscript %}
     {% script %}
@@ -60,6 +61,9 @@
             <li><a href="/content/7"><svg class="icon-inline" aria-hidden="true">
                         <use href="{% asset utils.svg %}#border-none"></use>
                     </svg>Content 7</a></li>
+            <li><a href="/content/10"><svg class="icon-inline" aria-hidden="true">
+                        <use href="{% asset utils.svg %}#border-none"></use>
+                    </svg>Content 10</a></li>
             <li><a href="//github.com/scriptura/marius"><svg class="icon-inline" aria-hidden="true">
                         <use href="{% asset utils.svg %}#github"></use>
                     </svg>Repository</a></li>

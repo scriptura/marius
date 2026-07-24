@@ -1,106 +1,63 @@
-// =============================================================================
-// marius-fragment-forge — crates/forge/fragment-forge/src/lib.rs
-// Projet Marius · ADR-002 / no_std-attitude-within-marius.md
-//
-// Génère le corps de render() pour chaque table surveillée.
-// Appelé depuis crates/core/schema/build.rs au moment de la compilation.
-//
-// Produit pour chaque table surveillée :
-//   1. const {NAME}_STATIC_CAP  : somme exacte des octets HTML statiques
-//   2. const {NAME}_DYNAMIC_CAP : somme des largeurs maximales des champs (pire cas)
-//   3. fn render(record: &{Name}StorageRow, payload: &{Name}RenderPayload, buf: &mut String)
-//      → séquence de push_str (statique) + write_fmt (dynamique) + marius_html_escape (varlena)
-//      → zéro allocation intermédiaire (pas de String temporaire, pas de format!() alloué)
-//
-// ─── Taxonomie des structs générées ──────────────────────────────────────────
-//
-//   {Name}Row           : struct sqlx::FromRow, non-repr(C).
-//                         Types natifs + Option<T> pour nullable.
-//                         Varlena portées sous forme de Option<String> (allocation sqlx).
-//                         Rôle : transport depuis la base jusqu'au site de projection.
-//                         Durée de vie : éphémère (détruite après render()).
-//
-//   {Name}StorageRow    : struct #[repr(C)], layout bit-à-bit aligné sur le DDL.
-//                         Types fixed-length uniquement. Nullable → sentinel.
-//                         Varlena exclues (incompatibles avec repr(C) : fat pointer 16B).
-//                         Rôle : stockage en mémoire contiguë, cache CPU-friendly.
-//                         Durée de vie : persistante (vit dans les artéfacts en mémoire).
-//
-//   {Name}RenderPayload : struct éphémère de rendu, non-repr(C).
-//                         Champs varlena portés sous forme de &'a str (emprunt sans copie).
-//                         Rôle : assemblage des références varlena depuis la Row
-//                         pour les transmettre à render() sans réallocation.
-//                         Durée de vie : limitée à la durée de render() ('a).
-//
-// ─── Chemin critique (hot path) ──────────────────────────────────────────────
-//
-//   StorageRow (repr(C)) + RenderPayload (&'a str) → render() → buf: &mut String
-//
-//   Invariant no-realloc : buf.capacity() NE DOIT PAS changer pendant render().
-//   Vérification : tests unitaires test_{name}_no_realloc() alimentent
-//   les pires cas (valeurs maximales de chaque type) et assertent
-//   buf.capacity() == {NAME}_TOTAL_CAP après le render.
-//
-// ─── Politique d'escape HTML ─────────────────────────────────────────────────
-//
-//   Champ normal    : facteur × 5  (pire cas : '&' → '&amp;', 5 chars)
-//   Champ pre_escaped : facteur × 1  (tag COMMENT ON COLUMN 'marius:pre_escaped')
-//   Champ raw         : facteur × 1, ET jamais échappé au runtime (tag
-//                        'marius:raw' — HTML déjà constitué, injecté tel quel,
-//                        distinct de pre_escaped qui échappe quand même sans
-//                        rien avoir à échapper). Voir EscapePolicy.
-//
-//   La détection du tag est effectuée dans introspect.rs à l'introspection.
-//   Fragment-Forge reçoit l'information via VarlenField::escape_policy.
-//
-// ─── Contraintes (directives Session 5 / no_std-attitude) ───────────────────
-//
-//   - Zéro logique dans le template : aucun if/match dans le corps généré.
-//   - Zéro runtime de templating : le code généré est des appels directs
-//     push_str / write_fmt / marius_html_escape.
-//   - Capacité calculée statiquement : STATIC_CAP + DYNAMIC_CAP = borne supérieure exacte.
-//   - Les fonctions de ce module sont pure Rust (pas d'I/O, pas d'alloc dynamique propre).
-//
-// =============================================================================
-// I. Types internes
-// =============================================================================
+//! # Marius Fragment Forge
+//!
+//! Génération AOT (`build.rs`) du corps de `render()` pour les tables surveillées.
+//!
+//! Produit une séquence déterministe d'appels (`push_str`, `write_fmt`, `marius_html_escape`)
+//! s'exécutant sur une capacité statiquement bornée (`STATIC_CAP + DYNAMIC_CAP`),
+//! garantissant l'**absence totale de réallocation** sur le chemin critique.
+//!
+//! ## Taxonomie des Structures Générées
+//!
+//! | Structure | Layout | Rôle Mémoire & Invariants | Durée de vie |
+//! | :--- | :--- | :--- | :--- |
+//! | `{Name}Row` | Non-`repr(C)` | Transport `sqlx` (Base $\rightarrow$ Site de projection). Varlenas portées via `Option<String>` (allocations heap). | Éphémère (détruite après `render()`) |
+//! | `{Name}StorageRow` | `#[repr(C)]` | Stockage contigu en mémoire. Types à taille fixe uniquement (alignés sur DDL). Exclut les varlenas (incompatibles : *fat pointer* de 16 B). | Persistante (cache CPU-friendly) |
+//! | `{Name}RenderPayload` | Non-`repr(C)` | Struct de rendu éphémère. Emprunte les varlenas (`&'a str`) depuis la `Row` sans copie ni allocation. | Limitée à `render()` (`'a`) |
+//!
+//! ## Chemin Critique & Invariants (`no_std` attitude)
+//!
+//! ```text
+//! StorageRow (repr(C)) + RenderPayload (&'a str)  ==>  render()  ==>  buf: &mut String
+//! ```
+//!
+//! - **Garantie de capacité :** `buf.capacity()` doit rester strictement identique avant et après `render()`.
+//! - **Zéro logique dynamique :** Aucun branchement (`if`/`match`) dans le template généré.
+//! - **Borne exacte :** `STATIC_CAP` (octets fixes) + `DYNAMIC_CAP` (largeurs pires cas).
+//!
+//! ## Politique d'Échappement HTML (`EscapePolicy`)
+//!
+//! - `FieldPolicy::Normal` : Taille $\times 5$ (pire cas : `&` $\rightarrow$ `&amp;`).
+//! - `FieldPolicy::PreEscaped` : Taille $\times 1$ (Tag DDL `marius:pre_escaped`).
+//! - `FieldPolicy::Raw` : Taille $\times 1$, injecté sans passage par l'échappeur runtime (Tag DDL `marius:raw`).
+//!
+//! *Référence : ADR-002 (`no_std-attitude-within-marius.md`)*
 
-/// Catégorie d'un champ fixed-length pour le calcul de capacité dynamique.
+/// Catégorie d'un champ à taille fixe pour le calcul de capacité dynamique à la compilation.
 ///
-/// Chaque variante encode le pire cas d'affichage textuel du type correspondant.
-/// Ces bornes sont utilisées pour calculer DYNAMIC_CAP à la compilation (build.rs),
-/// garantissant l'absence de réallocation pendant render().
+/// Encodes les bornes pires cas d'affichage textuel pour déduire `DYNAMIC_CAP` dans `build.rs`.
 ///
-/// ─── Correspondances DDL → FieldKind ─────────────────────────────────────────
+/// ### Mappage DDL
+/// - `I64`  : `TIMESTAMPTZ`, `TIMESTAMP`, `BIGINT`
+/// - `I32`  : `INTEGER`, `INT`, `SERIAL`, `DATE`
+/// - `I16`  : `SMALLINT`
+/// - `Bool` : `BOOLEAN`
+/// - `F32`  : `REAL`
+/// - `F64`  : `DOUBLE PRECISION`
 ///
-///   TIMESTAMPTZ, TIMESTAMP, BIGINT → I64
-///   INTEGER, INT, SERIAL, DATE     → I32
-///   SMALLINT                       → I16
-///   BOOLEAN                        → Bool
-///   REAL                           → F32
-///   DOUBLE PRECISION               → F64
-///
-/// Tous les types varlena (TEXT, VARCHAR, BYTEA, JSONB…) sont exclus :
-/// leur capacité est portée par VarlenField, pas par FieldKind.
+/// *Note : Les types varlena (`TEXT`, `VARCHAR`, `JSONB`) sont gérés séparément via `VarlenField`.*
 #[derive(Debug, Clone, Copy)]
 pub enum FieldKind {
-    /// INT8 / BIGINT / TIMESTAMPTZ / TIMESTAMP
-    /// i64::MIN = -9223372036854775808 = 20 caractères
+    /// `i64::MIN` = `-9223372036854775808` (20 chars)
     I64,
-    /// INT4 / INTEGER / SERIAL / DATE (days_from_CE)
-    /// i32::MIN = -2147483648 = 11 caractères
+    /// `i32::MIN` = `-2147483648` (11 chars)
     I32,
-    /// INT2 / SMALLINT
-    /// i16::MIN = -32768 = 6 caractères
+    /// `i16::MIN` = `-32768` (6 chars)
     I16,
-    /// BOOLEAN
-    /// "false" = 5 caractères (> "true" = 4)
+    /// `"false"` (5 chars)
     Bool,
-    /// REAL / FLOAT4
-    /// représentation flottante pire cas : "-3.40282347e38" ≈ 14 caractères
+    /// Pire cas flottant 32-bit (`-3.40282347e38` $\approx$ 14 chars)
     F32,
-    /// DOUBLE PRECISION / FLOAT8
-    /// représentation flottante pire cas ≈ 24 caractères
+    /// Pire cas flottant 64-bit ($\approx$ 24 chars)
     F64,
 }
 
@@ -238,6 +195,16 @@ pub struct VarlenField {
     /// couplés `pre_escaped`/`raw` dont l'état simultané `true`/`true` serait
     /// une aberration sémantique sans le typage fermé). Voir `EscapePolicy`.
     pub escape_policy: EscapePolicy,
+    /// true si ce champ est un contenu volumineux (tag SQL
+    /// `COMMENT ON COLUMN ... IS 'marius:large_content'`), destiné à devenir
+    /// un `Segment::Borrowed` autonome plutôt qu'à être concaténé dans le
+    /// buffer partagé — CONTRAT-implementation-projection-segmentee.md,
+    /// Étape 1. Implique toujours `escape_policy == EscapePolicy::Raw` (un
+    /// champ segmenté est emprunté zéro-copie, incompatible avec un passage
+    /// par `marius_html_escape`) — invariant vérifié à la construction dans
+    /// introspect.rs, pas ici (VarlenField reste une structure de données
+    /// passive, sans logique de validation).
+    pub is_segment: bool,
     /// true si la colonne DDL est nullable (Option<String> dans VarlenOwned).
     /// En v1, toujours true (LEFT JOIN produit systématiquement Option).
     /// Réservé v2 : champ NOT NULL → String directe, court-circuite l'Option.
@@ -246,6 +213,8 @@ pub struct VarlenField {
     /// Utile quand la borne théorique est trop conservative pour un champ donné.
     /// Sans effet si `max_len` est également `None` — il n'y a alors rien à
     /// surcharger, `max_escaped_len()` retourne None indépendamment de ce champ.
+    /// Sans effet non plus si `is_segment == true` : un champ segmenté ne
+    /// contribue jamais à `DYNAMIC_CAP`, indépendamment de cette surcharge.
     pub max_escaped_len_override: Option<usize>,
 }
 
@@ -285,14 +254,25 @@ impl VarlenField {
     /// Longueur maximale après escape HTML, en octets — si elle est connue.
     ///
     /// Composante varlena de DYNAMIC_CAP.
-    /// Priorité : max_escaped_len_override > escape_policy.
+    /// Priorité : is_segment > max_escaped_len_override > escape_policy.
     ///
-    /// Retourne `None` si `max_len` est `None` (ADR-007) : il n'existe pas de
-    /// borne à propager, quelle que soit la valeur de `max_escaped_len_override`
-    /// ou `escape_policy`. L'appelant (resolve_and_measure) est responsable de
-    /// traiter ce `None` selon la table de vérité Hot/Cold/Erreur — cette
-    /// méthode ne décide jamais d'une valeur de repli.
+    /// Un champ segmenté (`is_segment == true`, CONTRAT-implementation-
+    /// projection-segmentee.md Étape 1) ne contribue jamais à DYNAMIC_CAP —
+    /// il ne traverse jamais `buf` — sauf s'il n'a aucune borne connue
+    /// (`max_len == None`), auquel cas il reste soumis à la même table de
+    /// vérité Hot/Cold/Erreur que tout autre champ (ADR-007) : cette méthode
+    /// retourne alors `None`, à charge de `resolve_and_measure` de lever
+    /// `UnboundedField` si le champ est référencé.
+    ///
+    /// Correction (23/07/2026) : la phrase précédente affirmait à tort que
+    /// `max_escaped_len_override` était sans effet quand `max_len` est
+    /// `None` — faux, le code retourne l'override avant même de consulter
+    /// `max_len`. Comportement préexistant, non modifié ici ; seule la
+    /// documentation était incorrecte.
     pub fn max_escaped_len(&self) -> Option<usize> {
+        if self.is_segment {
+            return self.max_len.map(|_| 0);
+        }
         if let Some(override_len) = self.max_escaped_len_override {
             return Some(override_len);
         }
@@ -1817,7 +1797,7 @@ pub fn resolve_and_measure<'src>(
 #[cfg(test)]
 mod tests_phase_2_1 {
     use super::{
-        AssetLookup, FieldKind, FieldSpec, FlatPageToken, ResolverError, SchemaIndex,
+        AssetLookup, EscapePolicy, FieldKind, FieldSpec, FlatPageToken, ResolverError, SchemaIndex,
         TemplateMetrics, VarlenField, resolve_and_measure,
     };
 
@@ -2008,6 +1988,7 @@ mod tests_phase_2_1 {
             ref_table: "joined".to_string(),
             max_len: None,
             escape_policy: EscapePolicy::Escaped,
+            is_segment: false,
             nullable: true,
             max_escaped_len_override: None,
         }
@@ -2020,6 +2001,7 @@ mod tests_phase_2_1 {
             ref_table: "joined".to_string(),
             max_len: Some(max_len),
             escape_policy: EscapePolicy::Escaped,
+            is_segment: false,
             nullable: true,
             max_escaped_len_override: None,
         }
@@ -2862,7 +2844,8 @@ mod tests_hoist_scripts {
 #[cfg(test)]
 mod tests_phase_2_2 {
     use super::{
-        FieldKind, FieldSpec, FlatPageToken, SchemaIndex, VarlenField, generate_aot_snippet,
+        EscapePolicy, FieldKind, FieldSpec, FlatPageToken, SchemaIndex, VarlenField,
+        generate_aot_snippet,
     };
 
     fn make_schema<'a>(fixed: &'a [FieldSpec], varlena: &'a [VarlenField]) -> SchemaIndex<'a> {
@@ -2894,6 +2877,7 @@ mod tests_phase_2_2 {
             ref_table: "test_table".to_string(),
             max_len: Some(1000),
             escape_policy: EscapePolicy::Escaped,
+            is_segment: false,
             nullable: true,
             max_escaped_len_override: None,
         }];
@@ -2972,6 +2956,7 @@ mod tests_phase_2_2 {
             ref_table: "body".to_string(),
             max_len: Some(32_000),
             escape_policy: EscapePolicy::Raw,
+            is_segment: false,
             nullable: true,
             max_escaped_len_override: None,
         }];

@@ -1,10 +1,32 @@
 // crates/assets/src/service_worker.rs
-//
-// Pipeline [service_worker] — Handoff §3. `serviceWorker.js` est traité
-// comme un gabarit textuel déterministe, pas un AST. Réutilise le lexer
-// bas niveau de `crate::scripts` (`skip_line_comment`, `skip_block_comment`,
-// `find_unescaped_quote`) sans dupliquer sa logique — cf. commentaire de
-// `scripts.rs`.
+
+//! Pipeline `[service_worker]` (Handoff §3).
+//!
+//! Traite `serviceWorker.js` comme un gabarit textuel déterministe, sans allouer d'AST.
+//! Réutilise le lexer bas niveau sur octets de `crate::scripts` (`skip_line_comment`,
+//! `skip_block_comment`, `find_unescaped_quote`) pour ne pas dupliquer la logique de parsing.
+//!
+//! ## Modèle d'Auteurship (Zero-AST)
+//!
+//! Chaque littéral de chaîne du fichier est scanné, et réécrit en place s'il correspond à un
+//! chemin d'asset local. Le principe est identique au modèle déjà en place pour `url()` ou
+//! `icons[].src` : le développeur écrit et structure son code lui-même, l'outil se contente
+//! de réécrire les chemins locaux en URLs hachées.
+//!
+//! Le pipeline ne régénère **jamais** de tableau de ressources de manière dynamique : il
+//! procède uniquement par substitution de texte.
+//!
+//! ## Ordonnancement & Dépendance au Manifeste Complet
+//!
+//! C'est le **seul pipeline** de ce binaire à dépendre du **manifeste complet** (toutes
+//! les clés issues de tous les pipelines), et non du seul `AssetUrlRegistry` (qui est
+//! structurellement limité aux sorties de `[static.verbatim]`).
+//!
+//! - **Exécution terminale :** Doit impérativement s'exécuter en tout dernier dans `main()` (§3.4)
+//!   une fois tous les autres assets hachés.
+//! - **Adaptateur de registre :** Une vue éphémère `AssetUrlRegistry` est dérivée du manifeste
+//!   complet juste avant l'appel afin de pouvoir réutiliser la fonction `resolve_asset_reference`
+//!   telle quelle, sans modification.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -19,23 +41,7 @@ use crate::scripts::{
     JsPipelineError, find_unescaped_quote, skip_block_comment, skip_line_comment,
 };
 
-// =============================================================================
-// Pipeline [service_worker] — Handoff §3. `serviceWorker.js` est traité
-// comme un gabarit textuel déterministe, pas un AST : chaque littéral de
-// chaîne du fichier est scanné, et réécrit en place s'il ressemble à un
-// chemin d'asset local — exactement le modèle d'auteurship déjà en place
-// pour `{% asset %}`/`url()`/`icons[].src` ("je liste mes ressources
-// moi-même, l'outil réécrit chaque chemin"), jamais une régénération du
-// tableau depuis le manifeste.
-//
-// Seul pipeline de ce binaire à dépendre du MANIFESTE COMPLET (toutes les
-// clés, tous pipelines confondus), pas seulement d'`AssetUrlRegistry`
-// (peuplé exclusivement par [static.verbatim], structurellement plus
-// étroit) — d'où son câblage en tout dernier dans `main()` (§3.4). Une
-// vue `AssetUrlRegistry` est dérivée du manifeste juste avant l'appel,
-// pour réutiliser `resolve_asset_reference` sans le modifier.
-// =============================================================================
-
+/// Erreurs spécifiques au pipeline du Service Worker.
 #[derive(Debug)]
 pub(crate) enum ServiceWorkerError {
     Io(PathBuf, std::io::Error),

@@ -1,7 +1,5 @@
-// =============================================================================
-// marius-db-forge · crates/forge/db-forge/src/introspect.rs
-// Requêtes SQLx d'introspection pg_catalog / information_schema / pg_stats.
-// =============================================================================
+//! marius-db-forge · crates/forge/db-forge/src/introspect.rs
+//! Requêtes SQLx d'introspection pg_catalog / information_schema / pg_stats.
 
 use sqlx::Row as _;
 
@@ -163,12 +161,18 @@ pub async fn fetch_max_id(
 ///   validation est différée à la résolution (ResolverError::UnboundedField
 ///   si jamais référencé sans borne).
 ///
-/// ─── Politique escape_policy (EscapePolicy) ──────────────────────────────────
+/// ─── Politique escape_policy (EscapePolicy) + is_segment ────────────────────
 ///
 ///   Si COMMENT ON COLUMN ... IS 'marius:pre_escaped' → PreEscaped, facteur 1,
 ///     échappé quand même au runtime (défense en profondeur).
 ///   Si COMMENT ON COLUMN ... IS 'marius:raw' → Raw, facteur 1, JAMAIS échappé
 ///     au runtime (HTML déjà constitué — CONTRAT-implementation-varlena-raw.md).
+///   Si COMMENT ON COLUMN ... IS 'marius:large_content' → Raw + is_segment,
+///     contribution nulle à DYNAMIC_CAP, jamais concaténé dans buf — devient
+///     un Segment::Borrowed autonome (CONTRAT-implementation-projection-
+///     segmentee.md). Tag déclarant une propriété métier (contenu volumineux),
+///     pas un mécanisme — le choix de la stratégie de rendu appartient au
+///     générateur.
 ///   Sinon → Escaped, facteur VarlenField::HTML_ESCAPE_FACTOR (6).
 pub async fn fetch_varlena_cols(
     pool: &sqlx::PgPool,
@@ -212,11 +216,35 @@ pub async fn fetch_varlena_cols(
         // (enum fermé) remplace l'ancien bool pre_escaped isolé — mutuellement
         // exclusif de facto, `description` ne peut être égal qu'à une seule
         // chaîne à la fois.
-        let escape_policy = match description.trim() {
-            "marius:pre_escaped" => EscapePolicy::PreEscaped,
-            "marius:raw" => EscapePolicy::Raw,
-            _ => EscapePolicy::Escaped,
+        //
+        // CONTRAT-implementation-projection-segmentee.md, Étape 1 :
+        // 'marius:large_content' déclare une PROPRIÉTÉ métier (ce champ est un
+        // contenu volumineux), pas un mécanisme — c'est au générateur de
+        // choisir la stratégie de rendu (aujourd'hui : projection segmentée,
+        // Segment::Borrowed zéro-copie). Implique toujours EscapePolicy::Raw :
+        // un champ segmenté est par nature emprunté zéro-copie, incompatible
+        // avec un passage par marius_html_escape (qui exige de recopier
+        // caractère par caractère dans buf).
+        let (escape_policy, is_segment) = match description.trim() {
+            "marius:pre_escaped" => (EscapePolicy::PreEscaped, false),
+            "marius:raw" => (EscapePolicy::Raw, false),
+            "marius:large_content" => (EscapePolicy::Raw, true),
+            _ => (EscapePolicy::Escaped, false),
         };
+
+        // Garde-fou défensif : cette construction ne devrait jamais produire
+        // is_segment=true avec autre chose que Raw (les deux sont fixés
+        // ensemble ci-dessus, dans la même branche de match) — vérifié quand
+        // même explicitement, incohérence interne à signaler fort plutôt qu'à
+        // laisser passer silencieusement si ce match venait à être modifié
+        // sans respecter l'invariant.
+        if is_segment && escape_policy != EscapePolicy::Raw {
+            panic!(
+                "DB-Forge [{schema}.{table}.{name}]: incohérence interne — \
+                 is_segment=true sans EscapePolicy::Raw. Un champ segmenté \
+                 doit toujours être Raw (emprunté zéro-copie, jamais échappé)."
+            );
+        }
 
         // ── Résolution de max_len — Option<usize>, jamais de fallback ─────────
         let max_len: Option<usize> = if typmod > 4 {
@@ -290,17 +318,19 @@ pub async fn fetch_varlena_cols(
         // Seulement si une borne existe — un champ non borné n'a rien à valider
         // ici ; sa validation est différée à resolve_and_measure (Étape 3).
         //
-        // TODO (identifié 22/07/2026, non planifié) : restaurer l'invariant
-        // cache L1 pour les composants portant un varlena volumineux
-        // (content.body : 200 000B) nécessiterait, à terme, un découpage en
-        // chunks côté PostgreSQL — directement dans la table (colonne
-        // segmentée) ou via un mécanisme de triggers de fragmentation — plutôt
-        // que de laisser grossir {NAME}_TOTAL_CAP au-delà de ce que le
-        // buffer unique réutilisé (manifest-reactive-projection.md §5) peut
-        // absorber sans dégrader la localité de cache. Aucune conception
-        // engagée à ce jour — à traiter comme un Contrat d'Implémentation
-        // séparé le moment venu, pas comme un ajustement de seuil.
-        if let Some(n) = max_len {
+        // TODO du 22/07/2026 — RÉSOLU par CONTRAT-implementation-projection-
+        // segmentee.md (session du 23/07/2026) : un champ marius:large_content
+        // (is_segment == true) ne traverse jamais buf, donc ce seuil ne
+        // s'applique pas à lui — cf. branche dédiée ci-dessous. Le TODO
+        // d'origine évoquait un chunking côté PostgreSQL ; la décision retenue
+        // (ADR-010) a été de résoudre au niveau du rendu (projection
+        // segmentée), pas du stockage — TOAST gère déjà le stockage physique
+        // de champs volumineux, cf. ADR-010 §2.
+        if is_segment {
+            // Contribution nulle par construction (VarlenField::max_escaped_len()
+            // renvoie Some(0) pour is_segment == true) — aucune vérification de
+            // seuil n'a de sens ici, le champ ne dimensionne jamais buf.
+        } else if let Some(n) = max_len {
             // Étape 3 (CONTRAT-implementation-varlena-raw.md) : PreEscaped et
             // Raw partagent le même facteur de capacité (1) — la différence
             // entre les deux n'est jamais dans ce calcul, seulement dans le
@@ -315,7 +345,9 @@ pub async fn fetch_varlena_cols(
                 panic!(
                     "DB-Forge [{schema}.{table}.{name}]: \
                      max_escaped_len ({max_escaped}B) > 64 KB. \
-                     Réduire la contrainte VARCHAR/CHECK ou exclure du listing render."
+                     Réduire la contrainte VARCHAR/CHECK, ou tagger la colonne \
+                     'marius:large_content' si le contenu doit légitimement \
+                     dépasser cette borne (projection segmentée)."
                 );
             }
         }
@@ -359,6 +391,7 @@ pub async fn fetch_varlena_cols(
             ref_table: table.to_string(),
             max_len,
             escape_policy,
+            is_segment,
             nullable: true,
             max_escaped_len_override: None,
         });
@@ -597,5 +630,37 @@ mod integration {
             validate_layout(&cols, comp.intent_density)
                 .unwrap_or_else(|msg| panic!("{}.{} : {}", comp.schema, comp.table, msg));
         }
+    }
+
+    /// Non-régression du passage au match tri-état (CONTRAT-implementation-
+    /// projection-segmentee.md, Étape 1) : content.body.content porte
+    /// aujourd'hui le tag 'marius:raw' (posé par le Contrat varlena-raw,
+    /// migration 04) — PAS ENCORE 'marius:large_content' (Étape 7 de CE
+    /// Contrat, non exécutée à ce jour). Le nouveau match doit continuer à
+    /// résoudre ce cas exactement comme avant : Raw, is_segment == false.
+    /// À METTRE À JOUR après l'Étape 7 : is_segment devra alors être true.
+    #[tokio::test]
+    #[ignore]
+    async fn content_body_content_is_raw_not_yet_segment() {
+        let pool = connect().await;
+        let fields = fetch_varlena_cols(&pool, "content", "body")
+            .await
+            .expect("fetch_varlena_cols échoué pour content.body");
+
+        let content_field = fields
+            .iter()
+            .find(|f| f.name == "content")
+            .expect("colonne 'content' absente de content.body");
+
+        assert_eq!(
+            content_field.escape_policy,
+            EscapePolicy::Raw,
+            "content.body.content devrait rester Raw (tag marius:raw, migration 04)"
+        );
+        assert!(
+            !content_field.is_segment,
+            "content.body.content ne devrait pas encore être is_segment=true \
+             (Étape 7 de CONTRAT-implementation-projection-segmentee.md non exécutée)"
+        );
     }
 }

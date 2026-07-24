@@ -1,6 +1,20 @@
 // crates/assets/src/verbatim.rs
-//
-// Pipeline [static.verbatim] — copie brute, hachage, entrée de manifeste.
+
+//! Pipeline `[static.verbatim]`.
+//!
+//! Pipeline *pass-through* strict : copie brute, génération d'empreinte AOT (hachage)
+//! et enregistrement au manifeste.
+//!
+//! ## Invariants & Data Layout
+//!
+//! - **Zéro Transformation :** L'empreinte mémoire de la donnée source est projetée 1:1
+//!   vers la cible. L'intégrité du flux d'octets est absolue ; seule la métadonnée
+//!   (le nom de fichier) est mutée pour y injecter le hash BLAKE3.
+//! - **Adressage Logique Plat $O(1)$ :** La clé d'accès dans le registre (`AssetUrlRegistry`)
+//!   correspond exclusivement au nom du fichier physique (ex: `notoSans-Regular.woff2`),
+//!   ignorant toute l'arborescence relative. Cette topologie plate élimine les cycles CPU
+//!   dédiés à la résolution de chemins au runtime et empêche structurellement le couplage
+//!   des assets à une hiérarchie de dossiers arbitraire.
 
 use std::collections::HashMap;
 use std::fs;
@@ -10,15 +24,11 @@ use crate::manifest::{
     AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension, path_to_slash,
 };
 
-// =============================================================================
-// Pipeline [static.verbatim] — copie brute, hachage, entrée de manifeste.
-//
-// Aucune transformation de contenu : le fichier source EST le fichier
-// servi, au hash près dans le nom. Clé logique = nom de fichier seul (pas
-// le chemin relatif complet) — convention déjà exercée par
-// {% asset notoSans-Regular.woff2 %} dans les templates réels.
-// =============================================================================
-
+/// Exécute le pipeline verbatim sur un répertoire source statique.
+///
+/// Parcourt la structure source de manière déterministe, calcule les empreintes,
+/// duplique les buffers vers le point de montage de build, et retourne un registre
+/// plat garantissant un accès direct aux URLs publiques.
 pub(crate) fn run_verbatim_pipeline(
     theme_dir: &Path,
     build_root: &Path,

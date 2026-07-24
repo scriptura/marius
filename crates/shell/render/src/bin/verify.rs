@@ -1,13 +1,21 @@
-// Exécuté manuellement après marius-dump : cargo run --bin marius-verify
-// Valide la lisibilité et la cohérence structurelle du store.bin.
-// Ne dépend pas de DATABASE_URL — lit uniquement le fichier binaire.
-//
-// Invariants vérifiés :
-//   INV-R1 : magic == b"MARIUSDB", version == 1.
-//   INV-R2 : taille fichier == varlena_heap_section + varlena_heap_len.
-//   INV-R3 : stride == sizeof(ContentCoreStorageRow).
-//   INV-R4 : id_index est trié ASC (invariant du dumper).
-//   INV-R5 : chaque VarlenSlot pointe dans les bornes du heap ou est sentinel.
+// marius-render · crates/shell/render/src/bin/marius_verify.rs
+
+//! Outil de validation de cohérence binaire AOT (`marius-verify`).
+//!
+//! Exécuté hors ligne après la passe d'extraction (`marius-dump`). Valide la lisibilité,
+//! la topologie mémoire et l'intégrité structurelle du fichier `store.bin`.
+//!
+//! ## Invariants & Topologie Physique
+//!
+//! - **Indépendance I/O :** Aucune connexion base de données (`DATABASE_URL`) requise. Lit exclusivement
+//!   la projection binaire stockée sur disque.
+//! - **Validation Stricte des Formats (`INV-R1` à `INV-R5`) :**
+//!   - `INV-R1` : Signature magique (`b"MARIUSDB"`) et version de schéma (`1`).
+//!   - `INV-R2` : Intégrité de la taille totale du fichier ($\text{offset\_heap} + \text{taille\_heap}$).
+//!   - `INV-R3` : Alignement fixe du pas (*stride*) ($=\text{sizeof}(\text{ContentCoreStorageRow})$).
+//!   - `INV-R4` : Monotonie stricte de l'index des identifiants (`id_index` trié `ASC`).
+//!   - `INV-R5` : Étanchéité de la heap dynamique : chaque `VarlenSlot` est soit *sentinel*,
+//!     soit contenu dans les bornes strictes de la section varlen.
 
 use std::fs;
 use std::mem;

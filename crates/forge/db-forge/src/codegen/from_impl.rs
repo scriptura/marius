@@ -1,7 +1,5 @@
-// =============================================================================
-// marius-db-forge · codegen/from_impl.rs
-// Génération de From<{Name}Row> for {Name}StorageRow.
-// =============================================================================
+//!marius-db-forge · codegen/from_impl.rs
+//! Génération de From<{Name}Row> for {Name}StorageRow.
 
 use std::fmt::Write as _;
 

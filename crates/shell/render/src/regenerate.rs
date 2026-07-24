@@ -1,50 +1,30 @@
-// =============================================================================
-// crates/shell/render/src/regenerate.rs
-//
-// Interface d'écriture — specification-marius-render-shell.md §7.
-// regenerate_and_swap<P> est l'unique point d'entrée AOT-compliant pour
-// produire ou remplacer un packfile HTML : dump initial et Dispatcher
-// l'appellent tous les deux, aucun des deux ne le contient (roadmap, Phase 4
-// — "il n'appartient à aucun des deux fichiers existants").
-//
-// Trois divergences entre le pseudocode littéral de la spec §7 et le code
-// réellement compilé des phases précédentes — documentées ici plutôt que
-// silencieuses, même discipline que Phase 3 sur handlers.rs :
-//
-//   1. P::fetch_from_pg n'existe pas sur le trait Projection réel.
-//      batch_renderer.rs (StubProjection, compilé Phase 1) et dispatcher.rs
-//      (P::fetch_batch(&self.pool, &ids), compilé) confirment tous deux que
-//      la méthode s'appelle fetch_batch.
-//
-//   2. write_packfile_footer(&mut writer, &full_index) — la spec omet
-//      blob_len. La signature réelle (pack_html_format.rs, Phase 1,
-//      compilée) est write_packfile_footer(writer, blob_len, index).
-//
-//   3. registry.indices[packfile_key].store(...) suppose le champ `indices`
-//      public. Il est privé — résolu via registry.store(packfile_key,
-//      Arc::new(new_index)), la méthode publique existante.
-//
-//   4. [PHASE 4.2] Réécriture complète → fusion incrémentale.
-//      handoff-phase-4.2.md, point 0 : `ids` passé à cette fonction n'est
-//      plus l'ensemble complet attendu dans le packfile, mais le DELTA du
-//      tick courant (Collector::flush()) — entités insérées, modifiées ou
-//      supprimées, jamais l'ensemble. L'ancienne stratégie (réécriture
-//      complète du fichier à chaque appel) perdait silencieusement toute
-//      entité non touchée par le tick. Cette version fusionne le delta
-//      contre l'ancien packfile via `sweep::merge_sweep`, au lieu de
-//      reconstruire le fichier en entier.
-//
-//      Conséquence structurelle sur cette fonction : elle reste `async`
-//      (P::fetch_batch est .await-é, sqlx n'a pas de variante bloquante —
-//      aucun pont Tokio disponible ni souhaité dans cette session pour ce
-//      problème), mais toute la plomberie I/O physique qui suit (ftruncate,
-//      mmap, merge_sweep, align8, footer, fsync/msync, rename) est isolée
-//      dans `apply_merge_io_sync`, une fonction privée strictement
-//      synchrone, zéro dépendance Tokio. C'est ce noyau, et lui seul, qu'un
-//      futur `spawn_blocking` (Phase 4.3) encapsulera — signature de
-//      `apply_merge_io_sync` conçue pour rester inchangée par cet
-//      encapsulage.
-// =============================================================================
+// marius-render · crates/shell/render/src/regenerate.rs
+
+//! Interface d'Écriture AOT & Régénération des Packfiles HTML (`regenerate_and_swap`).
+//!
+//! Exécute la seconde étape du pipeline réactif (*Étage 2*) : lit le `store.bin`
+//! fraîchement mis à jour par l'Étage 1 (`ingest_and_swap`), applique les deltas
+//! de rendu HTML, et permute atomiquement l'index de lecture (`LiveRegistry`).
+//!
+//! ## Evolution de Design : Couplage au Pipeline CoW (Phase 4.2)
+//!
+//! - **Stratégie de Fusion Incrementale (*Sweep Merge*) :** Les identifiants transmis (`ids`) 
+//!   représentent exclusivement le delta d'un tick (flush du `Collector`), et non l'intégralité 
+//!   de la table. Au lieu de réécrire le packfile HTML de zéro, le pipeline fusionne 
+//!   le delta rendu avec l'ancien packfile via `sweep::merge_sweep`. Les entités inertes sont 
+//!   conservées intactes par copie de bloc sans passer par le pipeline de rendu.
+//! - **Découpage Strict Asynchrone / Synchrone :**
+//!   - `regenerate_and_swap` : Enveloppe `async` dédiée aux I/O asynchrones (requêtes SQLx via `P::fetch_batch`).
+//!   - `apply_merge_io_sync` : Noyau d'exécution physique **strictement synchrone**, sans dépendance envers le runtime Tokio.
+//!     Isole le cycle complet d'I/O disque (`ftruncate`, *mmap*, `merge_sweep`, alignement, footer, `fsync`/`msync`, `rename`).
+//!     Cette isolation prépare l'encapsulation directe dans un thread dédié (`spawn_blocking`) sans altérer la signature métier.
+//!
+//! ## Écarts Documentés par Rapport à la Spécification
+//!
+//! 1. **Nommage de la Récupération :** Utilise `P::fetch_batch` (nom réel sur le trait `Projection`) au lieu de `P::fetch_from_pg`.
+//! 2. **Signature du Footer :** Incorpore explicitement `blob_len` dans `write_packfile_footer(writer, blob_len, index)`.
+//! 3. **Encapsulation du Registre :** La mise à jour du registre de lecture s'effectue via l'interface publique
+//!    `registry.store(packfile_key, Arc::new(new_index))` au lieu de manipuler directement le champ interne `indices`.
 
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};

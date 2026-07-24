@@ -1,37 +1,28 @@
 // marius-render · crates/shell/render/src/ingest_and_swap.rs
-//
-// cf. DFS-phase1-reactivite-cow.md §3.4, §6
-//
-// Étage 1 du pipeline réactif : fetch_from_pg(pool, ids) → merge_store →
-// écriture .tmp + fsync → VALIDATION → rename atomique → swap StoreRegistry.
-//
-// ── Correction au design gelé (DESIGN-store-registry.md §6), documentée ici
-// plutôt que silencieusement appliquée ──────────────────────────────────────
-// §6 prévoyait une réouverture de validation APRÈS le rename. Implémentation
-// réelle : la validation a lieu AVANT le rename, sur le fichier .tmp. Sur un
-// rename same-filesystem (garanti par construction : .tmp et le fichier
-// final partagent le même répertoire), rename() est purement une opération
-// de métadonnées — un fichier qui valide avant rename valide identiquement
-// après. Valider avant élimine toute fenêtre, même théorique, où un fichier
-// non revalidé pourrait se trouver au chemin canonique — strictement plus
-// sûr, y compris pour la reprise après crash (cold_start ne peut jamais
-// tomber sur un fichier renommé mais non validé). Le handle de lecture déjà
-// obtenu par cette validation est réutilisé pour le swap : rename() ne
-// change pas l'inode, donc ce handle reste correct après coup — pas de
-// second open().
-//
-// ── Transactionnalité des effets de bord — analyse ─────────────────────────
-// Tout échec avant le rename (fetch SQL, écriture, fsync, validation) laisse
-// store.bin ET le StoreRegistry strictement inchangés — le fichier .tmp est
-// nettoyé au mieux (best-effort), jamais exposé. Le seul état intermédiaire
-// possible est la fenêtre entre rename() (réussi) et swap() (pas encore
-// exécuté) : le fichier sur disque est déjà la nouvelle version, le
-// StoreRegistry sert encore l'ancienne. Cette fenêtre est sans risque —
-// fetch_batch reste cohérent (ancienne version, valide) pendant sa durée, et
-// un crash pendant cette fenêtre laisse un état repartable : au redémarrage,
-// cold_start lit le fichier déjà renommé (donc déjà validé), jamais un état
-// torn. Il n'existe donc aucun scénario d'échec qui expose une donnée
-// invalide, que ce soit en mémoire ou sur disque.
+
+//! Pipeline Réactif — Étage 1 (Ingestion & Copy-on-Write).
+//!
+//! Orchestre la mise à jour transactionnelle des projections. 
+//! Ce module exécute la Voie d'Extraction (*Cold Path*) de manière asynchrone 
+//! sans bloquer la Voie d'Exécution (*Hot Path*).
+//!
+//! **Séquence :** `fetch_from_pg` $\rightarrow$ `merge_store` $\rightarrow$ écriture `.tmp` + `fsync` $\rightarrow$ VALIDATION $\rightarrow$ `rename` atomique $\rightarrow$ Swap mémoire (`StoreRegistry`).
+//!
+//! ## Invariant d'I/O : Validation Pré-Rename (Sympathie POSIX)
+//!
+//! *Correction par rapport au design documenté initial (§6) : la validation s'effectue sur le fichier `.tmp` **avant** la rotation.*
+//!
+//! - **Mutation de Métadonnées :** Le fichier `.tmp` et la cible partageant le même volume (*same-filesystem*), l'appel système `rename()` est une pure opération de métadonnées. L'inode sous-jacent est préservé.
+//! - **Économie de Syscall (Zéro Re-Open) :** Le descripteur de fichier ouvert pour la passe de validation est recyclé pour le swap en mémoire, évitant un second `open()` redondant.
+//! - **Verrouillage de l'État Disque :** Valider avant le renommage garantit physiquement qu'aucun fichier corrompu ou illisible ne peut atteindre le chemin canonique, éliminant tout risque lors d'un `cold_start`.
+//!
+//! ## Modèle Transactionnel (Crash-Safety)
+//!
+//! L'architecture garantit un état mémoire et disque toujours cohérent, sans verrouillage global :
+//!
+//! - **Échec Pré-Rename :** Toute défaillance (réseau, disque, I/O) laisse le binaire `store.bin` et le `StoreRegistry` existants strictement inchangés. Le `.tmp` est abandonné.
+//! - **Fenêtre d'Incohérence Disque/Mémoire :** Si le processus s'interrompt entre le `rename()` (succès) et le `swap()` (non exécuté), le disque contient le nouvel état et la mémoire sert l'ancien. Cet état interstitiel est **sûr** : le `fetch_batch` lit un mapping toujours valide.
+//! - **Reprise (Cold Start) :** Au redémarrage suite à un crash dans cette fenêtre, le système charge directement la nouvelle version du fichier canonique (déjà validée). Aucun état déchiré (*torn state*) n'est exposé.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

@@ -1,8 +1,30 @@
 // crates/assets/src/sprites.rs
-//
-// Pipeline [sprites] — Phase 4. Un dossier source = une cible : tous les
-// SVG d'un dossier sont fusionnés en un unique fichier `<symbol>`, prêt à
-// être référencé via `<use href="...#id">`.
+
+//! Pipeline `[sprites]` (Phase 4).
+//!
+//! Fusionne l'ensemble des fichiers `.svg` d'un répertoire source en un unique sprite
+//! maître prêt à être référencé nativement par le client.
+//!
+//! ## Modèle d'Assemblage & Hachage
+//!
+//! - **Topologie (Dossier $\rightarrow$ Cible) :** Chaque fichier `.svg` d'un dossier est converti
+//!   en une balise `<symbol>`. L'ensemble est encapsulé dans un `<svg>` parent masqué (`display:none`).
+//! - **Usage Client :** Les icônes sont appelées unitairement via `<use href="...#id">`.
+//! - **Génération d'Empreinte :** Le hachage BLAKE3 est calculé sur l'artefact cible final (le sprite assemblé),
+//!   et non par composition des fichiers sources isolés.
+//!
+//! ## Sympathie Mécanique (Zero-DOM)
+//!
+//! L'implémentation repose sur `quick_xml::Reader`, un analyseur itératif (*PULL parser*) opérant sur `&str`.
+//!
+//! - **Mémoire $O(1)$ structurel :** Aucun DOM n'est alloué. La mémoire allouée est strictement
+//!   proportionnelle au flux de sortie (le buffer cible), indépendamment de la profondeur ou du volume de l'arbre XML.
+//! - **Logique de Pile Sans Allocation :** Le suivi de l'imbrication (nécessaire pour extraire exclusivement
+//!   le contenu *intérieur* de la balise racine `<svg>`) s'effectue via un simple registre de comptage (entier).
+//!   *(Applique la même discipline architecturale que `find_matching_brace` pour le CSS : aucune pile explicite).*
+//! - **Garanties Fail-Fast :** Le compilateur délègue la vérification de la fermeture des balises à
+//!   la machine à états de `quick_xml`. Toute malformation de l'arbre court-circuite le pipeline (`Err`)
+//!   avant d'atteindre le compteur métier.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -14,24 +36,7 @@ use quick_xml::events::Event;
 
 use crate::manifest::{AssetEntry, hash_content, join_slash, mime_for_extension};
 
-// =============================================================================
-// Pipeline [sprites] — Phase 4. Un dossier source = une cible : tous les
-// `.svg` du dossier sont fusionnés en un unique `<symbol>` par fichier,
-// assemblés dans un seul sprite maître `<svg>` (masqué, `display:none`),
-// haché comme tout autre artefact transformé (le hash reflète le sprite
-// assemblé, jamais les fichiers sources pris isolément).
-//
-// Sympathie mécanique : `quick_xml::Reader` est un parseur PULL sur `&str`
-// — aucun DOM construit, mémoire proportionnelle à la sortie produite, pas
-// à la taille de l'arbre XML. Un seul passage par fichier, la profondeur
-// d'imbrication du contenu utile (tout ce qui est À L'INTÉRIEUR de la
-// balise racine `<svg>`) est suivie par un simple compteur entier — même
-// discipline que `find_matching_brace` pour les boucles `@for` : pas de
-// pile explicite, la structure XML étant garantie bien formée par le
-// parseur lui-même (toute erreur de nesting remonte comme `Err` avant
-// d'atteindre notre logique de comptage).
-// =============================================================================
-
+/// Erreur survenant lors du parsing ou de la fusion itérative des SVG.
 #[derive(Debug)]
 pub(crate) struct SpriteError(String);
 

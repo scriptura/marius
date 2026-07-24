@@ -1,90 +1,67 @@
 // crates/assets/src/manifest.rs
-//
-// Structures et utilitaires partagés par TOUS les pipelines : le manifeste
-// (entrée/sortie), le registre d'URLs d'assets, le hachage de contenu, la
-// table MIME et les utilitaires de chemin (slashes forcés). Rien ici n'est
-// spécifique à un pipeline — c'est précisément le critère d'appartenance à
-// ce fichier plutôt qu'à `styles.rs`/`scripts.rs`/etc.
+
+//! Utilitaires et structures partagés du compilateur d'assets.
+//!
+//! Centralise les composants transversaux non-spécifiques à un pipeline :
+//! manifeste (E/S), registre d'URLs, hachage (BLAKE3), table MIME et normalisation de chemins.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Serialize;
 
-// =============================================================================
-// manifest.toml — sérialisation de sortie
-//
-// Forme figée en session avec build.rs (crates/core/schema/build.rs) :
-// dictionnaire `[assets."clé"]`, pas un tableau `[[asset]]` — lookup O(1)
-// côté lecteur. Les noms de champs ci-dessous doivent rester
-// caractère-pour-caractère identiques à la struct AssetEntry de build.rs :
-// url, path, mime, size, hash, version. Toute divergence casse le lecteur
-// sans erreur de compilation (désérialisation TOML silencieusement
-// incomplète) — à ne jamais renommer d'un seul côté sans l'autre.
-// =============================================================================
-
+/// Manifeste d'assets sérialisé en `manifest.toml`.
+///
+/// ## Contrat de Sérialisation (Phase de Build)
+///
+/// Forme figée en accord avec `crates/core/schema/build.rs`.
+/// La structure sérialisée produit un dictionnaire `[assets."clé"]` pour garantir
+/// un accès $O(1)$ côté lecteur, par opposition à une liste de tables `[[asset]]`.
 #[derive(Serialize)]
 pub(crate) struct AssetManifest {
     pub(crate) assets: HashMap<String, AssetEntry>,
 }
 
+/// Entrée individuelle d'un asset dans le manifeste.
+///
+/// **Invariant de rupture :** Les noms de champs doivent rester strictement identiques
+/// (caractère par caractère) à la struct `AssetEntry` lue par `build.rs`.
+/// Toute divergence cassera la désérialisation TOML silencieusement (sans erreur de compilation).
 #[derive(Serialize)]
 pub(crate) struct AssetEntry {
-    /// URL publique versionnée, servie telle quelle par le Shell et gravée
-    /// telle quelle par `generate_aot_snippet` (fragment-forge). Toujours
-    /// préfixée `/`, toujours en slashes avant (jamais de séparateur OS).
+    /// URL publique versionnée (ex: `/static/image.a81f9.png`).
+    /// Servie telle quelle par le Shell et gravée par `fragment-forge`.
+    /// **Toujours préfixée `/`, toujours en slashes avant.**
     pub(crate) url: String,
-    /// Chemin physique du fichier produit, relatif à la racine du workspace
-    /// (même convention que les autres artéfacts Marius — cf.
-    /// guide-cycle-de-vie-runtime.md §4, résolution par CWD).
+    /// Chemin physique du fichier produit, relatif à la racine du workspace.
+    /// (Résolution par CWD au runtime, cf. `guide-cycle-de-vie-runtime.md` §4).
     pub(crate) path: String,
     pub(crate) mime: String,
     pub(crate) size: u64,
-    /// Empreinte BLAKE3 complète (64 caractères hex) — intégrité, distincte
-    /// du suffixe court (5 caractères) utilisé dans le nom de fichier.
+    /// Empreinte BLAKE3 complète (64 caractères hex) pour validation d'intégrité stricte.
     pub(crate) hash: String,
     pub(crate) version: String,
 }
 
-// =============================================================================
-// Registre des URLs d'assets — spec §10.1 + Roadmap §1.8 (désormais
-// tranchée : tout `url()` du CSS est résolu, pas seulement `@font-face`).
-// Deux exigences liées :
-//  1. Le build CSS doit échouer si une ressource référencée par un `url()`
-//     (que ce soit `@font-face`, `background-image`, ou autre) est absente
-//     du registre effectivement copié par le pipeline verbatim.
-//  2. Ce même registre sert de résolveur d'URL : le `url(...)` littéral
-//     écrit par le développeur doit être réécrit vers l'URL publique
-//     versionnée avant écriture du CSS final.
-//
-// Conséquence d'ordonnancement (spec, même §) : le pipeline verbatim doit
-// avoir résolu ce registre AVANT que le pipeline styles ne s'exécute — d'où
-// le passage explicite par valeur de retour, pas une variable globale ni un
-// champ mutable partagé.
-//
-// Portée désormais élargie à TOUT [static.verbatim] (Phase 5 — c'était
-// auparavant limité aux polices woff2/woff/ttf, cf. Handoff Phase 2 : un
-// favicon n'a alors aucune raison d'être référencé par un `url()` CSS,
-// mais une image de fond en a une, exactement le cas signalé en session).
-//
-// Clé = nom de fichier seul (pas le chemin complet), hérité tel quel de la
-// conception Fonts d'origine — une collision entre deux fichiers homonymes
-// dans des sous-dossiers différents de [static.verbatim] n'est pas
-// détectée (dernière écriture gagne, silencieusement). Limitation
-// préexistante, pas introduite par cette généralisation ; la corriger
-// demanderait de résoudre par chemin relatif complet plutôt que par nom de
-// fichier seul — portée plus large que ce qui a été demandé ici, à
-// reprendre explicitement si une vraie collision se présente (même
-// remarque que Roadmap §1.6 pour les SVG).
-// =============================================================================
+/// Registre de résolution des URLs publiques (`url()`).
+///
+/// ## Ordonnancement & Rôle
+///
+/// Construit par le pipeline `[static.verbatim]` **avant** l'exécution du pipeline `[styles]`.
+/// Sert de source de vérité pour valider et réécrire toutes les directives `url()`
+/// du CSS (polices, images de fond). Si une ressource est absente, le build CSS échoue.
+///
+/// ## Limite Architecturale Connue (Collisions)
+///
+/// La clé de résolution est le **nom de fichier seul** (héritage de la conception originelle
+/// des polices), pas le chemin relatif complet. Deux fichiers homonymes dans des sous-dossiers
+/// distincts provoqueront un écrasement silencieux (la dernière écriture gagne).
 pub(crate) type AssetUrlRegistry = HashMap<String, String>;
 
-// =============================================================================
-// Table MIME — correspondance plate, pas de crate de detection générique
-// (sympathie mécanique : un match statique suffit, l'ensemble des
-// extensions gérées par la spec v1 est fermé et connu à l'avance).
-// =============================================================================
-
+/// Résolution MIME statique ($O(1)$).
+///
+/// Applique le principe de *Mechanical Sympathy* : aucune crate de détection générique n'est
+/// nécessaire. L'ensemble des extensions gérées par la spécification v1 est fermé et connu AOT.
 pub(crate) fn mime_for_extension(ext: &str) -> &'static str {
     match ext {
         "css" => "text/css",
@@ -97,31 +74,27 @@ pub(crate) fn mime_for_extension(ext: &str) -> &'static str {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
-        // W3C Web App Manifest — spec : "application/manifest+json", pas
-        // "application/json" générique (Phase 6, [webmanifest]).
+        // Requis par le W3C (spécifique au pipeline [webmanifest]), pas "application/json".
         "webmanifest" => "application/manifest+json",
         _ => "application/octet-stream",
     }
 }
 
-// =============================================================================
-// Hachage — BLAKE3, 5 premiers caractères hex pour le suffixe de nom de
-// fichier (convention déjà en production — cf. main.a81f9.css observé).
-// Le hash complet (64 caractères) est conservé dans le manifeste (§7).
-// =============================================================================
-
+/// Hachage cryptographique du contenu (BLAKE3).
+///
+/// Retourne un tuple `(hash_complet, suffixe_court)` :
+/// - `hash_complet` (64 chars) : Destiné au manifeste pour l'intégrité.
+/// - `suffixe_court` (5 chars) : Destiné au cache-busting dans les noms de fichiers (ex: `main.a81f9.css`).
 pub(crate) fn hash_content(bytes: &[u8]) -> (String, String) {
     let full_hex = blake3::hash(bytes).to_hex().to_string();
     let short = full_hex[..5].to_string();
     (full_hex, short)
 }
 
-// =============================================================================
-// Utilitaires de chemin — slashes forcés, jamais de séparateur OS. Les URLs
-// et les chemins écrits dans le manifeste doivent être stables quelle que
-// soit la plateforme de build.
-// =============================================================================
-
+/// Convertit un `Path` en chaîne de caractères avec slashes forcés (`/`).
+///
+/// **Invariant de stabilité :** Garantit que les URLs et les chemins inscrits dans le manifeste
+/// restent strictement identiques indépendamment du système d'exploitation de l'hôte exécutant le build.
 pub(crate) fn path_to_slash(p: &Path) -> String {
     p.components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
@@ -129,6 +102,7 @@ pub(crate) fn path_to_slash(p: &Path) -> String {
         .join("/")
 }
 
+/// Concatène deux segments en forçant un séparateur slash (`/`).
 pub(crate) fn join_slash(a: &str, b: &str) -> String {
     if a.is_empty() {
         b.to_string()

@@ -1,30 +1,43 @@
-// =============================================================================
 // crates/shell/render/src/pack_html_format.rs
-//
-// Source de vérité unique du format on-disk du packfile HTML — spec
-// specification-marius-render-shell.md §3. Importé par batch_renderer.rs
-// (écriture) et pack_html_index.rs (lecture). Aucun des deux ne redéfinit
-// ces types — même discipline que PackfileStoreHeader dans marius_projection
-// (format store.bin) : un seul endroit définit le format, deux le consomment.
-//
-// Format on-disk (footer en fin de fichier, pas en tête — le streaming par
-// BatchRenderer::render_batch ne connaît jamais la longueur totale du blob
-// par avance ; imposer un header obligerait un Seek ou un double parcours) :
-//
-//   [ HTML blob, fragments concatenés, sans padding         ]
-//   [ padding 0..7B — aligne le début de l'index sur 8B     ]
-//   [ PackfileEntry[], entry_count × 24B, id ASC             ]
-//   [ PackfileFooter, 32B fixe, toujours en dernier          ]
-// =============================================================================
+
+//! Spécification physique et Layout Mémoire du Packfile HTML (`pack.bin`).
+//!
+//! Contrat d'encodage binaire AOT (*on-disk format*) du conteneur de fragments HTML.
+//! Constitue la **source de vérité unique** partagée entre le producteur (`batch_renderer.rs`)
+//! et le consommateur (*mmap* runtime, `pack_html_index.rs`).
+//!
+//! ## Topologie Mémoire du Fichier (*Bottom-Up Layout*)
+//!
+//! Contrairement aux structures à en-tête frontal, le format place son footer à la fin absolue
+//! du fichier. Cette disposition permet un streaming séquentiel lors du rendu sans imposer de `Seek`
+//! disk ni d'allocation intermédiaire pour calculer la taille totale du payload.
+//!
+//! ```text
+//! +-----------------------------------------------------------------------+
+//! |  HTML Blob (Fragments concaténés contigus, sans padding interne)      |
+//! +-----------------------------------------------------------------------+
+//! |  Padding de Remplissage (0 à 7 octets : alignement strict 8-bytes)      |
+//! +-----------------------------------------------------------------------+
+//! |  Index physique : PackfileEntry[] (entry_count × 24B, trié par ID ASC) |
+//! +-----------------------------------------------------------------------+
+//! |  PackfileFooter (32B fixe, toujours aux 32 derniers octets du fichier) |
+//! +-----------------------------------------------------------------------+
+//! ```
+//!
+//! ## Invariants & Zero-Copy Alignment
+//!
+//! - **Lecture Instantanée ($O(1)$ Cold Start) :** Les structures portent `#[repr(C)]`
+//!   et implémentent `bytemuck::Pod` / `bytemuck::Zeroable`. La table d'index peut être projetée
+//!   directement en mémoire depuis un *mmap* sous forme de tranche (`&[PackfileEntry]`) sans étape de désérialisation.
+//! - **Discipline de Padding Strict :** Tous les champs de bourrage (`_pad`) sont explicites.
+//!   `bytemuck::Pod` interdit la présence d'octets de padding non initialisés par le compilateur,
+//!   garantissant l'absence de fuite mémoire et la Stabilité Binaire AOT entre différentes versions du compilateur.
 
 use std::io::{BufWriter, Write};
 
-/// Entrée d'index physique pour un fragment HTML dans le packfile.
+/// Entrée d'index physique décrivant la position d'un fragment HTML dans le blob.
 ///
-/// #[repr(C)] + bytemuck::Pod/Zeroable : castable directement depuis un mmap
-/// au moment de la lecture (cold start du Render Shell), zéro désérialisation.
-/// _pad explicite : bytemuck::Pod interdit tout padding non initialisé —
-/// même discipline que PackfileStoreHeader/VarlenSlot (marius_projection).
+/// Alignée à 24 octets en mémoire. Structurée pour être castée sans copie depuis une région *mmap*.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PackfileEntry {

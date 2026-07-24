@@ -70,7 +70,7 @@
 
 -- ── 12. Pipeline réactif ───────────────────────────────────────────────────
 -- Triggers LISTEN/NOTIFY pour le Collector backend (server/main.rs).
-\ir 12_notify/01_triggers.sql
+\ir 12_events/01_notify.sql
 
 -- ==============================================================================
 -- FIN DE MASTER_INIT

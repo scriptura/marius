@@ -1,7 +1,5 @@
-// =============================================================================
-// marius-db-forge · crates/forge/db-forge/src/codegen/projection.rs
-// Génération du stub impl Projection pour une table.
-// =============================================================================
+//! marius-db-forge · crates/forge/db-forge/src/codegen/projection.rs
+//! Génération AOT du stub `impl Projection` pour une table SQL.
 
 use std::fmt::Write as _;
 
@@ -9,30 +7,27 @@ use crate::mapping::{Column, PrimaryKey, map_type};
 use crate::naming::{to_pascal, to_screaming};
 use marius_fragment_forge::{FieldSpec, TemplateMetrics, VarlenField};
 
-/// Génère le stub `impl Projection` complet pour une table.
+/// Génère l'implémentation complète du trait `Projection` pour une table donnée.
 ///
-/// Émet dans l'ordre :
-///   1. `pub struct {Name}Projection;`
-///   2. Constantes de capacité (`{NAME}_STATIC_CAP`, `_DYNAMIC_CAP`, `_TOTAL_CAP`)
-///   3. `impl crate::projection::Projection for {Name}Projection { … }`
-///      - type Record, type VarlenOwned
-///      - fetch_batch() avec SELECT + FROM + WHERE construits depuis le schéma
-///      - render() avec corps généré par Fragment-Forge
-///      - artifact_path()
+/// ## Code Émis
 ///
-/// `varlena_join` : &[(schema, table, fk_col)] — un triplet par slot
-/// (join_slot_idx croissant, cf. registry.rs). Tranche vide = aucun JOIN.
-/// CONTRAT-implementation-multi-slot-varlena.md, Étape 4 : remplace
-/// l'ancien Option<(schema, table, fk_col)>, limité à un seul JOIN par
-/// composant (limite Phase 1, jamais comblée avant cette révision).
+/// 1. `pub struct {Name}Projection;`
+/// 2. Constantes de capacité (`{NAME}_STATIC_CAP`, `_DYNAMIC_CAP`, `_TOTAL_CAP`).
+/// 3. `impl crate::projection::Projection for {Name}Projection { ... }` :
+///    - Types associés : `Record` et `VarlenOwned`.
+///    - `fetch_batch()` : `SELECT` / `FROM` / `WHERE` générés à la compilation.
+///    - `render()` : Corps d'assemblage mémoire généré par `Fragment-Forge`.
+///    - `artifact_path()`.
 ///
-/// `render` : Option<(render_body, metrics)> — résultat du pipeline Voie B
-/// (scan → parse_tokens → validate_ast → resolve_and_measure → generate_aot_snippet),
-/// orchestré par build.rs (lecture disque du template `.marius`).
-///   `Some((body, metrics))` : template trouvé et résolu — émet les vraies
-///     constantes de capacité et le corps réel de render().
-///   `None` : aucun template pour cette table — émet un stub vide avec
-///     capacités à zéro (comportement de transition, render() ne fait rien).
+/// ## Contrats & Arguments
+///
+/// - `varlena_join` : Triplets `(schema, table, fk_col)` ordonnés par `join_slot_idx` croissant.
+///   Une tranche vide indique l'absence de `JOIN`.
+///   *(Note : Remplace la limitation mono-slot de la Phase 1 - cf. `CONTRAT-implementation-multi-slot-varlena.md`).*
+///
+/// - `render` : Résultat du pipeline de compilation Voie B (scan $\rightarrow$ AST $\rightarrow$ AOT snippet) :
+///   - `Some((body, metrics))` : Template `.marius` résolu — émet les métriques réelles et le corps de `render()`.
+///   - `None` : Pas de template pour cette table — émet un stub de transition à capacités nulles (`render()` no-op).
 #[allow(clippy::too_many_arguments)]
 pub fn write_projection_stub(
     out: &mut String,
@@ -414,6 +409,28 @@ pub fn write_projection_stub(
     } else {
         format!("_varlena: &{name}VarlenOwned")
     };
+    writeln!(
+        out,
+        "    // Nesting inévitable, cosmétique : composition indépendante d'un"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    // bloc {{% if %}} du template et du if let Some(s) systématique émis"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    // pour tout champ varlena — fusionner algorithmiquement les deux"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    // ajouterait de la complexité réelle à l'émetteur pour un gain"
+    )
+    .unwrap();
+    writeln!(out, "    // purement esthétique (session du 23/07/2026).").unwrap();
+    writeln!(out, "    #[allow(clippy::collapsible_if)]").unwrap();
     writeln!(
         out,
         "    fn render(record: &Self::Record, {varlena_param}, buf: &mut String) {{"

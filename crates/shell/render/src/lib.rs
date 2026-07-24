@@ -1,8 +1,6 @@
-// =============================================================================
-// crates/shell/render/src/lib.rs
-//
-// Façade du crate marius-render.
-// =============================================================================
+//! crates/shell/render/src/lib.rs
+//!
+//! Façade du crate marius-render.
 
 mod sweep;
 

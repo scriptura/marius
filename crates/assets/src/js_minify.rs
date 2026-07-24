@@ -1,8 +1,19 @@
 // crates/assets/src/js_minify.rs
-//
-// Minification JS (oxc), partagée entre [scripts.components] et
-// [service_worker]. Un seul point d'entrée, `minify_javascript`, plutôt
-// que deux implémentations parallèles.
+
+//! Minification JavaScript unifiée via `oxc`.
+//!
+//! Sert de point d'entrée unique (`minify_javascript`) pour la minification AOT des scripts de
+//! composants (`[scripts.components]`) et du Service Worker (`[service_worker]`).
+//!
+//! ## Invariants & Cost Discipline (AST vs `&[u8]`)
+//!
+//! - **Isolation de l'AST :** L'AST `oxc` (et son `Allocator` associé) est instancié **uniquement**
+//!   dans ce module pour la passe finale de minification.
+//! - **Zero-AST pour le scanning :** Les passes amont (`lex_imports`, `scan_and_resolve_service_worker`)
+//!   restent de simples balayages plats sur tranches d'octets (`&[u8]`). Aucun AST n'est alloué
+//!   pour la résolution de chemins.
+//! - **Agnostique au pipeline :** Ce module consomme du texte brut déjà substitué en amont et un `Path`
+//!   pour déduire le `SourceType` (Script vs Module).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -13,29 +24,16 @@ use oxc_minifier::{CompressOptions, MangleOptions, Minifier, MinifierOptions};
 use oxc_parser::Parser as OxcParser;
 use oxc_span::SourceType;
 
-// =============================================================================
-// Chantier 4 — minification JS (oxc), partagée entre [scripts.components]
-// et [service_worker]. Un seul point d'entrée, `minify_javascript`, plutôt
-// que deux implémentations parallèles : la minification n'a besoin
-// d'aucune connaissance de QUEL pipeline l'appelle, seulement du texte
-// déjà résolu (imports/chemins substitués en amont, en texte brut — cf.
-// Handoff/session) et d'un `Path` indicatif pour détecter Script vs
-// Module.
-//
-// AST instancié UNIQUEMENT ici, pour cette seule passe finale — jamais
-// pour la résolution de chemins (`lex_imports`/`scan_and_resolve_service_
-// worker` restent des scanners plats sur `&[u8]`, aucune régression vers
-// un AST pour cette tâche-là : elle n'en a jamais eu besoin, un AST y
-// serait une dépense pure sans bénéfice).
-// =============================================================================
-
+/// Erreurs survenant lors de la passe de minification.
 #[derive(Debug)]
 pub(crate) enum MinifyError {
-    /// Erreur de parsing — le buffer déjà résolu par ce pipeline (imports/
-    /// chemins substitués) doit rester du JavaScript syntaxiquement
-    /// valide ; si `oxc_parser` le rejette, c'est le signe d'un bug en
-    /// amont (substitution ayant cassé la syntaxe), jamais une tolérance
-    /// à absorber silencieusement.
+    /// Erreur de parsing syntaxique par `oxc_parser`.
+    ///
+    /// ## Invariant Fail-Fast
+    ///
+    /// Le buffer fourni ayant déjà traversé la phase de résolution/substitution des chemins,
+    /// il **doit** être du JavaScript strictement valide. Un échec de parsing indique un bug
+    /// dans la transformation en amont (corruption de syntaxe) et doit stopper le build immédiatemment.
     Parse(PathBuf, String),
 }
 

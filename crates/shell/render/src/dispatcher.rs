@@ -1,58 +1,35 @@
 // marius-render · crates/shell/render/src/dispatcher.rs
-// Dispatcher (Reactive Orchestrator) — Shell uniquement.
-// Dépend de Tokio, SQLx : ne peut pas être dans le Core.
-//
-// Migration depuis marius-collector (Phase 1 refactoring) :
-// Le Collector<MAX, WORDS> reste dans le Core (marius-collector, zéro dépendance).
-// Le Dispatcher vit ici, dans le Shell, car il orchestre les I/O.
-//
-// ─── Écriture (Phase 4, état résolu ; étendu Étape 6 — pipeline CoW) ─────────
-//
-//   run() ne fait jamais d'écriture directe : chaque tick délègue à deux
-//   étages séquentiels, jamais l'inverse, jamais en parallèle :
-//     1. ingest_and_swap (Shell, ingest_and_swap.rs) — fetch_from_pg SQL
-//        live, merge_store, écriture store.bin.tmp + fsync + validation +
-//        rename + StoreRegistry::swap.
-//     2. regenerate_and_swap (regenerate.rs) — fetch_batch (désormais lu
-//        depuis le store.bin fraîchement rafraîchi par l'étage 1, plus un
-//        instantané figé au dernier marius-dump), merge_sweep, écriture
-//        .tmp + fsync + rename atomique, puis LiveRegistry::store().
-//   Un échec à l'étage 1 interrompt le tick avant l'étage 2 (cf. run()) :
-//   régénérer pack.bin depuis un store.bin non rafraîchi produirait un
-//   résultat silencieusement incohérent avec le delta courant.
-//   Compatible par construction avec le modèle mmap/ArcSwap de registry.rs
-//   (Phase 2) — aucune écriture en place, aucun footer manquant.
-//
-//   Deux champs portent ce câblage : `registry` (Arc partagé avec la
-//   frontière Axum de lecture, main.rs — cloné avant le tokio::spawn de ce
-//   Dispatcher, jamais reconstruit) et `packfile_key` (clé
-//   LiveRegistry/packfile_path_for ciblée par CE Dispatcher — doit
-//   correspondre exactement à la RouteEntry qui sert ces mêmes données en
-//   lecture ; pas dérivée de P::packfile_path(), qui n'est pas ce contrat
-//   d'adressage).
-//
-//   Sémantique de Collector::flush() : résolue et testée depuis
-//   regenerate.rs (untouched_entities_survive_successive_incremental_merges_then_delete).
-//   flush() retourne l'ensemble complet des ids de la cible, pas un delta —
-//   regenerate_and_swap réécrit donc le packfile en entier à chaque appel,
-//   par construction, et non par fusion incrémentale.
-//
-//   ids.sort_unstable() avant l'appel : précondition du format on-disk
-//   (spec §3, "index trié par id ASC", non vérifiée par le format
-//   lui-même) — défense explicite, pas une supposition héritée de l'ordre
-//   d'itération interne de Collector::flush().
-//
-// ─── Séparation async / sync (inchangée) ──────────────────────────────────────
-//
-//   run()              : boucle asynchrone Tokio. Gère le tick adaptatif,
-//                         appelle regenerate_and_swap().
-//   render_batch_pure() : logique de rendu séquentielle pure, synchrone,
-//                         sans I/O disque — utilisée par les benchmarks
-//                         Divan. Non concernée par le bug Append (jamais
-//                         touchait le filesystem). Réalignée cette session :
-//                         portait un pipeline Rayon résiduel (map_with),
-//                         désormais buffer unique réutilisé, conforme au
-//                         manifeste révisé (28 juin 2026).
+
+//! # Dispatcher (Orchestrateur Réactif Shell)
+//!
+//! Composant d'orchestration I/O asynchrone (Tokio / SQLx) résidant exclusivement dans le Shell.
+//! Délègue le traitement de données pur au Core (`marius-collector` et `marius-projection`).
+//!
+//! ## Pipeline d'Écriture Séquentiel (Copy-on-Write)
+//!
+//! À chaque tick réactif, la mise à jour s'exécute selon une chaîne de dépendance stricte en 2 étages :
+//!
+//! 1. **`ingest_and_swap` (Étage 1) :**
+//!    - Rapatriement SQL live (`fetch_from_pg`).
+//!    - Fusion binaire (`merge_store`).
+//!    - Écriture `store.bin.tmp` + `fsync` + validation d'intégrité pré-rename.
+//!    - Rotation atomique `rename` $\rightarrow$ Permutation du registre de données (`StoreRegistry::swap`).
+//!
+//! 2. **`regenerate_and_swap` (Étage 2) :**
+//!    - Lecture $O(1)$ par *mmap* du `store.bin` fraîchement synchronisé (`fetch_batch`).
+//!    - Balayage/fusion (`merge_sweep`).
+//!    - Écriture `pack.bin.tmp` + `fsync` + `rename` atomique $\rightarrow$ Enregistrement dans `LiveRegistry`.
+//!
+//! **Invariant de Tolérance aux Pannes :** Tout échec à l'Étage 1 interrompt immédiatement le tick.
+//! La régénération de l'Étage 2 depuis un `store.bin` non rafraîchi est interdite pour empêcher
+//! la persistance de deltas incohérents.
+//!
+//! ## Invariants Mémoire & Layout
+//!
+//! - **Tri des Identifiants (`ID ASC`) :** Exécution explicite de `ids.sort_unstable()` avant le rendu
+//!   pour garantir l'indexation contiguë sur disque (Spec §3) sans imposer de surcoût à `Collector::flush()`.
+//! - **Hot Path Purement Synchrone (`render_batch_pure`) :** Pipeline séquentiel réutilisant un buffer unique,
+//!   dépourvu d'allocations I/O et d'indirections `Rayon` (aligné sur les benchmarks Divan).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -65,14 +42,13 @@ use tokio::time::interval;
 use marius_collector::Collector;
 use marius_projection::Projection;
 
-/// Correction Phase 5.1 (impasse mécanique signalée, pas une modification de
-/// contrat) : `Clone, Copy` ajoutés ici — absents jusqu'à présent. Sans cela,
-/// `SHARDS[i].config` (table de configuration unifiée, main.rs) ne peut pas
-/// être lu par valeur : un champ derrière une référence `'static` (`SHARDS:
-/// &'static [ShardMetadata]`) ne peut pas être déplacé hors de son
-/// emplacement sans `Copy`. Tous les champs sont déjà `Copy` (`Duration`,
-/// `usize`) — la dérivation est donc gratuite (aucune allocation, aucune
-/// indirection ajoutée) et n'altère aucune sémantique existante.
+/// Configuration d'exécution d'un Shard de Dispatcher.
+///
+/// ## Sympathie Mécanique & Alignement
+///
+/// Implémente `Copy` et `Clone` (types internes réduits à `Duration` et `usize`).
+/// Permet la lecture directe par valeur depuis la table statique d'unification
+/// `SHARDS: &'static [ShardMetadata]` dans `main.rs` sans indirection de pointeur ni allocation.
 #[derive(Clone, Copy)]
 pub struct DispatcherConfig {
     pub tick_default: Duration,

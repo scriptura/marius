@@ -1,7 +1,5 @@
-// =============================================================================
-// marius-db-forge · codegen/mod.rs
-// Génération des artefacts Rust par table.
-// =============================================================================
+//! marius-db-forge · codegen/mod.rs
+//! Génération des artefacts Rust par table.
 
 pub mod collector;
 pub mod from_impl;
