@@ -1,4 +1,4 @@
-//! # Marius Fragment Forge
+//! # Marius Fragment Forge - crates/forge/fragment-forge/src/lib.rs
 //!
 //! Génération AOT (`build.rs`) du corps de `render()` pour les tables surveillées.
 //!
@@ -2393,6 +2393,171 @@ pub fn generate_aot_snippet<'src, 'r>(
     out
 }
 
+/// Génère le corps de `render_segments()` pour un composant portant au moins
+/// un champ `is_segment == true` — CONTRAT-implementation-projection-
+/// segmentee.md, Étape 5. Appelée par `build.rs` à la place de
+/// `generate_aot_snippet` uniquement quand `varlena.iter().any(|v|
+/// v.is_segment)` — jamais les deux pour le même composant.
+///
+/// ── Algorithme (arbitré en session, 23/07/2026) ───────────────────────────
+///
+/// Identique à `generate_aot_snippet` pour tout token qui n'est pas un champ
+/// `is_segment` — même émission `buf.push_str`/`marius_html_escape`/etc.,
+/// dans `buf`. La seule différence : un champ `is_segment` clôt le « run »
+/// `Buffered` courant (`segments.push(Segment::Buffered { start, end })`),
+/// pousse sa valeur comme `Segment::Borrowed` autonome (jamais concaténée
+/// dans `buf`), puis rouvre un nouveau run pour ce qui suit.
+///
+/// `seg_start` est une variable Rust générée, déclarée une seule fois en tête
+/// de fonction (`let mut seg_start: usize = buf.len();` — vaut 0 en pratique,
+/// `buf` arrivant vide par contrat, mais recalculé dynamiquement plutôt que
+/// supposé pour rester robuste à toute évolution future du contrat), puis
+/// réassignée (jamais re-`let`) à chaque réouverture de run — y compris à
+/// l'intérieur d'un bloc `{% if %}` généré : la réassignation à l'intérieur
+/// d'un bloc conditionnel est correcte par construction, puisque le bloc
+/// entier est sauté à l'exécution si la condition est fausse, laissant
+/// `seg_start` intact avec sa valeur d'avant le bloc — le run englobant se
+/// poursuit alors sans discontinuité, exactement comme si le champ segmenté
+/// n'existait pas pour cet enregistrement.
+///
+/// Ce raisonnement a été vérifié à la main sur le cas d'un champ segmenté
+/// unique à l'intérieur d'un `{% if %}` avant d'écrire cette fonction — les
+/// deux branches d'exécution (condition vraie/fausse) produisent un état de
+/// `segments` cohérent dans les deux cas.
+pub fn generate_segmented_snippet<'src, 'r>(
+    tokens: &[FlatPageToken<'src>],
+    schema: &SchemaIndex<'_>,
+    resolve_asset_url: impl Fn(&str) -> &'r str,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(25 + tokens.len() * 60);
+
+    // ── Déclarations de références varlena — identique à generate_aot_snippet ──
+    let mut varlena_seen: Vec<&str> = tokens
+        .iter()
+        .filter_map(|t| match t {
+            FlatPageToken::Field { field, .. } if schema.find_varlena(field).is_some() => {
+                Some(*field)
+            }
+            _ => None,
+        })
+        .collect();
+    varlena_seen.sort_unstable();
+    varlena_seen.dedup();
+    for name in &varlena_seen {
+        writeln!(
+            out,
+            "let {name}_ref: Option<&str> = varlena.{name}.as_deref();"
+        )
+        .unwrap();
+    }
+
+    // Ouverture du premier run — toujours à la racine de la fonction, jamais
+    // à l'intérieur d'un bloc généré (les tokens IfBool ne peuvent apparaître
+    // qu'après ce point dans la boucle ci-dessous).
+    writeln!(out, "let mut seg_start: usize = buf.len();").unwrap();
+
+    let mut indent = String::new();
+
+    for token in tokens {
+        match token {
+            FlatPageToken::Static(s) => {
+                if s.len() == 1 {
+                    let c = s.chars().next().unwrap();
+                    writeln!(out, "{indent}buf.push({c:?});").unwrap();
+                } else {
+                    writeln!(out, "{indent}buf.push_str({s:?});").unwrap();
+                }
+            }
+
+            FlatPageToken::Field { field, .. } => {
+                if let Some(v) = schema.find_varlena(field) {
+                    if v.is_segment {
+                        // Clôture du run courant — toujours valide même si
+                        // ce token est le tout premier de la fonction
+                        // (seg_start == 0 == buf.len() à cet instant, run
+                        // vide légitimement poussé, aucun octet perdu).
+                        writeln!(
+                            out,
+                            "{indent}segments.push(marius_projection::Segment::Buffered {{ start: seg_start, end: buf.len() }});"
+                        )
+                        .unwrap();
+                        writeln!(
+                            out,
+                            "{indent}if let Some(s) = {field}_ref {{ segments.push(marius_projection::Segment::Borrowed(s)); }}"
+                        )
+                        .unwrap();
+                        writeln!(out, "{indent}seg_start = buf.len();").unwrap();
+                    } else {
+                        match v.escape_policy {
+                            EscapePolicy::Raw => {
+                                writeln!(
+                                    out,
+                                    "{indent}if let Some(s) = {field}_ref {{ buf.push_str(s); }}"
+                                )
+                                .unwrap();
+                            }
+                            EscapePolicy::Escaped | EscapePolicy::PreEscaped => {
+                                writeln!(
+                                    out,
+                                    "{indent}if let Some(s) = {field}_ref {{ marius_html_escape(s, buf); }}"
+                                )
+                                .unwrap();
+                            }
+                        }
+                    }
+                } else {
+                    writeln!(
+                        out,
+                        r#"{indent}::std::fmt::Write::write_fmt(buf, format_args!("{{}}", record.{field})).ok();"#,
+                    )
+                    .unwrap();
+                }
+            }
+
+            FlatPageToken::IfBool { field, .. } => {
+                writeln!(out, "{indent}if record.{field} != 0 {{").unwrap();
+                indent.push_str("    ");
+            }
+
+            FlatPageToken::EndIf => {
+                let new_len = indent.len().saturating_sub(4);
+                indent.truncate(new_len);
+                writeln!(out, "{indent}}}").unwrap();
+            }
+
+            FlatPageToken::ScriptStart | FlatPageToken::ScriptEnd => {}
+
+            FlatPageToken::StaticInclude {
+                rel_from_manifest, ..
+            } => {
+                writeln!(
+                    out,
+                    "{indent}buf.push_str(include_str!({rel_from_manifest:?}));",
+                )
+                .unwrap();
+            }
+
+            FlatPageToken::AssetRef(key) => {
+                let url = resolve_asset_url(key);
+                writeln!(out, "{indent}buf.push_str({url:?});").unwrap();
+            }
+        }
+    }
+
+    // Clôture du dernier run — toujours émise, qu'il y ait eu 0 ou N champs
+    // segmentés (si 0, ce run couvre tout buf, comportement équivalent à
+    // l'implémentation par défaut de render_segments — mais cette fonction
+    // n'est de toute façon appelée par build.rs que si has_segment == true).
+    writeln!(
+        out,
+        "segments.push(marius_projection::Segment::Buffered {{ start: seg_start, end: buf.len() }});"
+    )
+    .unwrap();
+
+    out
+}
+
 // =============================================================================
 // Hoisting + déduplication des `{% script %}...{% endscript %}` — passe de
 // capture de bloc (révision de session : remplace l'ancienne approche par
@@ -3013,6 +3178,136 @@ mod tests_phase_2_2 {
         assert!(
             !got.contains("buf.reserve"),
             "buf.reserve hors scope:\n{got}"
+        );
+    }
+
+    // ── generate_segmented_snippet — CONTRAT-implementation-projection-segmentee.md, Étape 5 ──
+
+    fn segment_field(name: &str) -> VarlenField {
+        VarlenField {
+            name: name.to_string(),
+            ref_schema: "content".to_string(),
+            ref_table: "body".to_string(),
+            max_len: Some(32_000),
+            escape_policy: EscapePolicy::Raw,
+            is_segment: true,
+            nullable: true,
+            max_escaped_len_override: None,
+        }
+    }
+
+    #[test]
+    fn generate_segmented_snippet_splits_around_segment_field() {
+        let fixed: Vec<FieldSpec> = vec![];
+        let varlena = vec![segment_field("content")];
+        let schema = make_schema(&fixed, &varlena);
+
+        let tokens: &[FlatPageToken<'_>] = &[
+            FlatPageToken::Static("<article>"),
+            FlatPageToken::Field {
+                entity: "varlena",
+                field: "content",
+            },
+            FlatPageToken::Static("</article>"),
+        ];
+
+        let got = generate_segmented_snippet(tokens, &schema, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        });
+
+        assert!(
+            got.contains("let mut seg_start: usize = buf.len();"),
+            "déclaration seg_start absente:\n{got}"
+        );
+        assert!(
+            got.contains("segments.push(marius_projection::Segment::Buffered"),
+            "push Buffered absent:\n{got}"
+        );
+        assert!(
+            got.contains(
+                "if let Some(s) = content_ref { segments.push(marius_projection::Segment::Borrowed(s)); }"
+            ),
+            "push Borrowed absent ou mal formé:\n{got}"
+        );
+        assert!(
+            !got.contains("marius_html_escape"),
+            "un champ segmenté ne doit jamais passer par marius_html_escape:\n{got}"
+        );
+        // Deux runs Buffered : avant et après le champ segmenté.
+        assert_eq!(
+            got.matches("Segment::Buffered").count(),
+            2,
+            "deux runs Buffered attendus (avant/après le champ segmenté):\n{got}"
+        );
+    }
+
+    #[test]
+    fn generate_segmented_snippet_handles_segment_inside_if_block() {
+        let fixed: Vec<FieldSpec> = vec![];
+        let varlena = vec![segment_field("content")];
+        let schema = make_schema(&fixed, &varlena);
+
+        let tokens: &[FlatPageToken<'_>] = &[
+            FlatPageToken::Static("<p>"),
+            FlatPageToken::IfBool {
+                entity: "record",
+                field: "is_readable",
+            },
+            FlatPageToken::Field {
+                entity: "varlena",
+                field: "content",
+            },
+            FlatPageToken::EndIf,
+            FlatPageToken::Static("</p>"),
+        ];
+
+        let got = generate_segmented_snippet(tokens, &schema, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        });
+
+        // Le push Buffered/Borrowed à l'intérieur du if doit être indenté —
+        // preuve qu'il est bien conditionnel, pas exécuté inconditionnellement.
+        assert!(
+            got.contains("    segments.push(marius_projection::Segment::Buffered"),
+            "le push à l'intérieur du bloc if devrait être indenté :\n{got}"
+        );
+        assert!(
+            got.contains("if record.is_readable != 0 {"),
+            "bloc if absent:\n{got}"
+        );
+        // Le dernier push (clôture finale) est à l'indentation racine (pas de
+        // préfixe 4-espaces), après la fermeture du bloc if.
+        let last_push_line = got
+            .lines()
+            .filter(|l| l.trim_start().starts_with("segments.push"))
+            .next_back()
+            .expect("au moins un push attendu");
+        assert!(
+            !last_push_line.starts_with(' '),
+            "le push final doit être à la racine, pas à l'intérieur du if:\n{got}"
+        );
+    }
+
+    #[test]
+    fn generate_segmented_snippet_final_close_always_emitted() {
+        // Aucun champ segmenté référencé dans les tokens (cas dégénéré,
+        // jamais déclenché en pratique par build.rs — has_segment serait
+        // false — mais la fonction ne doit pas paniquer ni produire un état
+        // incohérent si elle est appelée quand même).
+        let fixed: Vec<FieldSpec> = vec![];
+        let varlena: Vec<VarlenField> = vec![];
+        let schema = make_schema(&fixed, &varlena);
+
+        let tokens: &[FlatPageToken<'_>] = &[FlatPageToken::Static("<p>Rien à segmenter</p>")];
+
+        let got = generate_segmented_snippet(tokens, &schema, |_| {
+            unreachable!("aucun AssetRef dans ce test")
+        });
+
+        assert_eq!(
+            got.matches("Segment::Buffered").count(),
+            1,
+            "un seul run Buffered attendu, couvrant tout buf:\n{got}"
         );
     }
 }

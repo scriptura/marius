@@ -1,7 +1,5 @@
-// =============================================================================
-// marius-db-forge · crates/forge/db-forge/src/codegen/varlen.rs
-// Génération de {Name}VarlenOwned.
-// =============================================================================
+//! marius-db-forge · crates/forge/db-forge/src/codegen/varlen.rs
+//! Génération de {Name}VarlenOwned.
 
 use std::fmt::Write as _;
 
@@ -68,6 +66,19 @@ pub fn write_varlen_owned_struct(
             bound_descr, escape_descr, escape_factor,
         )
         .unwrap();
+        // CONTRAT-implementation-projection-segmentee.md, Étape 5 : mention
+        // explicite quand ce champ ne sera jamais concaténé dans le buffer
+        // partagé — un mainteneur lisant generated_schema.rs doit voir
+        // immédiatement pourquoi ce champ, potentiellement volumineux,
+        // n'apparaît dans aucun calcul de DYNAMIC_CAP.
+        if v.is_segment {
+            writeln!(
+                out,
+                "    /// Segment autonome (marius:large_content) — jamais concaténé \
+                 dans buf, ne dimensionne jamais la capacité totale du composant."
+            )
+            .unwrap();
+        }
         writeln!(out, "    pub {}: Option<String>,", v.name).unwrap();
     }
 

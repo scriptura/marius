@@ -27,8 +27,9 @@ use marius_db_forge::{
 use marius_fragment_forge::{
     AssetLookup, FlatPageToken, PageArena, SchemaIndex, TemplateMetrics, VarlenField,
     collect_blocks, collect_static_refs, detect_extends, generate_aot_snippet,
-    hoist_and_dedupe_scripts, link, lower, parse_page_tokens, parse_tokens,
-    relative_path_for_include_str, resolve_and_measure, scan, splice_hoisted_scripts, validate_ast,
+    generate_segmented_snippet, hoist_and_dedupe_scripts, link, lower, parse_page_tokens,
+    parse_tokens, relative_path_for_include_str, resolve_and_measure, scan, splice_hoisted_scripts,
+    validate_ast,
 };
 
 /// Marqueur textuel du point d'injection des `<script>` hissés — décision
@@ -822,7 +823,18 @@ fn resolve_page_template<'src>(
         );
     })?;
 
-    let body = generate_aot_snippet(&tokens, &schema_index, resolve_asset_url);
+    // CONTRAT-implementation-projection-segmentee.md, Étape 5 : un champ
+    // is_segment (tag SQL marius:large_content) déclenche generate_segmented_snippet
+    // au lieu de generate_aot_snippet — jamais les deux pour le même composant.
+    // write_projection_stub (codegen/projection.rs) recalcule ce même booléen
+    // à partir du même varlena pour décider d'émettre render_segments() —
+    // aucune valeur à faire transiter par le tuple de retour de cette fonction.
+    let has_segment = varlena.iter().any(|v| v.is_segment);
+    let body = if has_segment {
+        generate_segmented_snippet(&tokens, &schema_index, resolve_asset_url)
+    } else {
+        generate_aot_snippet(&tokens, &schema_index, resolve_asset_url)
+    };
 
     Ok((body, metrics))
 }
@@ -1159,7 +1171,14 @@ fn resolve_template(
         );
     })?;
 
-    let body = generate_aot_snippet(&tokens, &schema_index, resolve_asset_url);
+    // CONTRAT-implementation-projection-segmentee.md, Étape 5 — même
+    // branchement que resolve_page_template ci-dessus.
+    let has_segment = varlena.iter().any(|v| v.is_segment);
+    let body = if has_segment {
+        generate_segmented_snippet(&tokens, &schema_index, resolve_asset_url)
+    } else {
+        generate_aot_snippet(&tokens, &schema_index, resolve_asset_url)
+    };
 
     Ok(Some((body, metrics)))
 }

@@ -7,27 +7,30 @@ use crate::mapping::{Column, PrimaryKey, map_type};
 use crate::naming::{to_pascal, to_screaming};
 use marius_fragment_forge::{FieldSpec, TemplateMetrics, VarlenField};
 
-/// Génère l'implémentation complète du trait `Projection` pour une table donnée.
+/// Génère le stub `impl Projection` complet pour une table.
 ///
-/// ## Code Émis
+/// Émet dans l'ordre :
+///   1. `pub struct {Name}Projection;`
+///   2. Constantes de capacité (`{NAME}_STATIC_CAP`, `_DYNAMIC_CAP`, `_TOTAL_CAP`)
+///   3. `impl crate::projection::Projection for {Name}Projection { … }`
+///      - type Record, type VarlenOwned
+///      - fetch_batch() avec SELECT + FROM + WHERE construits depuis le schéma
+///      - render() avec corps généré par Fragment-Forge
+///      - artifact_path()
 ///
-/// 1. `pub struct {Name}Projection;`
-/// 2. Constantes de capacité (`{NAME}_STATIC_CAP`, `_DYNAMIC_CAP`, `_TOTAL_CAP`).
-/// 3. `impl crate::projection::Projection for {Name}Projection { ... }` :
-///    - Types associés : `Record` et `VarlenOwned`.
-///    - `fetch_batch()` : `SELECT` / `FROM` / `WHERE` générés à la compilation.
-///    - `render()` : Corps d'assemblage mémoire généré par `Fragment-Forge`.
-///    - `artifact_path()`.
+/// `varlena_join` : &[(schema, table, fk_col)] — un triplet par slot
+/// (join_slot_idx croissant, cf. registry.rs). Tranche vide = aucun JOIN.
+/// CONTRAT-implementation-multi-slot-varlena.md, Étape 4 : remplace
+/// l'ancien Option<(schema, table, fk_col)>, limité à un seul JOIN par
+/// composant (limite Phase 1, jamais comblée avant cette révision).
 ///
-/// ## Contrats & Arguments
-///
-/// - `varlena_join` : Triplets `(schema, table, fk_col)` ordonnés par `join_slot_idx` croissant.
-///   Une tranche vide indique l'absence de `JOIN`.
-///   *(Note : Remplace la limitation mono-slot de la Phase 1 - cf. `CONTRAT-implementation-multi-slot-varlena.md`).*
-///
-/// - `render` : Résultat du pipeline de compilation Voie B (scan $\rightarrow$ AST $\rightarrow$ AOT snippet) :
-///   - `Some((body, metrics))` : Template `.marius` résolu — émet les métriques réelles et le corps de `render()`.
-///   - `None` : Pas de template pour cette table — émet un stub de transition à capacités nulles (`render()` no-op).
+/// `render` : Option<(render_body, metrics)> — résultat du pipeline Voie B
+/// (scan → parse_tokens → validate_ast → resolve_and_measure → generate_aot_snippet),
+/// orchestré par build.rs (lecture disque du template `.marius`).
+///   `Some((body, metrics))` : template trouvé et résolu — émet les vraies
+///     constantes de capacité et le corps réel de render().
+///   `None` : aucun template pour cette table — émet un stub vide avec
+///     capacités à zéro (comportement de transition, render() ne fait rien).
 #[allow(clippy::too_many_arguments)]
 pub fn write_projection_stub(
     out: &mut String,
@@ -396,14 +399,23 @@ pub fn write_projection_stub(
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // ── render() ─────────────────────────────────────────────────────────────
-    // varlena param : "_varlena" tant qu'aucun corps réel ne le consomme
-    // (stub Voie B) ou que la table n'a pas de varlena. Dès qu'un template
-    // résolu (render.is_some()) référence varlena, le préfixe disparaît —
-    // generate_aot_snippet émet `varlena.{field}.as_deref()` qui exige le nom.
+    // ── render() / render_segments() ──────────────────────────────────────────
+    // CONTRAT-implementation-projection-segmentee.md, Étape 5 : has_segment
+    // recalculé ici à partir du même `varlena` que build.rs a déjà utilisé
+    // pour choisir generate_aot_snippet vs generate_segmented_snippet — aucune
+    // valeur à faire transiter séparément, la même information est disponible
+    // aux deux endroits.
+    let has_segment = varlena.iter().any(|v| v.is_segment);
+
+    // varlena param de render() : "_varlena" tant qu'aucun corps réel ne le
+    // consomme (stub Voie B), que la table n'a pas de varlena, OU que le
+    // composant est segmenté (render() devient alors un stub jamais appelé —
+    // cf. plus bas — le paramètre n'est donc jamais lu dans ce cas non plus).
     let body_is_real = render.is_some();
     let varlena_param = if varlena.is_empty() {
         "_varlena: &()".to_string()
+    } else if has_segment {
+        format!("_varlena: &{name}VarlenOwned")
     } else if body_is_real {
         format!("varlena: &{name}VarlenOwned")
     } else {
@@ -436,7 +448,20 @@ pub fn write_projection_stub(
         "    fn render(record: &Self::Record, {varlena_param}, buf: &mut String) {{"
     )
     .unwrap();
-    if render_body.is_empty() {
+    if has_segment {
+        // Composant segmenté : render() n'est jamais invoquée en pratique —
+        // BatchRenderer::render_batch appelle systématiquement
+        // render_segments() (Étape 4). Présente uniquement parce que le
+        // trait l'exige (pas de valeur par défaut pour render() lui-même,
+        // contrairement à render_segments()) — cf. StubSegmentedProjection,
+        // même patron, déjà exercé par les tests de batch_renderer.rs.
+        writeln!(out, "        let _ = (record, buf);").unwrap();
+        writeln!(
+            out,
+            "        unreachable!(\"{name}Projection::render() ne devrait jamais être appelée — composant segmenté, BatchRenderer appelle toujours render_segments().\");"
+        )
+        .unwrap();
+    } else if render_body.is_empty() {
         // Aucun template .marius trouvé pour cette table — stub neutre.
         writeln!(out, "        let _ = (record, buf);").unwrap();
     } else {
@@ -451,6 +476,38 @@ pub fn write_projection_stub(
     }
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+
+    if has_segment {
+        // MAX_SEGMENTS = 2N+1, N = nombre de champs is_segment dans ce join
+        // (chaque champ segmenté ferme un run Buffered, pousse un Borrowed,
+        // rouvre un run — cf. generate_segmented_snippet). Hypothèse
+        // simplificatrice documentée : chaque champ segmenté n'apparaît
+        // qu'une fois dans le template — vraie pour tous les cas réels à ce
+        // jour (content.core : 1 champ segmenté → MAX_SEGMENTS = 3). Un
+        // champ référencé plusieurs fois sur-approvisionnerait le Vec sans
+        // jamais casser la correction — coût négligeable, jamais un bug.
+        let segment_count = varlena.iter().filter(|v| v.is_segment).count();
+        let max_segments = 2 * segment_count + 1;
+        writeln!(out, "    const MAX_SEGMENTS: usize = {max_segments};").unwrap();
+        writeln!(out).unwrap();
+
+        writeln!(out, "    #[allow(clippy::collapsible_if)]").unwrap();
+        writeln!(
+            out,
+            "    fn render_segments<'seg>(record: &Self::Record, varlena: &'seg {name}VarlenOwned, buf: &mut String, segments: &mut Vec<marius_projection::Segment<'seg>>) {{"
+        )
+        .unwrap();
+        // render_body est ici le corps produit par generate_segmented_snippet
+        // (build.rs a déjà choisi le bon générateur selon has_segment, avant
+        // même d'appeler write_projection_stub) — jamais celui de
+        // generate_aot_snippet pour un composant segmenté.
+        writeln!(out, "        buf.reserve({screaming}_TOTAL_CAP);").unwrap();
+        for line in render_body.lines() {
+            writeln!(out, "    {line}").unwrap();
+        }
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
 
     // ── record_id() ───────────────────────────────────────────────────────────
     // Accesseur direct du champ PK — coût zéro, inliné par LLVM.
