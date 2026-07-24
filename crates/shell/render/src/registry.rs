@@ -2,24 +2,24 @@
 
 //! Registre Vivant des Index de Packfiles HTML (`LiveRegistry`).
 //!
-//! Implémente la spécification §5 (*Live Registry & Multi-Key Routing*). 
+//! Implémente la spécification §5 (*Live Registry & Multi-Key Routing*).
 //! Fournit un accès instantané et sans verrou (*lock-free*) aux index des fragments HTML,
 //! autorisant des rotations dynamiques et indépendantes par route au rythme des ticks réactifs.
 //!
 //! ## Invariants Structurants & Sympathie Concurrente
 //!
-//! - **Topologie Statique par Construction :** La cartographie des clés (`HashMap<String, ArcSwap<PackHtmlIndex>>`) 
-//!   est figée à l'initialisation (`with_indices`). Après la phase de construction, **aucune insertion 
-//!   ni suppression** n'est tolérée sur la table des index (`indices` privé). Seules les atomicités internes 
+//! - **Topologie Statique par Construction :** La cartographie des clés (`HashMap<String, ArcSwap<PackHtmlIndex>>`)
+//!   est figée à l'initialisation (`with_indices`). Après la phase de construction, **aucune insertion
+//!   ni suppression** n'est tolérée sur la table des index (`indices` privé). Seules les atomicités internes
 //!   portées par les `ArcSwap` ciblés subissent des permutations via `store()`.
-//! - **Absence de Verrous Globaux :** C'est l'immutabilité topologique de la table elle-même, combinée 
-//!   à l'atomicité de substitution des pointeurs (`arc-swap`), qui garantit une lecture concurrente totalement 
+//! - **Absence de Verrous Globaux :** C'est l'immutabilité topologique de la table elle-même, combinée
+//!   à l'atomicité de substitution des pointeurs (`arc-swap`), qui garantit une lecture concurrente totalement
 //!   non bloquante, sans contention d'accès sur le *Hot Path* HTTP.
 //! - **Encapsulation de la Frontière de Crate (Inversion de Dépendance) :**
-//!   Pour rompre tout risque de cycle de dépendances circulaires au sein du workspace Cargo 
-//!   (`marius-render` $\leftrightarrow$ `marius-server`), la table de routage globale `ROUTE_TABLE` 
-//!   n'est pas injectée ni lue en tant que variable globale cachée. La fonction de démarrage `cold_start()` 
-//!   reçoit la table par paramètre (`&'static [RouteEntry]`). Les structures de description (`RouteEntry`, 
+//!   Pour rompre tout risque de cycle de dépendances circulaires au sein du workspace Cargo
+//!   (`marius-render` $\leftrightarrow$ `marius-server`), la table de routage globale `ROUTE_TABLE`
+//!   n'est pas injectée ni lue en tant que variable globale cachée. La fonction de démarrage `cold_start()`
+//!   reçoit la table par paramètre (`&'static [RouteEntry]`). Les structures de description (`RouteEntry`,
 //!   `IdSource`) résident ici pour être importées par les frontières supérieures sans inversion de couplage.
 
 use std::collections::HashMap;

@@ -1,15 +1,30 @@
-//! Phase 4.1 — Moteur algorithmique en mémoire (pattern Sans-I/O).
-//!
-//! Aucune dépendance mmap/fichier/runtime async ici. Tout opère sur des
-//! slices et `Vec` fournis par l'appelant. Les phases 4.2/4.3 consomment
-//! `merge_sweep` comme boîte noire pure.
+// marius-render · crates/shell/render/src/sweep.rs
 
-// Type physique importé depuis la source de vérité du format disque —
-// 24 octets (id: i64, offset: u64, len: u32, _pad: [u8;4]), Pod/Zeroable.
-// Plus de définition locale : une seule forme physique, pas deux structures
-// à synchroniser manuellement (cf. handoff Phase 4.2, point 4).
+//! Phase 4.1 — Moteur Algorithmique en Mémoire (Pattern *Sans-I/O*).
+//!
+//! Noyau de fusion logique pur (*Pure Data-Oriented Function*).
+//!
+//! ## Invariants & Découplage (*Sans-I/O*)
+//!
+//! - **Isolation Stricte :** Aucune primitive d'I/O (fichiers, mmap), aucun contexte
+//!   asynchrone (`async`/Tokio) et aucun appel système n'imprègne ce module.
+//!   Il consomme exclusivement des tranches de mémoire contiguës en RAM (`&[u8]`, `&[PackfileEntry]`).
+//!   Les phases d'orchestration (4.2/4.3) l'exploitent comme une boîte noire déterministe.
+//! - **Sympathie Mécanique :** L'algorithme opère par co-itération linéaire (*Sweep Line*),
+//!   garantissant un accès mémoire séquentiel (hardware prefetching optimal) et une
+//!   complexité strictement plafonnée à $O(N + M)$ où $N$ est le registre existant et $M$ le delta.
+
+// Source de Vérité Physique.
+// Import direct depuis le layout binaire (24 octets : id i64, offset u64, len u32, _pad [u8;4]).
+// L'implémentation de `bytemuck::Pod` / `Zeroable` y est garantie.
+// Invariant architectural (Handoff 4.2 §4) : Aucune redéfinition locale pour empêcher
+// toute désynchronisation manuelle de topologie.
 use crate::pack_html_format::PackfileEntry;
 
+/// Entrée de modification transitoire (*Delta*).
+///
+/// Modélise l'empreinte spatiale d'une insertion ou d'une mise à jour
+/// référencée dans le payload courant.
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct DeltaEntry {
     pub entity_id: i64,
@@ -17,11 +32,17 @@ pub struct DeltaEntry {
     pub length: u32,
 }
 
+/// Lot de modifications transitoires.
+///
+/// Aggrégation contiguë d'entrées et de leur payload binaire pour la passe de fusion.
 pub struct DeltaBatch {
     pub entries: Vec<DeltaEntry>,
     pub payload: Vec<u8>,
 }
 
+/// Télémétrie d'exécution de la passe de fusion.
+///
+/// Remontée déterministe garantissant la traçabilité des mutations sans I/O.
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct MergeReport {
@@ -35,18 +56,21 @@ pub struct MergeReport {
     pub bytes_inserted_from_delta: u64,
 }
 
-/// Zéro-allocation dans la boucle interne. `out_index` pré-réservé par
-/// l'appelant via `with_capacity`. `out_blob` pré-dimensionné par
-/// l'appelant (borne supérieure).
+/// Moteur d'application des deltas (*Sweep Merge*).
 ///
-/// Invariants préservés par construction (pas vérifiés a posteriori) :
-/// - `out_pos` est threadé de manière strictement séquentielle à travers
-///   `flush_run` et `copy_insert` (chaque appel reçoit le curseur courant,
-///   renvoie `curseur + octets_écrits`). L'offset attribué à une entrée
-///   est toujours la valeur de `out_pos` juste avant son écriture physique
-///   → continuité automatique : `offset[k+1] == offset[k] + length[k]`.
-/// - L'ordre d'écriture dans `out_index` suit l'ordre du sweep (`entity_id`
-///   croissant), donc ordre physique du blob == ordre logique de l'index.
+/// Exécute la réconciliation séquentielle entre l'index historique et le lot de modifications.
+///
+/// ## Invariants Mémoire (Garantis par Construction)
+///
+/// - **Zéro-Allocation dans le Hot Path :** `out_index` est exigé pré-réservé par l'appelant
+///   via `with_capacity`. `out_blob` doit être pré-dimensionné à sa borne supérieure calculée.
+///   La boucle interne ne déclenche aucun redimensionnement sur le tas (*heap*).
+/// - **Continuité Spatiale :** L'accumulateur de position (`out_pos`) est threadé séquentiellement
+///   à travers les phases de copie (`flush_run`, `copy_insert`). L'offset inscrit garantit la
+///   contiguïté absolue : `offset[k+1] == offset[k] + length[k]`.
+/// - **Tri Structurel (`ID ASC`) :** L'ordre d'émission vers `out_index` s'aligne rigoureusement
+///   sur la monotonicité du balayage (`entity_id` croissant). L'ordre physique du blob de sortie
+///   reflète organiquement l'ordre logique de l'index, rendant tout tri *a posteriori* inutile.
 pub fn merge_sweep(
     old_blob: &[u8],
     old_index: &[PackfileEntry],

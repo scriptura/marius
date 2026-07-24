@@ -8,10 +8,10 @@
 //!
 //! ## Evolution de Design : Couplage au Pipeline CoW (Phase 4.2)
 //!
-//! - **Stratégie de Fusion Incrementale (*Sweep Merge*) :** Les identifiants transmis (`ids`) 
-//!   représentent exclusivement le delta d'un tick (flush du `Collector`), et non l'intégralité 
-//!   de la table. Au lieu de réécrire le packfile HTML de zéro, le pipeline fusionne 
-//!   le delta rendu avec l'ancien packfile via `sweep::merge_sweep`. Les entités inertes sont 
+//! - **Stratégie de Fusion Incrementale (*Sweep Merge*) :** Les identifiants transmis (`ids`)
+//!   représentent exclusivement le delta d'un tick (flush du `Collector`), et non l'intégralité
+//!   de la table. Au lieu de réécrire le packfile HTML de zéro, le pipeline fusionne
+//!   le delta rendu avec l'ancien packfile via `sweep::merge_sweep`. Les entités inertes sont
 //!   conservées intactes par copie de bloc sans passer par le pipeline de rendu.
 //! - **Découpage Strict Asynchrone / Synchrone :**
 //!   - `regenerate_and_swap` : Enveloppe `async` dédiée aux I/O asynchrones (requêtes SQLx via `P::fetch_batch`).

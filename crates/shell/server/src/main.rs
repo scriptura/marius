@@ -1,34 +1,27 @@
-// =============================================================================
-// crates/shell/server/src/main.rs
-//
-// Bootstrap — frontière réseau Axum/Tokio + ressources/Dispatchers réactifs.
-// specification-phase5-orchestration-main.md, Phase 5.1.
-//
-// Historique : Phase 3 a posé la frontière de lecture pure (ROUTE_TABLE,
-// cold_start, build_router/axum::serve) — composée ici à l'identique (spec
-// §7), aucune modification du Read Path.
-//
-// Phase 5.1 (cette session) ajoute :
-//   - Ressources globales : PgPool, Arc<Semaphore> (I/O), Arc<LiveRegistry>
-//     partagé (spec §4).
-//   - Table de configuration unifiée par shard, non générique : SHARDS,
-//     ShardMetadata, DEFAULT_DISPATCHER_CONFIG (spec §3).
-//   - Construction explicite des deux Dispatcher (content_core,
-//     commerce_product_core — bloc par shard, pas de boucle générique :
-//     monomorphisation), lancés en tokio::spawn nu.
-//
-// Phase 5.2 a ajouté le PgListener réactif (LISTEN/NOTIFY → Collector →
-// Notify), toujours en tokio::spawn nu à ce stade.
-//
-// Phase 5.3 (cette session) remplace les trois tokio::spawn nus (deux
-// Dispatcher + PgListener) par un JoinSet supervisé : tokio::select! entre
-// axum::serve et tasks.join_next(), fail-fast (process::exit(1)) sur toute
-// terminaison anormale d'une tâche supervisée — cf. fin de main().
+// marius-render · crates/shell/server/src/main.rs
 
-//
-// ROUTE_TABLE reste le STUB écrit à la main des phases précédentes (le
-// compilateur de templates FragmentRef n'existe pas encore, hors périmètre).
-// =============================================================================
+//! Point d'Entrée & Orchestrateur Réactif (Shell/Server).
+//!
+//! Bootstrap de la frontière réseau (Axum/Tokio) et supervision des pipelines réactifs (Dispatchers).
+//!
+//! ## Topologie d'Exécution & Supervision (Phase 5.3)
+//!
+//! - **Monomorphisation AOT :** L'instanciation des `Dispatcher` est délibérément explicite
+//!   (un bloc séquentiel par shard) pour forcer la monomorphisation des types de `Projection`. L'usage d'itérations
+//!   génériques via *dynamic dispatch* (`dyn Trait`) est proscrit sur le *Hot Path* pour garantir
+//!   l'inlining maximal des instructions au *compile-time*.
+//! - **Supervision *Fail-Fast* (`JoinSet`) :** Les I/O réactives (`PgListener`, `Dispatcher`) ne sont
+//!   plus des tâches `tokio::spawn` isolées (détachées), mais structurellement regroupées sous un `JoinSet`.
+//!   Un `tokio::select!` arbitre entre la boucle HTTP `axum::serve` et la vérification `tasks.join_next()`. La défaillance
+//!   abormale d'un seul acteur provoque un `process::exit(1)` immédiat, interdisant tout état zombie incohérent.
+//! - **Ressources Globales Partagées :** Le `PgPool` et le verrou limitateur d'I/O (`Arc<Semaphore>`)
+//!   sont injectés une seule fois au démarrage pour contraindre et plafonner l'empreinte concurrente globale
+//!   sur le système de fichiers.
+//!
+//! ## Invariants du Read Path
+//!
+//! - Le routage HTTP (`ROUTE_TABLE`, `ASSET_ROUTES`) n'alloue aucune ressource structurelle au *runtime* :
+//!   les tables sont précalculées (AOT) et résident physiquement dans le segment `.rodata`.
 
 mod handlers;
 
@@ -39,37 +32,27 @@ use axum::routing::get;
 use axum::{Extension, Router};
 use tokio::sync::{Notify, Semaphore};
 
-// Point de vérification à la compilation (en plus du Vecteur C ci-dessous) :
-// Dispatcher/DispatcherConfig sont assumés réexportés à la racine de
-// marius_render, par analogie avec IdSource/LiveRegistry/RouteEntry (déjà
-// confirmés à cette racine par le main.rs Phase 3). Si marius_render les
-// expose plutôt via un sous-module (`marius_render::dispatcher::Dispatcher`),
-// cargo build échoue ici, explicitement, sur cet import — à corriger en
-// remplaçant ce chemin par le chemin réel, rien d'autre n'en dépend.
 use marius_render::{Dispatcher, DispatcherConfig, IdSource, LiveRegistry, RouteEntry};
 
-// Vecteur C (handoff) : noms du shard `commerce_product_core` assumés par
-// convention isomorphique stricte avec `content_core` (seule paire confirmée
-// littéralement, cf. spec §3) — jamais vus écrits dans marius_schema généré.
-// Si la forge a produit un nom différent, cargo build échoue explicitement
-// sur cet import, pas un bug silencieux à l'exécution.
 use marius_schema::{
     COMMERCE_PRODUCT_CORE_COLLECTOR, COMMERCE_PRODUCT_CORE_TOTAL_CAP, CONTENT_CORE_COLLECTOR,
     CONTENT_CORE_TOTAL_CAP, CommerceProductCoreProjection, ContentCoreProjection,
 };
 
-// Phase 5.2 : seul InsertResult est nommé ici. Collector<MAX, WORDS> reste
-// non importé — chaque branche de run_pg_listener référence directement
-// CONTENT_CORE_COLLECTOR / COMMERCE_PRODUCT_CORE_COLLECTOR (déjà statiques,
-// déjà importés ci-dessus), jamais le type générique lui-même : aucun site
-// n'a besoin de nommer Collector<_, _> pour appeler .insert().
 use marius_collector::InsertResult;
 
-/// Entrée de routage HTTP pour un asset statique — générée par build.rs
-/// depuis manifest.toml (projection inverse : indexée par URL, pas par id
-/// logique — voir build.rs pour la justification). Tous les champs sont
-/// `&'static str`/`Copy` : aucune allocation à la lecture, la valeur entière
-/// est déjà en .rodata.
+/// Entrée de routage HTTP générée (*Ahead-of-Time*) pour un asset statique.
+///
+/// Produite par `build.rs` (basée sur `manifest.toml`) via la crate `phf` (*Perfect Hash Function*).
+/// La projection est inversée : l'indexation s'effectue par URL entrante et non par identifiant logique.
+///
+/// ## Sympathie Mécanique & Data Layout
+///
+/// - **Allocation Zéro (Hot Path) :** Tous les champs sont de type `&'static str`. La structure implémente
+///   les traits `Copy` et `Clone`, évitant toute sémantique de mouvement coûteuse.
+/// - **Résidence Mémoire (`.rodata`) :** L'instance vit dans le segment binaire en lecture seule.
+///   L'extraction au runtime s'effectue en un accès mémoire $O(1)$ garanti, sans traverser l'allocateur
+///   global (*heap*) ni déréférencer de pointeurs dynamiques.
 #[derive(Clone, Copy)]
 pub struct AssetRoute {
     /// Chemin physique, relatif à la racine du workspace — même convention

@@ -91,7 +91,6 @@ include!(concat!(env!("OUT_DIR"), "/generated_schema.rs"));
 mod tests {
     use super::*;
 
-    // =========================================================================
     // Tests de rendu — validité fonctionnelle
     //
     // Marqués #[ignore] : requièrent DATABASE_URL et un jeu de données DML.
@@ -99,7 +98,6 @@ mod tests {
     //
     // Vérifient la chaîne complète :
     //   fetch_batch() → Vec<(StorageRow, VarlenOwned)> → render() → HTML
-    // =========================================================================
 
     #[tokio::test]
     #[ignore]
@@ -152,9 +150,7 @@ mod tests {
         assert!(buf.contains("<dt>id</dt>"), "champ id absent");
     }
 
-    // =========================================================================
     // Tests no-realloc — INVARIANT CRITIQUE (bloquant)
-    // =========================================================================
 
     #[test]
     fn test_content_core_no_realloc() {
@@ -243,7 +239,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
     // Diagnostics de ratio de remplissage — NON BLOQUANTS (ADR-007)
     //
     // Déclassés : ne sont plus des tests d'architecture depuis l'introduction
@@ -260,7 +255,6 @@ mod tests {
     // un ratio anormalement bas peut suggérer qu'une borne CHECK/VARCHAR est
     // généreuse par rapport à l'usage réel — signal de tuning, pas de
     // correction. Aucune assertion bloquante.
-    // =========================================================================
 
     #[test]
     fn diag_content_core_ratio() {

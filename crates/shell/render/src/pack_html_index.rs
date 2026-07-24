@@ -10,9 +10,9 @@
 //! - **Injection Mémoire Préalable ($O(1)$ Cold Start) :** La projection mémoire (*mmap*) est
 //!   effectuée exhaustivement à l'initialisation de l'application (`LiveRegistry::cold_start`).
 //!   Aucun appel système `mmap()` n'est toléré dans la boucle de traitement des requêtes HTTP (*Hot Path*).
-//! - **Recherche Binaire Zéro Allocation :** L'index d'entrées étant trié par identifiant (`ID ASC`) 
-//!   et caster en tranche mémoire contiguë (`&[PackfileEntry]`), la localisation d'un fragment HTML 
-//!   s'exécute par recherche dichotomique en $O(\log N)$ instructions CPU, sans traversée de pointeurs 
+//! - **Recherche Binaire Zéro Allocation :** L'index d'entrées étant trié par identifiant (`ID ASC`)
+//!   et caster en tranche mémoire contiguë (`&[PackfileEntry]`), la localisation d'un fragment HTML
+//!   s'exécute par recherche dichotomique en $O(\log N)$ instructions CPU, sans traversée de pointeurs
 //!   ni allocation dans le *heap*.
 
 use std::io;

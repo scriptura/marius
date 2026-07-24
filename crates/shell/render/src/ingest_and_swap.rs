@@ -2,8 +2,8 @@
 
 //! Pipeline Réactif — Étage 1 (Ingestion & Copy-on-Write).
 //!
-//! Orchestre la mise à jour transactionnelle des projections. 
-//! Ce module exécute la Voie d'Extraction (*Cold Path*) de manière asynchrone 
+//! Orchestre la mise à jour transactionnelle des projections.
+//! Ce module exécute la Voie d'Extraction (*Cold Path*) de manière asynchrone
 //! sans bloquer la Voie d'Exécution (*Hot Path*).
 //!
 //! **Séquence :** `fetch_from_pg` $\rightarrow$ `merge_store` $\rightarrow$ écriture `.tmp` + `fsync` $\rightarrow$ VALIDATION $\rightarrow$ `rename` atomique $\rightarrow$ Swap mémoire (`StoreRegistry`).

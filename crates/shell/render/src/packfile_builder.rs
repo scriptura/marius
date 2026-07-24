@@ -25,12 +25,12 @@
 //!
 //! - **Stabilité Mémoire (INV-5) :** Le vecteur interne est pré-alloué dès l'instanciation (`new(capacity)`).
 //!   Garantit zéro réallocation/relogement (*resize*) durant la phase d'accumulation des lignes (*Hot Path*).
-//! - **Optimisation I/O POSIX (INV-6) :** L'écriture s'effectue via un unique passage séquentiel sur un 
+//! - **Optimisation I/O POSIX (INV-6) :** L'écriture s'effectue via un unique passage séquentiel sur un
 //!   `BufWriter<File>` injecté, minimisant le nombre d'appels système `write()` et éliminant tout `seek()`.
-//! - **Sûreté Typée Zero-Copy (INV-7) :** L'invariant `P::Record: Pod` permet de transformer la tranche 
+//! - **Sûreté Typée Zero-Copy (INV-7) :** L'invariant `P::Record: Pod` permet de transformer la tranche
 //!   typée en tranche d'octets brute via `bytemuck::cast_slice` sans bloc `unsafe`.
-//! - **Alignement Automatique :** Utilise les structures de contrôle (`PackfileStoreHeader`, `align8`) 
-//!   importées directement depuis `marius_projection`, garantissant la propagation atomique de toute 
+//! - **Alignement Automatique :** Utilise les structures de contrôle (`PackfileStoreHeader`, `align8`)
+//!   importées directement depuis `marius_projection`, garantissant la propagation atomique de toute
 //!   mutation de layout vers `PackfileReader`.
 
 use std::io::{self, BufWriter, Write};

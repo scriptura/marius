@@ -19,7 +19,7 @@
 //! ## Remarque d'Architecture (TODO Dette d'Emplacement)
 //!
 //! Déplacé temporairement dans `crates/shell/render` en raison de sa dépendance directe envers
-//! `PackfileBuilder`. Candidat naturel à une migration AOT vers `crates/core/projection` 
+//! `PackfileBuilder`. Candidat naturel à une migration AOT vers `crates/core/projection`
 //! lorsque le constructeur de paquets sera complètement extrait du Shell.
 
 use bytemuck::Pod;

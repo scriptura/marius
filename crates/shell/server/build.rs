@@ -1,19 +1,23 @@
-// =============================================================================
 // crates/shell/server/build.rs
-//
-// Ferme marius-assets-HANDOFF.md §1.10 : ce build.rs vit ici, pas dans
-// crates/core/schema/ — le routage HTTP est une préoccupation Shell, pas
-// Core/DB. Une deuxième lecture indépendante du même manifest.toml (déjà lu
-// par core/schema/build.rs pour {% asset %}) n'est pas une violation de la
-// topologie producteur unique (spec §8, qui concerne l'écriture, pas le
-// nombre de lecteurs en aval).
-//
-// Génère ASSET_ROUTES : table de routage indexée par URL PUBLIQUE, pas par
-// id logique — projection inverse du même manifeste. Fonction de hachage
-// parfaite (phf), calculée à la compilation, embarquée en .rodata du
-// binaire du Shell : lookup O(1) strict, zéro allocation, zéro coût
-// d'initialisation au démarrage (pas de HashMap construit au premier accès).
-// =============================================================================
+//!
+//! Maintien de l'isolation topologique (marius-assets-HANDOFF.md §1.10) :
+//! le routage HTTP est une responsabilité Shell, disjointe de `crates/core/schema/`.
+//! La double lecture du `manifest.toml` (déjà lu par `core/schema/build.rs`
+//! pour `{% asset %}`) respecte le pattern "Single Producer" (spec §8) :
+//! l'invariant de producteur unique contraint l'émission des données, pas leur
+//! consommation par de multiples terminaux de build en aval.
+//!
+//! Pipeline AOT (Ahead-Of-Time) & Data Layout :
+//! Génération de `ASSET_ROUTES`, table de routage indexée par URL publique
+//! (projection inverse du manifeste, au lieu d'une indexation par ID logique).
+//! Calculée à la compilation via une Perfect Hash Function (PHF) et figée
+//! directement dans la section `.rodata` du binaire Shell.
+//!
+//! Caractéristiques physiques au runtime (DOD) :
+//! - Lookup structuré en O(1) strict.
+//! - Zéro allocation dynamique (absence d'indirection heap).
+//! - Zéro cycle CPU d'initialisation (pas de construction de HashMap au démarrage,
+//!   les données étant directement mappées en mémoire).
 
 use std::collections::HashMap;
 use std::env;

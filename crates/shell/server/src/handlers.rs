@@ -1,12 +1,20 @@
-// =============================================================================
-// crates/shell/server/src/handlers.rs
-//
-// Hot path — service d'une requête HTTP. specification-marius-render-shell.md
-// §6. Lecture pure : aucun calcul HTML, résolution d'id → lookup O(log N) →
-// livraison depuis le fd déjà ouvert (Option A retenue : read_at +
-// spawn_blocking, jamais de seek() sur le fd partagé — voir pack_html_index.rs
-// et la spec §6.3 pour la justification de la race condition évitée).
-// =============================================================================
+// marius-render · crates/shell/server/src/handlers.rs
+
+//! Routeurs HTTP & Livraison d'Empreintes (*Hot Path*).
+//!
+//! Point de terminaison du cycle de vie des requêtes (Spécification §6).
+//! Le *Hot Path* est strictement dépourvu de tout calcul de rendu HTML : il se limite
+//! à une projection Identifiant $\rightarrow$ Offset mémoire.
+//!
+//! ## Invariants I/O & Sympathie Concurrente
+//!
+//! - **Lecture Sans État (`read_at`) :** L'accès physique au flux binaire s'effectue exclusivement
+//!   via `os::unix::fs::FileExt::read_at` (encapsulé dans `spawn_blocking` pour préserver
+//!   l'exécuteur Tokio). L'usage d'opérations à état comme `seek()` est structurellement
+//!   interdit pour prévenir toute *race condition* d'offset sur le descripteur de fichier partagé.
+//! - **Complexité Bornée :** La localisation d'un fragment HTML cible s'opère par
+//!   recherche dichotomique $O(\log N)$ dans l'index projeté en mémoire (*mmap*),
+//!   sans allocation ni traversée de graphe.
 
 use std::collections::HashMap;
 use std::os::unix::fs::FileExt;
@@ -20,14 +28,19 @@ use marius_render::{IdSource, LiveRegistry, PackHtmlIndex, RouteEntry};
 
 use crate::{ASSET_ROUTES, AssetRoute};
 
-/// Handler unique pour tout asset statique — fallback du routeur (spec
-/// §7/§9). `ASSET_ROUTES` (générée par build.rs, phf) est la seule liste
-/// blanche : `uri.path()` sert de clé opaque, jamais de fragment de chemin
-/// filesystem. C'est ce qui élimine toute traversée de chemin par
-/// construction (aucune concaténation `base_dir + chemin_utilisateur`
-/// n'existe nulle part dans cette fonction), pas par validation a
-/// posteriori — une clé absente de la table est un 404 immédiat, zéro I/O
-/// disque, avant même de considérer l'idée d'un chemin réel.
+/// Gestionnaire de distribution des assets statiques (*Fallback* de routage, Spec §7/§9).
+///
+/// ## Sécurité Structurelle & Résolution AOT
+///
+/// - **Zéro Concaténation (Anti-Traversal) :** L'URI (`uri.path()`) est consommée comme une clé
+///   logique opaque. Le système ne procède à aucune reconstruction dynamique de chemin de type
+///   `base_dir + user_input`. Les vulnérabilités de *Path Traversal* sont neutralisées par le
+///   modèle de données, sans dépendre d'une validation conditionnelle *a posteriori*.
+/// - **Perfect Hash Function ($O(1)$) :** L'index `ASSET_ROUTES` est figé *Ahead-of-Time*
+///   (via `build.rs` et la crate `phf`). La recherche de la ressource s'exécute en temps constant.
+/// - **Court-circuit d'I/O (Zéro Appel Système) :** Toute requête ciblant une clé absente de la
+///   table PHF est immédiatement avortée avec un code HTTP 404 en espace utilisateur, avant
+///   même d'interagir avec le système de fichiers.
 pub async fn serve_asset(uri: Uri) -> Response {
     // Lookup O(1) — seule opération avant tout I/O. `uri.path()` exclut la
     // query string par construction (http::Uri), pas besoin de la retirer

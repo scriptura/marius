@@ -1,38 +1,25 @@
-// =============================================================================
-// crates/shell/server/tests/server_supervision_and_provisioning.rs
-//
-// Renommé — "Phase 5.3" ne correspond plus à aucun repère actif du projet
-// (terminologie d'une itération antérieure). Contenu inchangé : trois tests,
-// trois contrats distincts, volontairement non mélangés :
-//
-//   1. fail_fast_panic_in_dispatcher_terminates_process (#[test], synchrone)
-//      Sous-processus réel : binaire marius complet, observation externe via
-//      try_wait() — pas par lecture du code. Prouve le câblage fail-fast de
-//      bout en bout (panic → JoinError → process::exit(1)).
-//
-//   2. startup_order_does_not_lose_pending_signal (#[tokio::test])
-//      In-process, concentré exclusivement sur Notify et Collector — aucun
-//      Dispatcher réel, aucun PgPool, aucun socket. Prouve les deux contrats
-//      indépendants de tout consommateur.
-//
-//   3. provisioning_on_empty_environment_starts_cleanly_and_serves_404
-//      (#[test], sous-processus réel) — démarrage de bout en bout sur un
-//      environnement entièrement vierge. Ce test a révélé, au cours de la
-//      Phase 1 (réactivité CoW), qu'un ajout non symétrique
-//      (cold_start_store() sans équivalent de ensure_provisioned côté
-//      store.bin) cassait ce contrat préexistant. Corrigé par
-//      ensure_store_provisioned (store_provisioning.rs) — store.bin vide
-//      auto-provisionné, symétrique à pack.bin. Aucune modification de ce
-//      fichier de test n'a été nécessaire : le contrat qu'il vérifie n'a pas
-//      changé, seule l'implémentation défaillante a été corrigée.
-// =============================================================================
+//! crates/shell/server/tests/server_supervision_and_provisioning.rs
+//!
+//! Validation des invariants structurels du pipeline déterministe (ECS/DOD/AOT).
+//! Trois contrats distincts, isolés mécaniquement :
+//!
+//!   1. fail_fast_panic_in_dispatcher_terminates_process : Supervision OS-level (synchrone).
+//!      Prouve l'absence d'état zombie (zombie state). Le superviseur relaie l'erreur (JoinError)
+//!      et délègue le redémarrage à l'orchestrateur externe via process::exit(1).
+//!
+//!   2. startup_order_does_not_lose_pending_signal : Déterminisme du Signal (asynchrone).
+//!      Isole la synchronisation (Notify/Collector) des aléas du scheduler Tokio.
+//!      Prouve que l'ordre d'exécution n'altère pas la cohérence de l'état (bit-vector).
+//!
+//!   3. provisioning_on_empty_environment_starts_cleanly_and_serves_404 : Projection AOT.
+//!      Démarrage sur environnement vierge (cold start). Prouve qu'une absence
+//!      de données précalculées ne génère pas d'exception d'infrastructure (Runtime Error 500)
+//!      mais un Zero-State valide (404), garantissant le Data-Oriented Design (DOD).
 
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-// -----------------------------------------------------------------------------
 // Test 1 — fail-fast sur panic, observé depuis un processus séparé
-// -----------------------------------------------------------------------------
 
 /// Démarre le binaire `marius` réel avec `MARIUS_DEBUG_PANIC_SHARD` positionné
 /// sur le shard `content_core`, et observe depuis l'extérieur (try_wait(),
@@ -98,9 +85,7 @@ fn fail_fast_panic_in_dispatcher_terminates_process() {
     );
 }
 
-// -----------------------------------------------------------------------------
 // Test 2 — contrat d'ordre Notify / Collector, isolé de tout consommateur
-// -----------------------------------------------------------------------------
 
 /// §8 de la spec, deux contrats indépendants de tout Dispatcher réel :
 ///
@@ -182,11 +167,9 @@ async fn startup_order_does_not_lose_pending_signal() {
     }
 }
 
-// -----------------------------------------------------------------------------
 // Test 3 — provisioning idempotent : démarrage de bout en bout sur un
 // environnement vierge (specification-provisioning-projection.md §8,
 // handoff-provisioning-projection.md, mission point 4, second niveau).
-// -----------------------------------------------------------------------------
 
 /// Envoie une requête HTTP/1.1 minimale sur `addr` et retourne le code de
 /// statut numérique de la ligne de réponse. Implémentation volontairement

@@ -1,26 +1,22 @@
-// crates/shell/render/src/store_provisioning.rs
-//
-// Correctif d'une erreur de conception de l'Étape 7 (Contrat d'Implémentation,
-// Phase 1 — réactivité CoW) : l'affirmation « store.bin n'a pas d'équivalent
-// auto-provisionné, contrairement à pack.bin » était fausse. Un store.bin
-// VIDE (row_count = 0) est un fichier parfaitement valide au sens du format
-// (PackfileStoreHeader), constructible sans aucune donnée PostgreSQL — la
-// confusion venait d'avoir mélangé deux affirmations distinctes : « store.bin
-// ne peut pas être rempli de données sans interroger Postgres » (vrai) et
-// « store.bin ne peut pas avoir d'état initial valide sans Postgres » (faux).
-//
-// Découvert en confrontant un test préexistant
-// (server_provisioning_and_supervision.rs,
-// provisioning_on_empty_environment_starts_cleanly_and_serves_404) qui exige
-// que le serveur démarre proprement sur un environnement entièrement vierge
-// — contrat antérieur à cette session, que l'ajout non symétrique de
-// cold_start_store() (Étape 7) a cassé sans que je le sache, faute d'avoir
-// vu ce test avant.
-//
-// Motif strictement calqué sur ensure_provisioned (regenerate.rs) : .tmp +
-// fsync + rename atomique, jamais de patch in-place, jamais de contact avec
-// un fichier déjà présent (même invalide — cold_start_store() le détectera
-// et échouera alors, symétrique à LiveRegistry::cold_start pour pack.bin).
+// marius-render · crates/shell/render/src/store_provisioning.rs
+
+//! Provisionnement AOT des Fichiers `store.bin` à l'État Vierge (`ensure_store_provisioned`).
+//!
+//! Garantit qu'un environnement d'exécution dépourvu d'extraction PostgreSQL préalable
+//! génère un `store.bin` valide (à $0$ enregistrement), permettant au serveur de démarrer
+//! de manière déterministe et de répondre proprement par des codes $404$ au lieu d'échouer au *Cold Start*.
+//!
+//! ## Invariants & Discipline Copy-on-Write (CoW)
+//!
+//! - **Validité Format $O(1)$ :** Un `store.bin` initial vide respecte strictement la topologie
+//!   binaire `PackfileStoreHeader` (magic, version, header de 64 octets). Il ne requiert aucune
+//!   interaction réseau avec la base de données.
+//! - **Garantie Atomicité POSIX :** Le motif d'initialisation suit rigoureusement la séquence CoW :
+//!   `Écriture .tmp` $\rightarrow$ `fsync` $\rightarrow$ `rename` atomique.
+//! - **Absence de Corruption sur Écritures Partielles :** Ne patche jamais un fichier *in-place*.
+//!   Si un fichier cible existe déjà (qu'il soit valide ou corrompu), la passe de provisionnement
+//!   s'interrompt préventivement ; la phase de validation `cold_start_store()` prend le relais
+//!   pour lever un échec explicite au démarrage.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -30,9 +26,8 @@ use marius_projection::Projection;
 
 use crate::packfile_builder::PackfileBuilder;
 
-/// Réutilise l'énumération déjà publique de `regenerate.rs` — structurellement
-/// identique (un provisionnement a réussi, ou le fichier existait déjà),
-/// aucune raison d'introduire un second type pour la même information.
+/// Re-exporte l'énumération de résultat de provisionnement (`ProvisionOutcome`).
+/// Aligné sur l'interface de `regenerate.rs` pour préserver un contrat d'appel unifié.
 pub use crate::regenerate::ProvisionOutcome;
 
 fn ensure_store_provisioned_sync<P: Projection>() -> io::Result<ProvisionOutcome>
