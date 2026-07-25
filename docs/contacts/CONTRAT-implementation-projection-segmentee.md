@@ -62,9 +62,19 @@ zéro changement de comportement.
 == true`, `escape_policy == Raw`, contribution à `DYNAMIC_CAP` nulle
 indépendamment de `max_len`.
 
-### Étape 2 — `Segment<'a>` + `VarlenField::is_segment` (fragment-forge)
+### Étape 2 — `Segment<'a>` (marius_projection) + `VarlenField::is_segment` (fragment-forge) — CLOSE, CRATE CORRIGÉ
 
-**Crate** : `crates/forge/fragment-forge`, `lib.rs`.
+**Correction de session (23/07/2026)** : la première rédaction plaçait
+`Segment<'a>` dans `crates/forge/fragment-forge`. Erreur repérée en
+confrontant `crates/core/projection/src/lib.rs` (définition réelle du trait
+`Projection`) et `batch_renderer.rs` : ce dernier dépend de `marius_projection`,
+**jamais** de `marius_fragment_forge` (outil de build-time, jamais une
+dépendance runtime). `Segment` doit vivre là où le trait `Projection`
+le consomme en signature — `crates/core/projection/src/lib.rs` — pas dans le
+crate de génération. `VarlenField::is_segment` (booléen build-time pur, jamais
+une valeur réelle à l'exécution) reste, lui, dans `fragment-forge`.
+
+**Crate** : `crates/core/projection`, `lib.rs` (`Segment<'a>`) ; `crates/forge/fragment-forge`, `lib.rs` (`VarlenField::is_segment`).
 **Contenu** :
 ```rust
 pub enum Segment<'a> {
@@ -89,23 +99,21 @@ peut re-trancher `&buf[start..end]` sans risque. Ce n'est pas une fuite de
 représentation interne : `BatchRenderer` possède déjà `buf` dans son
 intégralité, `start`/`end` ne lui apprennent rien qu'il ne pourrait déduire.
 
-Ajout de `pub is_segment: bool` sur `VarlenField`, propagé dans les 3 sites de
-construction de test déjà recensés (Étape 2 du Contrat multi-slot) — valeur
-`false` par défaut pour tous les cas existants.
+Ajout de `pub is_segment: bool` sur `VarlenField`, propagé dans les 4 sites de
+construction de test déjà recensés (Étape 2 du Contrat multi-slot + Étape 1 de
+ce Contrat) — valeur `false` par défaut pour tous les cas existants.
 **Dépend de** : Étape 1 (source de la valeur).
-**Critère de complétion** : compilation, tests existants inchangés.
+**Critère de complétion** : compilation, tests existants inchangés — **fait**,
+`cargo build`/`cargo test`/`cargo clippy` confirmés verts par vous en session.
 
-### Étape 3 — Trait `Projection` : `render_segments()` par défaut
+### Étape 3 — Trait `Projection` : `render_segments()` par défaut — CLOSE
 
-**Crate** : `crates/core/projection` — **fichier jamais vu cette session**
-(définition du trait `Projection` lui-même). Signature actuelle inférée par
-usage (`StubProjection` dans `batch_renderer.rs`) : `type Record`, `type
-VarlenOwned`, `fn fetch_batch`, `fn render(record, varlena, buf: &mut
-String)`, `fn record_id`, `fn packfile_path`, `fn store_path`, `fn
-store_registry`. **Ne pas commencer cette étape sans ce fichier** — la forme
-exacte du trait (object-safety, generics existants, éventuel
-`#[async_trait]`) doit être confrontée avant d'y ajouter quoi que ce soit.
-**Contenu prévu** :
+**Crate** : `crates/core/projection`, `lib.rs`. Fichier reçu et confronté en
+session (23/07/2026) — signature réelle du trait conforme à ce qui était
+inféré (`type Record`, `type VarlenOwned`, `fn render(record, varlena, buf:
+&mut String)`, etc.), aucune surprise structurelle (pas d'`#[async_trait]`,
+`fetch_from_pg`/`fetch_batch` via `impl Future` natif RPITIT).
+**Contenu implémenté** :
 ```rust
 /// Nombre maximal de segments produits par un enregistrement de ce composant.
 /// Connu statiquement (généré par db-forge selon le template). Permet à
@@ -137,59 +145,106 @@ fixée par le code généré, qui la surcharge selon le nombre de champs
 donc rien qui ne soit pas déjà déterminé par la compilation du template
 lui-même — pas une propriété arbitrairement rattachée à `Projection`.
 
-**Dépend de** : Étape 2 (`Segment`).
+**Dépend de** : Étape 2 (`Segment`) — close.
 **Critère de complétion** : `cargo build` sur tout composant existant sans
-changement de code généré (méthode par défaut jamais surchargée pour eux).
+changement de code généré (méthode par défaut jamais surchargée pour eux) —
+**à confirmer par vous** (implémenté, non testé en conditions réelles à ce
+stade de la session).
 
-### Étape 4 — `BatchRenderer` : boucle de segments
+### Étape 4 — `BatchRenderer` : boucle de segments — CLOSE
 
 **Crate** : `crates/shell/render`, `batch_renderer.rs`.
-**Contenu** :
-- Nouveau champ `segments: Vec<Segment<'a>>` (durée de vie liée au batch
-  courant), pré-alloué à `P::MAX_SEGMENTS` dans `new()` — même discipline que
-  `buf`/`index`.
+**Corrections apportées en cours d'implémentation (23/07/2026), par rapport à
+ce qui était prévu ici initialement** :
+- **`segments` n'est PAS un champ de `BatchRenderer`**, contrairement à ce que
+  cette section prévoyait. `Segment<'a>` emprunte sur `varlena`, dont la durée
+  de vie est celle du slice `records` reçu par *cet* appel à `render_batch` —
+  différente à chaque appel. En faire un champ aurait figé `BatchRenderer` sur
+  une seule durée de vie pour toute son existence, empêchant sa réutilisation
+  entre lots. Déclaré en local dans `render_batch`, pré-alloué une fois par
+  appel (pas par enregistrement), vidé à chaque itération.
+- **`Projection::render_segments()` (Étape 3) ne doit PAS faire `buf.clear()`
+  en interne** — corrigé après relecture, avant même d'écrire cette étape :
+  une implémentation multi-segments réelle doit pouvoir écrire l'en-tête,
+  laisser `buf` intact pendant qu'un segment emprunté est produit, puis
+  continuer à écrire le pied à la suite dans le même `buf`. Le nettoyage reste
+  la responsabilité exclusive de l'appelant (`render_batch`), exactement comme
+  pour `render()` seul aujourd'hui — un seul `self.buf.clear()` par
+  enregistrement, avant tout appel à `render_segments`.
+
+**Contenu implémenté** :
 - `render_batch` appelle désormais `P::render_segments(record, varlena, &mut
-  self.buf, &mut self.segments)` au lieu de `P::render(...)` directement.
+  self.buf, &mut segments)` au lieu de `P::render(...)` directement.
 - Boucle d'écriture : pour chaque `Segment` dans l'ordre, `write_all(&buf[start..end])`
   ou `write_all(borrowed.as_bytes())` ; `len` accumulé = somme des tailles de
-  segments (inchangé dans son principe, cf. `PackfileEntry.len`).
-- `self.segments.clear()` après écriture, avant le prochain enregistrement —
-  même pattern que `buf.clear()`.
+  segments.
 - L'assertion `debug_assert_eq!(self.buf.capacity(), self.total_cap, ...)`
   reste valable telle quelle : `buf` ne contient jamais un champ segmenté, sa
   capacité reste petite et stable pour les composants qui en portent un.
-**Dépend de** : Étape 3.
-**Critère de complétion** : les 6 tests existants de `batch_renderer.rs`
-passent sans modification (composants stub, `MAX_SEGMENTS` défaut = 1) ; un
-nouveau test avec un `StubProjection` segmenté (2-3 segments synthétiques,
-`Borrowed` incluant une chaîne dépassant volontairement l'ancien seuil de
-64 Ko) vérifie l'index physique final (`offset`/`len`) et le contenu
-reconstruit depuis le fichier, comme `packfile_content_matches_index`.
+**Dépend de** : Étape 3 — close.
+**Critère de complétion** : les 6 tests existants passent sans modification
+(composants stub, `MAX_SEGMENTS` défaut = 1) ; 2 nouveaux tests ajoutés avec
+un `StubSegmentedProjection` (3 segments réels : en-tête `Buffered`, corps
+`Borrowed` de 100 000 caractères — largement au-delà de l'ancien seuil de
+64 Ko —, pied `Buffered`) : contenu/index reconstruits correctement, et
+`buf.capacity()` inchangée malgré le corps volumineux — **implémenté, non
+exécuté en conditions réelles à ce stade de la session, à confirmer par vous**.
 
-### Étape 5 — Codegen : scission du token stream (db-forge/fragment-forge)
+### Étape 5 — Codegen : scission du token stream (db-forge/fragment-forge) — CLOSE
 
-**Crate** : `crates/forge/fragment-forge` (génération), `crates/forge/db-forge`
-(orchestration `codegen/projection.rs`/`build.rs`).
-**Contenu** : pour un template référençant un champ `is_segment == true`,
-scinder le `FlatPageToken` stream en runs statiques (avant/après/entre les
-tokens segmentés), générer `render_segments()` au lieu de `render()` :
-chaque run statique écrit dans `buf` (comme aujourd'hui), clôturé par un
-`Segment::Buffered{start,end}` ; chaque champ segmenté devient un
-`Segment::Borrowed({field}_ref)` intercalé dans l'ordre du template.
-**Point non couvert par ce Contrat, à signaler explicitement s'il survient** :
-plusieurs champs segmentés dans un même template — l'ordre relatif doit
-suivre le token stream, sans limite de nombre a priori, mais aucun cas réel ne
-l'exerce à ce jour (`content.core` n'en a qu'un). Ne pas complexifier pour un
-cas hypothétique — traiter au moment où il se présente réellement.
-**Dépend de** : Étapes 1-4, toutes closes.
-**Fichier à confronter avant d'écrire** : le corps actuel de
-`generate_aot_snippet` (déjà lu en partie, Étape 4 du Contrat varlena-raw) —
-relire dans son intégralité avant de le restructurer, pas seulement la
-branche varlena déjà modifiée.
-**Critère de complétion** : code généré pour `content.core` (une fois retagué
-`marius:large_content` à l'Étape 7) produit `render_segments()` avec 3 segments
-(en-tête statique, corps emprunté, pied statique) — vérifié par lecture du
-code généré, puis par test d'intégration réel (Étape 8).
+**Crate** : `crates/forge/fragment-forge` (`lib.rs`, nouvelle fonction
+`generate_segmented_snippet`), `crates/forge/db-forge` (`build.rs` — choix du
+générateur ; `codegen/projection.rs::write_projection_stub` — émission de
+`render()`/`render_segments()`/`MAX_SEGMENTS`), `codegen/varlen.rs` (mention
+`is_segment` dans le commentaire généré, polish).
+
+**Fichier confronté avant d'écrire, dans son intégralité** :
+`generate_aot_snippet` (`lib.rs`, fragment-forge) — tous les variants de
+`FlatPageToken` couverts (`Static`, `Field`, `IfBool`, `EndIf`, `ScriptStart`/
+`ScriptEnd`, `StaticInclude`, `AssetRef`), pas seulement la branche varlena
+déjà modifiée à l'Étape 4 du Contrat `varlena-raw`.
+
+**Algorithme implémenté** (`generate_segmented_snippet`) : identique à
+`generate_aot_snippet` pour tout token qui n'est pas un champ `is_segment`. Un
+champ `is_segment` clôt le run `Buffered` courant (variable générée
+`seg_start`, `let mut` déclarée une seule fois en tête de fonction, jamais
+re-`let` ensuite — seulement réassignée), pousse sa valeur comme
+`Segment::Borrowed` autonome, puis rouvre un nouveau run. **Vérifié à la main
+avant d'écrire le code** : un champ segmenté à l'intérieur d'un `{% if %}`
+généré produit un résultat correct dans les deux branches d'exécution
+(condition vraie/fausse) — la réassignation de `seg_start` à l'intérieur du
+bloc conditionnel est sans danger, la variable retient sa valeur d'avant le
+bloc si la condition est fausse à l'exécution, prolongeant le run englobant
+sans discontinuité.
+
+**`build.rs`** : les deux sites de résolution de template
+(`resolve_page_template` — celui qui a produit l'erreur « Mode Page » du
+début de session — et `resolve_template`) calculent désormais `has_segment =
+varlena.iter().any(|v| v.is_segment)` et appellent
+`generate_segmented_snippet` au lieu de `generate_aot_snippet` si vrai. Aucune
+valeur à faire transiter par le tuple de retour `(body, metrics)` —
+`write_projection_stub` recalcule le même booléen à partir du même `varlena`.
+
+**`codegen/projection.rs`** : si `has_segment`, `render()` devient un stub
+`unreachable!()` (jamais appelée — `BatchRenderer` appelle systématiquement
+`render_segments()`, Étape 4), et `render_segments()` reçoit le corps réel
+(déjà produit par `generate_segmented_snippet` côté `build.rs`) plus une
+surcharge `const MAX_SEGMENTS: usize = 2N+1` (`N` = nombre de champs
+`is_segment` dans le join — hypothèse documentée : un champ par template,
+vraie pour tous les cas réels à ce jour ; sur-approvisionnement sûr sinon,
+jamais un bug de correction).
+
+**Point non couvert par ce Contrat, signalé mais non traité** : plusieurs
+champs segmentés dans un même template — l'algorithme les gère dans l'ordre
+du token stream sans limite de nombre a priori (vérifié par construction),
+mais aucun test réel ne l'exerce à ce jour (`content.core` n'en a qu'un).
+**Dépend de** : Étapes 1-4 — closes.
+**Critère de complétion** : 3 tests unitaires ajoutés pour
+`generate_segmented_snippet` (scission simple, scission à l'intérieur d'un
+`{% if %}`, cas dégénéré sans champ segmenté) — **implémenté, non exécuté en
+conditions réelles à ce stade de la session, à confirmer par vous**. La
+validation bout-en-bout complète (code généré réel pour `content.core`,
+3 segments) reste à l'Étape 8, après la migration de l'Étape 7.
 
 ### Étape 6 — Non-régression
 
@@ -234,8 +289,9 @@ de Phase 1 — exécution réelle, pas relecture de code.
                                                                       5 (codegen) ─────────────▶ 6
 ```
 
-## Fichier requis avant de commencer l'Étape 3
+## Fichier requis avant de commencer l'Étape 3 — REÇU, ÉTAPE 3 CLOSE
 
-`crates/core/projection/src/lib.rs` (définition du trait `Projection`) —
-jamais vu cette session, indispensable avant d'y ajouter `render_segments()`
-et `MAX_SEGMENTS`.
+`crates/core/projection/src/lib.rs` reçu et confronté en session (23/07/2026).
+Correction notable qui en a découlé : `Segment<'a>` déplacé de
+`fragment-forge` vers `marius_projection` (cf. Étape 2 révisée) — c'est ce
+fichier même qui a révélé l'erreur de placement initiale.
