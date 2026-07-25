@@ -61,6 +61,54 @@ AFTER INSERT OR UPDATE OR DELETE ON commerce.product_core
 FOR EACH ROW EXECUTE FUNCTION commerce.notify_product_change();
 
 -- ==============================================================================
+-- content.identity → canal 'content_core_updates'
+-- PK : document_id
+-- ==============================================================================
+CREATE OR REPLACE FUNCTION content.notify_identity_change()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = content, pg_temp
+AS $$
+BEGIN
+    PERFORM pg_notify(
+        'content_core_updates',
+        COALESCE(NEW.document_id, OLD.document_id)::text
+    );
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_content_identity_notify ON content.identity;
+CREATE TRIGGER trg_content_identity_notify
+AFTER INSERT OR UPDATE OR DELETE ON content.identity
+FOR EACH ROW EXECUTE FUNCTION content.notify_identity_change();
+
+-- ==============================================================================
+-- content.body → canal 'content_core_updates'
+-- PK : document_id
+-- ==============================================================================
+CREATE OR REPLACE FUNCTION content.notify_body_change()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = content, pg_temp
+AS $$
+BEGIN
+    PERFORM pg_notify(
+        'content_core_updates',
+        COALESCE(NEW.document_id, OLD.document_id)::text
+    );
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_content_body_notify ON content.body;
+CREATE TRIGGER trg_content_body_notify
+AFTER INSERT OR UPDATE OR DELETE ON content.body
+FOR EACH ROW EXECUTE FUNCTION content.notify_body_change();
+
+-- ==============================================================================
 -- Vérification
 -- ==============================================================================
 SELECT

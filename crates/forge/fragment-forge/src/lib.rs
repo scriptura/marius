@@ -3010,7 +3010,7 @@ mod tests_hoist_scripts {
 mod tests_phase_2_2 {
     use super::{
         EscapePolicy, FieldKind, FieldSpec, FlatPageToken, SchemaIndex, VarlenField,
-        generate_aot_snippet,
+        generate_aot_snippet, generate_segmented_snippet,
     };
 
     fn make_schema<'a>(fixed: &'a [FieldSpec], varlena: &'a [VarlenField]) -> SchemaIndex<'a> {

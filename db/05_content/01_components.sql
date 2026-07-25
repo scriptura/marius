@@ -140,8 +140,8 @@ ALTER TABLE content.identity ALTER COLUMN alternative_headline SET STORAGE MAIN;
 
 -- CONTENT BODY — corps HTML (BASSE fréquence) · TOAST EXTENDED systématique
 CREATE TABLE content.body (
-  document_id  INT            NOT NULL,
-  content      VARCHAR(32000) NULL,
+  document_id  INT              NOT NULL,
+  content      VARCHAR(2000000) NULL,
   PRIMARY KEY (document_id),
   FOREIGN KEY (document_id) REFERENCES content.document(id) ON DELETE CASCADE
 ) WITH (toast_tuple_target = 128);
@@ -151,7 +151,7 @@ ALTER TABLE content.body ALTER COLUMN content SET STORAGE EXTENDED;
 
 -- Tag méta-compilateur : certifie que le contenu est du HTML pré-constitué (EscapePolicy::Raw).
 -- Directement exploité par introspect.rs pour court-circuiter l'échappement au runtime.
-COMMENT ON COLUMN content.body.content IS 'marius:raw';
+COMMENT ON COLUMN content.body.content IS 'marius:large_content';
 
 
 -- CONTENT REVISION — cold storage des snapshots éditoriaux

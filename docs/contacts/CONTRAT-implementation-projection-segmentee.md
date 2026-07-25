@@ -256,17 +256,28 @@ défaut de l'Étape 3 s'applique telle quelle.
 **Critère de complétion** : diff nul sur le code généré pour tout composant
 sans segment.
 
-### Étape 7 — Migration DDL : `marius:raw` → `marius:large_content`
+### Étape 7 — Migration DDL : `marius:raw` → `marius:large_content` — ÉCRITE, NON EXÉCUTÉE
 
-**Contenu** : `COMMENT ON COLUMN content.body.content IS 'marius:large_content';`
-(remplace le tag `marius:raw` posé en Étape 7 du Contrat varlena-raw — un seul
-tag à la fois, `marius:large_content` implique `Raw` désormais). Occasion naturelle
-de reconsidérer la borne `VARCHAR(32000)` (choix PoC lié à l'ancien seuil de
-64 Ko, qui ne s'applique plus à un champ segmenté) — **hors périmètre de ce
-Contrat**, à traiter séparément si souhaité, pour ne pas mélanger deux
-changements dans une même migration.
-**Dépend de** : Étapes 1 à 6, buildées et testées réellement.
-**Critère de complétion** : migration exécutée, `cargo build` passe.
+**Révision de portée (23/07/2026)** : cette étape prévoyait initialement de
+laisser la borne `VARCHAR(32000)` inchangée (« hors périmètre »). Revu en
+session : cette borne n'avait de raison d'être que pour rester sous l'ancien
+seuil de 64 Ko — devenu sans objet pour un champ `is_segment`. La laisser à
+32 000 aurait été une contrainte artificielle, sans justification produit,
+alors même que c'est exactement ce qui bloquait un `UPDATE` réel avec un
+contenu plus long. Les deux changements (retag + relâchement de borne) sont
+donc regroupés dans la même migration — ce n'est plus « deux changements »
+mais un seul geste cohérent une fois le mécanisme segmenté en place.
+**Contenu** : `db/migrations/05_content_body_large_content_tag_and_bound.sql`
+— `COMMENT ON COLUMN content.body.content IS 'marius:large_content'` (remplace
+`marius:raw`) + `VARCHAR(32000)` → `VARCHAR(2000000)`, scan de validation
+contre la nouvelle borne, `content.v_article` recréée (même contournement
+DROP/CREATE + regrant qu'aux migrations 02/04).
+**Dépend de** : Étapes 1 à 6 — confirmées vertes par vous
+(`cargo build`/`test`/`clippy`).
+**Critère de complétion** : migration exécutée en conditions réelles,
+`cargo build` passe toujours après (le tag ne change rien côté code déjà
+livré — seule la donnée introspectée change). **Écrite cette session, pas
+encore exécutée.**
 
 ### Étape 8 — Validation bout-en-bout
 
