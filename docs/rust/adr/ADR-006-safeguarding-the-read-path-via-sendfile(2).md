@@ -4,6 +4,12 @@
 
 Accepté
 
+**Amendement (post ADR-011).** Cette ADR reste la doctrine du chemin de lecture pour toute réponse HTTP entièrement composée de contenu ADR-008 (aucune projection volatile) — `sendfile(2)` demeure la primitive correcte dans ce cas, propriété de zéro-copie réseau native comprise.
+
+Pour toute réponse comportant une ou plusieurs projections volatiles (état de session, panier, notifications — cf. ADR-011 §6), le chemin de lecture bascule sur un ordonnancement de segments (`writev`/`sendmsg` ou équivalent), qui ne garantit pas nativement la même propriété de zéro-copie réseau. ADR-011 devient alors le document de référence du read path pour ce cas ; le mécanisme d'obtention d'un zéro-copie équivalent (`MSG_ZEROCOPY` ou autre) reste un travail distinct, non couvert ici.
+
+Cette ADR n'est donc pas remplacée : son périmètre est restreint au sous-ensemble de réponses sans contenu volatil.
+
 ## Contexte
 
 La spécification v0.2.1 introduisait une Machine Virtuelle (VM) à 6 opcodes exécutant des opérations de copie réseau à partir d'arènes binaires dynamiques partagées avec PostgreSQL. L'audit rigoureux de cette architecture a révélé des vulnérabilités et des rigidités systémiques majeures :
