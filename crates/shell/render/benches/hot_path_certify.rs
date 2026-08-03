@@ -327,7 +327,12 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
             let (storage, varlena) = record_worst_case();
             let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
             let mut warmup_segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
-            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut warmup_segments);
+            ContentCoreProjection::render_segments(
+                &storage,
+                &varlena,
+                &mut buf,
+                &mut warmup_segments,
+            );
             drop(warmup_segments);
             let segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
             (storage, varlena, buf, segments)
@@ -380,7 +385,10 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
 ///   (au lieu de rester une référence zéro-copie), cette certification
 ///   échouerait ici alors que la précédente resterait verte — c'est
 ///   précisément le scénario qu'elle est conçue pour détecter.
-#[divan::bench(name = "certify/zero_alloc_in_render_segments_large_body", sample_count = 100)]
+#[divan::bench(
+    name = "certify/zero_alloc_in_render_segments_large_body",
+    sample_count = 100
+)]
 fn bench_certify_zero_alloc_large_body(bencher: Bencher) {
     bencher
         .with_inputs(|| {
@@ -390,7 +398,12 @@ fn bench_certify_zero_alloc_large_body(bencher: Bencher) {
             let (storage, varlena) = record_segmented_large();
             let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
             let mut warmup_segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
-            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut warmup_segments);
+            ContentCoreProjection::render_segments(
+                &storage,
+                &varlena,
+                &mut buf,
+                &mut warmup_segments,
+            );
             drop(warmup_segments);
             let segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
             (storage, varlena, buf, segments)

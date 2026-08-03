@@ -1,6 +1,6 @@
 [package]
 name = "marius-schema"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2024"
 description = "Generated #[repr(C)] structs and Collector statics mirroring PostgreSQL schema for the Marius engine."
 license = "MIT OR Apache-2.0"
@@ -11,8 +11,8 @@ categories = ["database", "data-structures"]
 
 [dependencies]
 bytemuck = { version = "1.14", features = ["derive"] }
-marius-collector = { path = "../../core/collector", version = "0.3.0" }
-marius-projection = { path = "../../core/projection", version = "0.3.0" }
+marius-collector = { path = "../../core/collector", version = "=0.5.0" }
+marius-projection = { path = "../../core/projection", version = "=0.5.0" }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 
@@ -20,8 +20,8 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 
 [build-dependencies]
-marius-db-forge = { path = "../../forge/db-forge", version = "0.3.0" }
-marius-fragment-forge = { path = "../../forge/fragment-forge", version = "0.3.0" }
+marius-db-forge = { path = "../../forge/db-forge", version = "=0.5.0" }
+marius-fragment-forge = { path = "../../forge/fragment-forge", version = "=0.5.0" }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 serde = { version = "1", features = ["derive"] }

@@ -1,6 +1,6 @@
 [package]
 name = "marius-guard-forge"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2024"
 description = "Build-time RLS and security trait generator for the Marius engine."
 license = "MIT OR Apache-2.0"

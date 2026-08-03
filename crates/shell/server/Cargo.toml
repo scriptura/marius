@@ -1,6 +1,6 @@
 [package]
 name = "marius-server"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 publish = false
 description = "Serveur shell pour le projet Marius — frontière réseau Axum/Tokio (Phase 4 : lecture pure + boucle d'écriture réactive PgListener/Dispatcher, AOT-compliant via regenerate_and_swap)"
@@ -36,9 +36,9 @@ path = "src/main.rs"
 # nommer le trait Projection directement plutôt que de simplement transmettre
 # des types déjà concrets exposés par marius-schema.
 [dependencies]
-marius-render = { version = "0.3.0", path = "../../shell/render" }
-marius-collector = { path = "../../core/collector" }
-marius-schema = { path = "../../core/schema" }
+marius-render = { path = "../../shell/render", version = "=0.5.0" }
+marius-collector = { path = "../../core/collector", version = "=0.5.0" }
+marius-schema = { path = "../../core/schema", version = "=0.5.0" }
 tokio = { workspace = true }
 axum = { workspace = true }
 sqlx = { workspace = true }

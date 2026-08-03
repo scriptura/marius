@@ -1,5 +1,5 @@
 //! # marius-schema
-//! 
+//!
 //! **Crate** : `crates/core/schema/src/lib.rs`  
 //! **Projet Marius** · ADR-002 / ADR-003 / ADR-007
 //!
@@ -39,8 +39,8 @@
 //!
 //! `VarlenField.max_len` est `Option<usize>` depuis ADR-007 : un `TEXT` sans borne
 //! exploitable (ni `VARCHAR(N)`, ni `CHECK` reconnu) n'est plus exclu du schéma
-//! ni comblé par un fallback arbitraire (10 000B, désormais supprimé). 
-//! 
+//! ni comblé par un fallback arbitraire (10 000B, désormais supprimé).
+//!
 //! La classification Hot/Cold/Erreur est tranchée par `resolve_and_measure` selon
 //! que le champ est référencé ou non par le template résolu — voir
 //! `crates/forge/fragment-forge/src/lib.rs`, module `tests_phase_2_1`, tests dédiés à
