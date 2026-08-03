@@ -1,6 +1,6 @@
 <img src="./assets/default/images/marius.png" style="width: 100%">
 
-# Marius, Moteur de Projection Réactive
+# Marius, moteur de Projection Réactive
 
 Marius est une architecture expérimentale qui repense la construction
 d'applications web orientées données. Plutôt qu'empiler les couches
@@ -74,8 +74,6 @@ Le pipeline de rendu reçoit une liste dédoublonnée, pas une avalanche.
 
 ```
 .
-├── archives
-│   └── pre-adr007
 ├── artifacts
 ├── assets
 │   └── default
@@ -84,9 +82,18 @@ Le pipeline de rendu reçoit une liste dédoublonnée, pas une avalanche.
 ├── crates
 │   ├── assets
 │   ├── core
+│   │   ├── collector
+│   │   ├── projection
+│   │   └── schema
 │   ├── forge
+│   │   ├── bridge-forge
+│   │   ├── db-forge
+│   │   ├── fragment-forge
+│   │   └── guard-forge
 │   ├── marius
 │   └── shell
+│       ├── render
+│       └── server
 ├── db
 │   ├── 00_infra
 │   ├── 01_meta
