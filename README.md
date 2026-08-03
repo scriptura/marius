@@ -8,9 +8,8 @@ traditionnelles (Base de données → ORM → API JSON → Framework front-end
 → Navigateur), Marius s'inspire des moteurs de jeux vidéo pour proposer
 un chemin direct et prédictible entre la donnée brute et l'écran.
 
----
 
-## 💡 Le concept : moins d'intermédiaires, plus de certitudes
+## Le concept : moins d'intermédiaires, plus de certitudes
 
 Dans une application web classique, le serveur passe son temps à traduire
 des données (du SQL vers des objets, des objets vers du JSON) et le
@@ -32,9 +31,7 @@ Marius supprime ces intermédiaires à travers trois partis pris :
    change, il pré-calcule le fragment HTML correspondant. La lecture devient
    un simple transfert de fichier.
 
----
-
-## ⚙️ Comment ça fonctionne ?
+## Comment ça fonctionne ?
 
 ### Le cycle de vie d'une donnée
 
@@ -53,16 +50,14 @@ Mutation SQL  →  pg_notify  →  Collector Rust  →  Projection  →  Artéfa
 6. **Distribution** : le serveur Axum sert l'artéfact via `sendfile(2)`.
    Latence de lecture : ~100 µs, coût CPU quasi nul.
 
-### 🛡️ Pourquoi cette architecture est stable sous charge
+### Pourquoi cette architecture est stable sous charge
 
 Le Collector agit comme un _tampon de dédoublonnement_. Une mise à jour
 massive (10 000 lignes modifiées en une transaction) produit autant de
 signaux `NOTIFY`, mais le Collector ne conserve que les identifiants uniques.
 Le pipeline de rendu reçoit une liste dédoublonnée, pas une avalanche.
 
----
-
-## 🧰 Stack technique
+## Stack technique
 
 | Rôle                   | Outil                 | Raison                                                 |
 | ---------------------- | --------------------- | ------------------------------------------------------ |
@@ -75,34 +70,47 @@ Le pipeline de rendu reçoit une liste dédoublonnée, pas une avalanche.
 | Source de vérité       | **PostgreSQL**        | Logique métier, triggers, `LISTEN/NOTIFY`              |
 | Pipeline assets        | **build.rs**          | CSS/JS minifiés et hashés avant compilation            |
 
----
-
-## 📂 Structure du projet
+## Structure du projet
 
 ```
-marius/
-├── db/              # Couche PostgreSQL : schéma, procédures, sécurité, audit AOT
-│   ├── master_init.sql
-│   ├── 00_infra/    # Rôles, extensions, schémas
-│   ├── 01_meta/     # Registre d'intention DOD (containment_intent)
-│   ├── 02_identity/ # Acteurs, authentification, permissions
-│   ├── 03_geo/      # Lieux, adresses, coordonnées spatiales
-│   ├── 04_org/      # Organisations, hiérarchies
-│   ├── 05_content/  # Documents, médias, taxonomie, commentaires
-│   ├── 06_commerce/ # Produits, transactions, paiements
-│   ├── 07_cross_fk/ # Clés étrangères inter-schémas
-│   ├── 08_dcl/      # Droits et SECURITY DEFINER
-│   ├── 09_rls/      # Row-Level Security
-│   ├── 10_meta_seed/ # Manifeste des invariants architecturaux
-│   └── 11_audit/    # Sentinelles de performance et de santé
-│
-├── src/             # Couche Rust : serveur, collecteur, projection, données
-└── Cargo.toml
+.
+├── archives
+│   └── pre-adr007
+├── artifacts
+├── assets
+│   └── default
+├── build
+│   └── default
+├── crates
+│   ├── assets
+│   ├── core
+│   ├── forge
+│   ├── marius
+│   └── shell
+├── db
+│   ├── 00_infra
+│   ├── 01_meta
+│   ├── 02_identity
+│   ├── 03_geo
+│   ├── 04_org
+│   ├── 05_content
+│   ├── 06_commerce
+│   ├── 07_cross_fk
+│   ├── 08_dcl
+│   ├── 09_rls
+│   ├── 10_meta_seed
+│   ├── 11_audit
+│   ├── 12_events
+│   ├── dml
+│   ├── doc
+│   ├── migrations
+│   ├── tests
+│   └── tools
+├── logs
+└── scripts
 ```
 
----
-
-## 🚀 Démarrage rapide
+## Démarrage rapide
 
 ### Pré-requis
 
@@ -129,17 +137,13 @@ cargo build --release
 ./target/release/marius
 ```
 
----
-
-## 📖 Documentation
+## Documentation
 
 Les choix d'architecture et leurs justifications se trouvent dans
 `doc/adr/`. Chaque ADR documente un problème, les alternatives
 considérées et la décision retenue.
 
----
-
-## 🎯 Pourquoi cette architecture ?
+## Pourquoi cette architecture ?
 
 Marius a été conçu pour répondre à des problématiques où les architectures
 classiques atteignent leurs limites :
@@ -152,9 +156,7 @@ classiques atteignent leurs limites :
   même dépôt. Toute désynchronisation entre le schéma et le code fait
   échouer la compilation. Si ça compile, l'intégration est cohérente.
 
----
-
-## 🔬 Philosophie
+## Philosophie
 
 Marius est expérimental et assumé comme tel. L'objectif n'est pas de
 remplacer les frameworks existants, mais d'explorer ce qui devient
