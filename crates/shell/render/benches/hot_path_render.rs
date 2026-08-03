@@ -51,6 +51,7 @@ fn record_nominal() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
         is_readable: 0,
         is_commentable: 0,
         is_visible_comments: 0,
+        _pad: [0u8; 3],
     };
     let varlena = ContentCoreVarlenOwned {
         headline: Some("Introduction à l'architecture DOD".to_string()),
@@ -86,6 +87,7 @@ fn record_worst_case() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
         is_readable: 0,
         is_commentable: 0,
         is_visible_comments: 0,
+        _pad: [0u8; 3],
     };
     let varlena = ContentCoreVarlenOwned {
         headline: Some(aggressive.clone()),
@@ -268,6 +270,7 @@ fn record_segmented_large() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
         is_readable: 1, // active la branche {% if %} contenant le champ segmenté
         is_commentable: 0,
         is_visible_comments: 0,
+        _pad: [0u8; 3],
     };
     let varlena = ContentCoreVarlenOwned {
         headline: Some("Article de test — contenu volumineux".to_string()),

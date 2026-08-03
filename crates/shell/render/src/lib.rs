@@ -22,6 +22,19 @@ pub use dispatcher::{Dispatcher, DispatcherConfig};
 pub use pack_html_format::PackfileEntry;
 pub use packfile_builder::PackfileBuilder;
 
+// render_batch_pure — même convention que BatchRenderer/regenerate_and_swap
+// ci-dessous (fonction principale d'un module, ré-exportée à plat).
+// Correction (26/07/2026) : cette fonction existe dans dispatcher.rs depuis
+// l'origine (documentée comme telle dans hot_path_certify.rs/hot_path_render.rs,
+// « Reproduit fidèlement render_batch_pure() de dispatcher.rs ») mais n'avait
+// jamais été réexportée ici — les deux binaires de benchmark qui l'importent
+// via `marius_render::render_batch_pure` n'ont donc probablement jamais
+// compilé, découvert seulement à l'exécution réelle des benchmarks, jamais
+// tentée avant cette session. Sans lien avec la segmentation elle-même —
+// un oubli de réexport préexistant, mis au jour par la première tentative
+// réelle de `cargo bench` sur ce crate.
+pub use dispatcher::render_batch_pure;
+
 // regenerate_and_swap — Phase 4. Même convention que BatchRenderer ci-dessus
 // (fonction principale d'un module, ré-exportée à plat). dispatcher.rs
 // l'appelle via `crate::regenerate_and_swap`, pas

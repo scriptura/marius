@@ -55,6 +55,7 @@ fn record_nominal() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
         is_readable: 0,
         is_commentable: 0,
         is_visible_comments: 0,
+        _pad: [0u8; 3],
     };
     let varlena = ContentCoreVarlenOwned {
         headline: Some("Introduction à l'architecture DOD".to_string()),
@@ -90,6 +91,7 @@ fn record_worst_case() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
         is_readable: 0,
         is_commentable: 0,
         is_visible_comments: 0,
+        _pad: [0u8; 3],
     };
     let varlena = ContentCoreVarlenOwned {
         headline: Some(aggressive.clone()),
@@ -137,6 +139,7 @@ fn record_segmented_large() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
         is_readable: 1, // active la branche {% if %} contenant le champ segmenté
         is_commentable: 0,
         is_visible_comments: 0,
+        _pad: [0u8; 3],
     };
     let varlena = ContentCoreVarlenOwned {
         headline: Some("Article de test — contenu volumineux".to_string()),
@@ -304,19 +307,29 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
             // with_inputs comme références produit un affichage tronqué :
             // Divan ne voit pas d'input à mesurer et n'affiche pas les temps.
             //
-            // buf et segments sont pré-chauffés ici (hors fenêtre de
-            // certification) : le premier render_segments() garantit que
-            // capacity >= TOTAL_CAP après l'éventuel arrondi page de
-            // l'allocateur, et que segments a la bonne capacité. Les
-            // allocations de ce setup sont hors reset/read.
+            // buf est pré-chauffé ici (hors fenêtre de certification) : le
+            // premier render_segments() garantit que capacity >= TOTAL_CAP
+            // après l'éventuel arrondi page de l'allocateur. Les allocations
+            // de ce setup sont hors reset/read.
+            //
+            // Correction (26/07/2026) : le Vec<Segment> produit par ce premier
+            // appel emprunte sur `varlena` (Segment::Borrowed) — impossible à
+            // renvoyer dans le même tuple que `varlena` lui-même (déplacé),
+            // le borrow checker refuse à raison (E0505/E0515). Ce
+            // pré-chauffage utilise donc un Vec jetable, local à cette
+            // closure, jamais renvoyé ; le Vec réellement renvoyé plus bas
+            // est vide — aucun emprunt sur `varlena` au moment du retour,
+            // donc aucun conflit.
             //
             // Correction (23/07/2026) : appelait render() directement — cassé
             // pour content.core, segmenté depuis CONTRAT-implementation-
             // projection-segmentee.md Étape 5.
             let (storage, varlena) = record_worst_case();
             let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
-            let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
-            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            let mut warmup_segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut warmup_segments);
+            drop(warmup_segments);
+            let segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
             (storage, varlena, buf, segments)
         })
         .bench_local_values(|(storage, varlena, mut buf, mut segments)| {
@@ -367,17 +380,19 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
 ///   (au lieu de rester une référence zéro-copie), cette certification
 ///   échouerait ici alors que la précédente resterait verte — c'est
 ///   précisément le scénario qu'elle est conçue pour détecter.
-#[divan::bench(
-    name = "certify/zero_alloc_in_render_segments_large_body",
-    sample_count = 100
-)]
+#[divan::bench(name = "certify/zero_alloc_in_render_segments_large_body", sample_count = 100)]
 fn bench_certify_zero_alloc_large_body(bencher: Bencher) {
     bencher
         .with_inputs(|| {
+            // Même correctif qu'en bench_certify_zero_alloc ci-dessus (26/07/2026) :
+            // Vec jetable pour le pré-chauffage, Vec vide (sans emprunt sur
+            // varlena) pour ce qui est réellement renvoyé.
             let (storage, varlena) = record_segmented_large();
             let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
-            let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
-            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            let mut warmup_segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut warmup_segments);
+            drop(warmup_segments);
+            let segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
             (storage, varlena, buf, segments)
         })
         .bench_local_values(|(storage, varlena, mut buf, mut segments)| {

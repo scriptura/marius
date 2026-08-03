@@ -359,7 +359,7 @@ d'absence de régression ailleurs dans le crate.
 marius-render --bench hot_path_render`. Rien de ce qui précède n'a été
 exécuté cette session.
 
-### Complément (26/07/2026) — troisième foyer, trouvé au retour
+### Complément (26/07/2026) — troisième foyer, trouvé au retour de vacances
 
 `cargo build` vert, mais `cargo test` a révélé deux échecs supplémentaires
 dans `crates/core/schema/src/lib.rs` (`tests::diag_content_core_ratio`,
@@ -388,3 +388,35 @@ fixture n'exerce jamais le nouveau chemin de code. Vérifier qu'un test
 qu'il prétend garantir est une question distincte, trop facile à manquer
 quand une fixture par défaut (`Default::default()`) neutralise silencieusement
 la branche qui compte.
+
+### Complément (26/07/2026) — premier `cargo bench` réel, trois erreurs de compilation
+
+`cargo test` vert. Premier `cargo bench -p marius-render` jamais tenté sur ce
+crate depuis l'écriture des benchmarks (23/07) : trois erreurs, dont deux
+n'ont **aucun rapport** avec la segmentation — la preuve que ces deux
+binaires n'avaient probablement jamais compilé, à aucun moment, avant cette
+tentative :
+
+1. **`marius_render::render_batch_pure` introuvable** — la fonction existe
+   dans `dispatcher.rs` depuis l'origine, documentée comme telle dans les deux
+   fichiers de bench, mais jamais réexportée dans la façade
+   (`crates/shell/render/src/lib.rs`). Corrigé (`pub use
+   dispatcher::render_batch_pure;`, même convention que les autres exports à
+   plat déjà en place dans ce fichier).
+2. **Champ `_pad` manquant** dans les 6 fixtures `ContentCoreStorageRow`
+   (3 par fichier) — dérive entre les fixtures et la forme réelle de la
+   struct générée (`_pad: [u8; 3]`), sans rapport avec la segmentation.
+   Corrigé, `_pad: [0u8; 3]` ajouté partout.
+3. **Erreur d'emprunt réelle, celle-ci de mon fait** (`E0505`/`E0515`) : dans
+   les deux certifications zéro-allocation, le `Vec<Segment>` de
+   pré-chauffage emprunte sur `varlena` (`Segment::Borrowed`) — impossible à
+   renvoyer dans le même tuple que `varlena` déplacé. Corrigé en séparant le
+   `Vec` de pré-chauffage (jetable, local) du `Vec` vide réellement renvoyé
+   (aucun emprunt au moment du retour).
+
+**Constat plus large** : deux binaires entiers de benchmark ont pu rester
+non compilables pendant tout le développement de ce Contrat sans que
+personne ne s'en aperçoive, `cargo build`/`cargo test` ne les exerçant pas
+par défaut (`cargo bench` est une commande distincte). La leçon du 25/07
+s'étend une fois de plus : « jamais exécuté » couvre aussi « jamais compilé
+», pas seulement « jamais exercé en profondeur ».
