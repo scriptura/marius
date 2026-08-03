@@ -1,5 +1,5 @@
-// marius-db-forge · crates/forge/db-forge/src/validate.rs
-
+//! # marius-db-forge · crates/forge/db-forge/src/validate.rs
+//!
 //! Validation AOT de la densité mémoire (`intent_density_bytes`).
 //!
 //! Recoupe le layout `#[repr(C)]` calculé depuis `pg_attribute` avec

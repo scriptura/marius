@@ -1,4 +1,4 @@
-//! marius-db-forge · crates/forge/db-forge/src/introspect.rs
+//! # marius-db-forge · crates/forge/db-forge/src/introspect.rs
 //! Requêtes SQLx d'introspection pg_catalog / information_schema / pg_stats.
 
 use sqlx::Row as _;

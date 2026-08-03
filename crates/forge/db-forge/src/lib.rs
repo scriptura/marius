@@ -1,21 +1,18 @@
-// =============================================================================
-// marius-db-forge · crates/forge/db-forge/src/lib.rs
-//
-// API publique du crate.
-// Exposé comme build-dependency de crates/core/schema/build.rs.
-//
-// ─── Séparation des responsabilités ──────────────────────────────────────────
-//
-//   db-forge   : introspection pg_catalog + génération des types Rust.
-//   fragment-forge : génération des corps render() + constantes capacité HTML.
-//   build.rs   : orchestrateur mince, lecture DATABASE_URL, écriture disque.
-//
-// ─── Dépendance unidirectionnelle (INV-4) ────────────────────────────────────
-//
-//   db-forge → fragment-forge (VarlenField, FieldSpec, FieldKind, generate_render).
-//   fragment-forge N'importe PAS db-forge.
-//
-// =============================================================================
+//! # marius-db-forge · `crates/forge/db-forge/src/lib.rs`
+//!
+//! API publique du crate.  
+//! Exposé comme build-dependency de `crates/core/schema/build.rs`.
+//!
+//! ## Séparation des responsabilités
+//!
+//! - `db-forge` : Introspection `pg_catalog` + génération des types Rust.
+//! - `fragment-forge` : Génération des corps `render()` + constantes capacité HTML.
+//! - `build.rs` : Orchestrateur mince, lecture `DATABASE_URL`, écriture disque.
+//!
+//! ## Dépendance unidirectionnelle (INV-4)
+//!
+//! - `db-forge` → `fragment-forge` (`VarlenField`, `FieldSpec`, `FieldKind`, `generate_render`).
+//! - `fragment-forge` n'importe pas `db-forge`.
 
 pub mod codegen;
 pub mod introspect;

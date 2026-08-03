@@ -1,25 +1,26 @@
-// marius-projection — crates/core/projection/src/lib.rs
-// Trait Projection — interface canonique entre l'Orchestrator et les
-// implémentations générées par Bridge-Forge + Fragment-Forge.
-//
-// Ce crate est la frontière Core/Shell :
-//   - Il référence sqlx::PgPool (Shell) pour fetch_batch
-//   - Il porte PackfileStoreHeader + align8 : source de vérité unique du
-//     protocole binaire (partagée par PackfileBuilder et PackfileReader).
-//   - Phase 2 : PackfileReader exposé ici pour que marius_schema puisse
-//     l'utiliser sans cycle de dépendance (marius_render → marius_schema).
-//
-// ─── ADR-003 : Dualité Record / VarlenOwned ───────────────────────────────────
-//
-//   Record      : struct #[repr(C)], fixed-length, layout miroir PostgreSQL.
-//   VarlenOwned : struct possédée portant les données varlena (Option<String>).
-//                 () pour les tables sans varlena.
-//
-// ─── Protocole binaire ────────────────────────────────────────────────────────
-//
-//   Défini ici (PackfileStoreHeader, align8) — importé par PackfileBuilder
-//   (marius_render) et PackfileReader (ce crate). Toute modification du layout
-//   se propage automatiquement aux deux côtés.
+//! # marius-projection — crates/core/projection/src/lib.rs
+//!
+//! Trait Projection — interface canonique entre l'Orchestrator et les
+//! implémentations générées par Bridge-Forge + Fragment-Forge.
+//!
+//! Ce crate est la frontière Core/Shell :
+//!   - Il référence sqlx::PgPool (Shell) pour fetch_batch
+//!   - Il porte PackfileStoreHeader + align8 : source de vérité unique du
+//!     protocole binaire (partagée par PackfileBuilder et PackfileReader).
+//!   - Phase 2 : PackfileReader exposé ici pour que marius_schema puisse
+//!     l'utiliser sans cycle de dépendance (marius_render → marius_schema).
+//!
+//! ─── ADR-003 : Dualité Record / VarlenOwned ───────────────────────────────────
+//!
+//!   Record      : struct #[repr(C)], fixed-length, layout miroir PostgreSQL.
+//!   VarlenOwned : struct possédée portant les données varlena (Option<String>).
+//!                 () pour les tables sans varlena.
+//!
+//! ─── Protocole binaire ────────────────────────────────────────────────────────
+//!
+//!   Défini ici (PackfileStoreHeader, align8) — importé par PackfileBuilder
+//!   (marius_render) et PackfileReader (ce crate). Toute modification du layout
+//!   se propage automatiquement aux deux côtés.
 
 use std::path::PathBuf;
 

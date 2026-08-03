@@ -1,12 +1,12 @@
-// marius-projection — crates/core/projection/src/store_registry.rs
-//
-// cf. DESIGN-store-registry.md
-//
-// Registre mono-slot, atomiquement remplaçable, pour un PackfileReader<P>.
-// Remplace le `static OnceLock<PackfileReader<P>>` généré aujourd'hui par
-// codegen/projection.rs (db-forge) — cf. Contrat d'Implémentation, Étape 3.
-//
-// INV-1..INV-5 : cf. DESIGN-store-registry.md §4, §7.
+//! # marius-projection — crates/core/projection/src/store_registry.rs
+//!
+//! cf. DESIGN-store-registry.md
+//!
+//! Registre mono-slot, atomiquement remplaçable, pour un PackfileReader<P>.
+//! Remplace le `static OnceLock<PackfileReader<P>>` généré aujourd'hui par
+//! codegen/projection.rs (db-forge) — cf. Contrat d'Implémentation, Étape 3.
+//!
+//! INV-1..INV-5 : cf. DESIGN-store-registry.md §4, §7.
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};

@@ -1,18 +1,19 @@
-// =============================================================================
-// marius-db-forge · crates/forge/db-forge/src/registry.rs
-//
-// fetch_component_list() lit meta.containment_intent + meta.component_varlena_join
-// (Pivot 1). Ordre : component_id ASC, join_slot_idx ASC (déterminisme INV-8).
-//
-// RÉVISION (CONTRAT-implementation-multi-slot-varlena.md, Étape 1) : la limite
-// Phase 1 (« join_slot_idx = 0 : seul le premier slot est chargé ») est retirée.
-// ComponentConfig.varlena_join passe de Option<VarlenJoin> à Vec<VarlenJoin> —
-// un composant peut désormais porter 0..N joins varlena, dans l'ordre
-// join_slot_idx croissant. Ce changement casse la compilation de build.rs
-// (`match &comp.varlena_join { Some(j) => ... }`, lignes 1767/1817 confirmées
-// cette session) — attendu, non corrigé ici : c'est la portée de l'Étape 4 du
-// même Contrat. Cette étape est testée en isolation, dans ce crate seul.
-// =============================================================================
+//! # marius-db-forge · `crates/forge/db-forge/src/registry.rs`
+//!
+//! `fetch_component_list()` lit `meta.containment_intent` + `meta.component_varlena_join`
+//! (Pivot 1). Ordre : `component_id ASC, join_slot_idx ASC` (déterminisme **INV-8**).
+//!
+//! ## Révision (`CONTRAT-implementation-multi-slot-varlena.md`, Étape 1)
+//!
+//! La limite Phase 1 (« `join_slot_idx = 0` : seul le premier slot est chargé ») est retirée.  
+//! `ComponentConfig.varlena_join` passe de `Option<VarlenJoin>` à `Vec<VarlenJoin>` —
+//! un composant peut désormais porter 0..N joins varlena, dans l'ordre
+//! `join_slot_idx` croissant.
+//!
+//! Ce changement casse la compilation de `build.rs`
+//! (`match &comp.varlena_join { Some(j) => ... }`, lignes 1767/1817) —
+//! attendu, non corrigé ici : c'est la portée de l'Étape 4 du
+//! même Contrat. Cette étape est testée en isolation, dans ce crate seul.
 
 use sqlx::Row as _; // try_get sur PgRow
 

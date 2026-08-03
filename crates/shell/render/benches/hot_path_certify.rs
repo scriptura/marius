@@ -367,7 +367,10 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
 ///   (au lieu de rester une référence zéro-copie), cette certification
 ///   échouerait ici alors que la précédente resterait verte — c'est
 ///   précisément le scénario qu'elle est conçue pour détecter.
-#[divan::bench(name = "certify/zero_alloc_in_render_segments_large_body", sample_count = 100)]
+#[divan::bench(
+    name = "certify/zero_alloc_in_render_segments_large_body",
+    sample_count = 100
+)]
 fn bench_certify_zero_alloc_large_body(bencher: Bencher) {
     bencher
         .with_inputs(|| {

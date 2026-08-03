@@ -1,16 +1,19 @@
-// =============================================================================
-// DB-Forge — crates/core/schema/build.rs
-//
-// Orchestrateur build-time. Responsabilités :
-//   1. Registry driver (Phase 1)      : fetch_component_list()
-//   2. Validation layout (Phase 2)    : validate_layout()
-//   3. Pipeline template Voie B       : lecture .marius, parse, résolution,
-//      génération du corps render() — TOUTE l'I/O disque vit ici.
-//      db-forge (write_projection_stub) reste un générateur pur : il reçoit
-//      le résultat déjà calculé (Option<(&str, &TemplateMetrics)>).
-//
-// Prérequis : DATABASE_URL pointe vers marius avec rôle marius_admin.
-// =============================================================================
+//! # DB-Forge · `crates/core/schema/build.rs`
+//!
+//! Orchestrateur build-time.
+//!
+//! ## Responsabilités
+//!
+//! 1. **Registry driver (Phase 1)** : `fetch_component_list()`
+//! 2. **Validation layout (Phase 2)** : `validate_layout()`
+//! 3. **Pipeline template Voie B** : Lecture `.marius`, parse, résolution,
+//!    génération du corps `render()` — toute l'I/O disque vit ici.  
+//!    `db-forge` (`write_projection_stub`) reste un générateur pur : il reçoit
+//!    le résultat déjà calculé (`Option<(&str, &TemplateMetrics)>`).
+//!
+//! ## Prérequis
+//!
+//! `DATABASE_URL` pointe vers `marius` avec le rôle `marius_admin`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

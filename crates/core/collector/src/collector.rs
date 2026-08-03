@@ -1,10 +1,11 @@
-// marius-collector · collector.rs
-// Table de présence lock-free par Bit-Vector.
-// Aucune dépendance Tokio ni SQLx — Core pur.
-//
-// L'appelant (Shell / Dispatcher dans marius-render) reçoit InsertResult
-// et décide d'émettre notify.notify_one() si ThresholdReached.
-// Ce pattern isole toute primitive de synchronisation async hors du Core.
+//! # marius-collector · crates/core/collector/src/collector.rs
+//!
+//! Table de présence lock-free par Bit-Vector.  
+//! Aucune dépendance Tokio ni SQLx — Core pur.
+//!
+//! L'appelant (Shell / Dispatcher dans `marius-render`) reçoit `InsertResult`
+//! et décide d'émettre `notify.notify_one()` si `ThresholdReached`.  
+//! Ce pattern isole toute primitive de synchronisation async hors du Core.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::*};
 

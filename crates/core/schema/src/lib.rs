@@ -1,79 +1,78 @@
-// =============================================================================
-// marius-schema — crates/core/schema/src/lib.rs
-// Projet Marius · ADR-002 / ADR-003 / ADR-007
-//
-// Point d'entrée de la crate schema.
-// Re-exporte les types des crates core (Projection, Collector) et inclut
-// le fichier généré par DB-Forge à la compilation (generated_schema.rs).
-//
-// ─── Contenu de generated_schema.rs ──────────────────────────────────────────
-//
-//   Pour chaque table surveillée dans build.rs, le fichier généré contient :
-//
-//   {Name}Row           : struct sqlx::FromRow (transport sqlx → Dispatcher).
-//   {Name}StorageRow    : struct #[repr(C)] (stockage mémoire contiguë).
-//   {Name}VarlenOwned   : struct possédée (Option<String>, Send+'static).
-//                         Absente (remplacée par ()) si pas de varlena.
-//   From<{Name}Row> for {Name}StorageRow
-//   Collector<MAX, WORDS> statique
-//   impl Projection stub :
-//     type Record      = {Name}StorageRow
-//     type VarlenOwned = {Name}VarlenOwned | ()
-//     fetch_batch()    → Vec<(StorageRow, VarlenOwned)>
-//     render()         → &StorageRow + &VarlenOwned + &mut String
-//     artifact_path()
-//   Constantes de capacité :
-//     {NAME}_STATIC_CAP  : octets HTML statiques
-//     {NAME}_DYNAMIC_CAP : largeurs max des valeurs dynamiques
-//     {NAME}_TOTAL_CAP   : = STATIC_CAP + DYNAMIC_CAP
-//
-// ─── ADR-003 : Suppression de RenderPayload<'a> ──────────────────────────────
-//
-//   RenderPayload<'a> n'est plus émis dans le fichier généré.
-//   Les &str sont reconstruits localement dans render() via as_deref(), sans
-//   traversée de frontière de lifetime — la reconstruction est locale à
-//   l'appel, quel que soit le contexte d'exécution (séquentiel ou non).
-//   VarlenOwned est le type transporté (Send+'static) ; le payload est éphémère.
-//
-// ─── ADR-007 : Frontière Hot/Cold/Erreur sur les champs varlena ──────────────
-//
-//   VarlenField.max_len est Option<usize> depuis ADR-007 : un TEXT sans borne
-//   exploitable (ni VARCHAR(N), ni CHECK reconnu) n'est plus exclu du schéma
-//   ni comblé par un fallback arbitraire (10 000B, désormais supprimé). La
-//   classification Hot/Cold/Erreur est tranchée par resolve_and_measure selon
-//   que le champ est référencé ou non par le template résolu — voir
-//   crates/forge/fragment-forge/src/lib.rs, module tests_phase_2_1, tests dédiés à
-//   cette table de vérité (unbounded_field_referenced_fails_resolution, etc).
-//   Cette frontière vit entièrement côté compilateur (Voie B) ; les tests de
-//   ratio de remplissage ci-dessous ne la concernent pas et ont été déclassés
-//   en diagnostic (voir section correspondante).
-//
-// ─── Tests ───────────────────────────────────────────────────────────────────
-//
-//   1. Tests fonctionnels (ignorés par défaut, requièrent DATABASE_URL) :
-//      Vérifient que fetch_batch() retourne des tuples (StorageRow, VarlenOwned)
-//      valides et que render() produit un HTML syntaxiquement correct.
-//
-//   2. Tests no-realloc (toujours actifs, sans DATABASE_URL) :
-//      Alimentent les structs avec les valeurs pires cas et assertent
-//      buf.capacity() == {NAME}_TOTAL_CAP après render().
-//      Pour VarlenOwned : chaînes de max_len × '&' (pire cas escape × 6).
-//      Reste l'invariant de sécurité primaire — contrairement aux tests de
-//      ratio (diagnostic uniquement depuis ADR-007), ces tests bloquent le
-//      build s'ils échouent.
-//
-//   3. Tests de ratio de remplissage (diagnostic informatif, non bloquants) :
-//      Mesurent le pourcentage de TOTAL_CAP utilisé sur données représentatives.
-//      Déclassés depuis ADR-007 : le ratio dépend entièrement du contenu du
-//      fixture, pas d'une propriété démontrable du compilateur — un fixture
-//      vide (Default::default()) produit mécaniquement un ratio proche de 0%
-//      quelle que soit la borne réelle, sans que cela indique un défaut du
-//      pipeline. Voir discussion ADR-007 (frontière Hot/Cold) : l'invariant
-//      qui comptait réellement ("un champ non borné référencé échoue à la
-//      compilation") est désormais vérifié directement dans fragment-forge,
-//      pas indirectement via ce ratio.
-//
-// =============================================================================
+//! # marius-schema
+//! 
+//! **Crate** : `crates/core/schema/src/lib.rs`  
+//! **Projet Marius** · ADR-002 / ADR-003 / ADR-007
+//!
+//! Point d'entrée de la crate `schema`.  
+//! Re-exporte les types des crates core (`Projection`, `Collector`) et inclut
+//! le fichier généré par DB-Forge à la compilation (`generated_schema.rs`).
+//!
+//! ## Contenu de `generated_schema.rs`
+//!
+//! Pour chaque table surveillée dans `build.rs`, le fichier généré contient :
+//!
+//! - `{Name}Row` : `struct sqlx::FromRow` (transport sqlx → Dispatcher).
+//! - `{Name}StorageRow` : `struct #[repr(C)]` (stockage mémoire contiguë).
+//! - `{Name}VarlenOwned` : Struct possédée (`Option<String>`, `Send + 'static`). Absente (remplacée par `()`) si pas de varlena.
+//! - `From<{Name}Row> for {Name}StorageRow`
+//! - `Collector<MAX, WORDS>` statique.
+//! - `impl Projection` stub :
+//!   - `type Record = {Name}StorageRow`
+//!   - `type VarlenOwned = {Name}VarlenOwned | ()`
+//!   - `fetch_batch() -> Vec<(StorageRow, VarlenOwned)>`
+//!   - `render() -> &StorageRow + &VarlenOwned + &mut String`
+//!   - `artifact_path()`
+//! - Constantes de capacité :
+//!   - `{NAME}_STATIC_CAP` : Octets HTML statiques.
+//!   - `{NAME}_DYNAMIC_CAP` : Largeurs max des valeurs dynamiques.
+//!   - `{NAME}_TOTAL_CAP` : `= STATIC_CAP + DYNAMIC_CAP`.
+//!
+//! ## ADR-003 : Suppression de `RenderPayload<'a>`
+//!
+//! `RenderPayload<'a>` n'est plus émis dans le fichier généré.  
+//! Les `&str` sont reconstruits localement dans `render()` via `as_deref()`, sans
+//! traversée de frontière de lifetime — la reconstruction est locale à
+//! l'appel, quel que soit le contexte d'exécution (séquentiel ou non).  
+//! `VarlenOwned` est le type transporté (`Send + 'static`) ; le payload est éphémère.
+//!
+//! ## ADR-007 : Frontière Hot/Cold/Erreur sur les champs varlena
+//!
+//! `VarlenField.max_len` est `Option<usize>` depuis ADR-007 : un `TEXT` sans borne
+//! exploitable (ni `VARCHAR(N)`, ni `CHECK` reconnu) n'est plus exclu du schéma
+//! ni comblé par un fallback arbitraire (10 000B, désormais supprimé). 
+//! 
+//! La classification Hot/Cold/Erreur est tranchée par `resolve_and_measure` selon
+//! que le champ est référencé ou non par le template résolu — voir
+//! `crates/forge/fragment-forge/src/lib.rs`, module `tests_phase_2_1`, tests dédiés à
+//! cette table de vérité (`unbounded_field_referenced_fails_resolution`, etc.).
+//!
+//! Cette frontière vit entièrement côté compilateur (Voie B) ; les tests de
+//! ratio de remplissage ci-dessous ne la concernent pas et ont été déclassés
+//! en diagnostic.
+//!
+//! ## Tests
+//!
+//! 1. **Tests fonctionnels** *(ignorés par défaut, requièrent `DATABASE_URL`)* :  
+//!    Vérifient que `fetch_batch()` retourne des tuples `(StorageRow, VarlenOwned)`
+//!    valides et que `render()` produit un HTML syntaxiquement correct.
+//!
+//! 2. **Tests no-realloc** *(toujours actifs, sans `DATABASE_URL`)* :  
+//!    Alimentent les structs avec les valeurs pires cas et assertent
+//!    `buf.capacity() == {NAME}_TOTAL_CAP` après `render()`.  
+//!    Pour `VarlenOwned` : chaînes de `max_len` × `&` (pire cas escape × 6).  
+//!    Reste l'invariant de sécurité primaire — contrairement aux tests de
+//!    ratio (diagnostic uniquement depuis ADR-007), ces tests bloquent le
+//!    build s'ils échouent.
+//!
+//! 3. **Tests de ratio de remplissage** *(diagnostic informatif, non bloquants)* :  
+//!    Mesurent le pourcentage de `TOTAL_CAP` utilisé sur données représentatives.  
+//!    Déclassés depuis ADR-007 : le ratio dépend entièrement du contenu du
+//!    fixture, pas d'une propriété démontrable du compilateur — un fixture
+//!    vide (`Default::default()`) produit mécaniquement un ratio proche de 0%
+//!    quelle que soit la borne réelle, sans que cela indique un défaut du pipeline.  
+//!    *Note : L'invariant qui comptait réellement ("un champ non borné référencé échoue à la
+//!    compilation") est désormais vérifié directement dans `fragment-forge`,
+//!    pas indirectement via ce ratio.*
 
 pub mod projection {
     pub use marius_projection::{Projection, VarlenSlot};

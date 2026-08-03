@@ -1,7 +1,6 @@
-// =============================================================================
-// marius-db-forge · mapping.rs
-// Mapping SQL → Rust : types, layout, sentinels.
-// =============================================================================
+//! # marius-db-forge · `crates/forge/db-forge/src/mapping.rs`
+//!
+//! Mapping SQL → Rust : types, layout, sentinels.
 
 /// Colonne issue de pg_attribute.
 /// `attnum` : numéro physique dans le heap — invariant de Symétrie Mécanique.

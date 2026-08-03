@@ -1,10 +1,11 @@
-// marius-collector · projection.rs
-// Trait Projection : interface entre le Dispatcher et les implémentations
-// générées par Bridge-Forge + Fragment-Forge.
-//
-// fetch_batch retourne impl Future + Send explicite :
-// async fn dans un trait ne permet pas de contraindre Send sur le Future retourné,
-// ce qui bloquerait l'utilisation dans tokio::spawn et les contextes multi-thread.
+//! # marius-collector · crates/core/collector/src/projection.rs
+//!
+//! Trait Projection : interface entre le Dispatcher et les implémentations
+//! générées par Bridge-Forge + Fragment-Forge.
+//!
+//! fetch_batch retourne impl Future + Send explicite :
+//! async fn dans un trait ne permet pas de contraindre Send sur le Future retourné,
+//! ce qui bloquerait l'utilisation dans tokio::spawn et les contextes multi-thread.
 
 use std::path::PathBuf;
 

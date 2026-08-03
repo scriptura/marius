@@ -1,10 +1,9 @@
-// =============================================================================
-// marius-db-forge · naming.rs
-// Conventions de nommage pour les artefacts générés.
-// =============================================================================
+//! # marius-db-forge · crates/forge/db-forge/src/naming.rs
+//!
+//! Conventions de nommage pour les artefacts générés.
 
-/// "content_core" → "ContentCore"
-/// "commerce_product_core" → "CommerceProductCore"
+/// `content_core` → `ContentCore`
+/// `commerce_product_core` → `CommerceProductCore`
 pub fn to_pascal(s: &str) -> String {
     s.split('_')
         .map(|w| {
@@ -17,7 +16,7 @@ pub fn to_pascal(s: &str) -> String {
         .collect()
 }
 
-/// "content_core" → "CONTENT_CORE"
+/// `content_core` → `CONTENT_CORE`
 pub fn to_screaming(s: &str) -> String {
     s.to_uppercase()
 }
