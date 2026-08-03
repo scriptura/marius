@@ -1,4 +1,4 @@
-<div style="background-color: #333"><img src="./assets/default/images/marius.png" alt="Logo de Marius, moteur de projection réactive" width="1408" height="768" style="width: 100%"></div>
+<figure style="background-color: #333"><img src="./assets/default/images/marius.png" alt="Logo de Marius, moteur de projection réactive" width="1408" height="768" style="width: 100%"></figure>
 
 # Marius, moteur de Projection Réactive
 
