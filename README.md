@@ -1,4 +1,6 @@
-# 🏛️ Marius : Moteur de Projection Réactive
+<img src="./assets/default/images/marius.png" style="width: 100%">
+
+# Marius, Moteur de Projection Réactive
 
 Marius est une architecture expérimentale qui repense la construction
 d'applications web orientées données. Plutôt qu'empiler les couches
