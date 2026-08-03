@@ -306,3 +306,55 @@ de Phase 1 — exécution réelle, pas relecture de code.
 Correction notable qui en a découlé : `Segment<'a>` déplacé de
 `fragment-forge` vers `marius_projection` (cf. Étape 2 révisée) — c'est ce
 fichier même qui a révélé l'erreur de placement initiale.
+
+---
+
+## Addendum (25/07/2026) — régression découverte après clôture du Contrat
+
+**Contexte** : Contrat clos, Étapes 1-8 confirmées vertes en conditions
+réelles (`document_id=7`, HTML complet non échappé, `TOTAL_CAP` stable). En
+préparant les benchmarks Divan avant une interruption prolongée de
+disponibilité, confrontation à trois fichiers jamais couverts par aucune
+étape de ce Contrat : `crates/shell/render/src/dispatcher.rs`,
+`crates/shell/render/benches/hot_path_render.rs`,
+`crates/shell/render/benches/hot_path_certify.rs`.
+
+**Régression trouvée** : `render_batch_pure()` (`dispatcher.rs`) et un test
+existant (`test_hot_path_pipeline_stress`) appelaient `P::render(...)`
+directement — cassé pour tout composant segmenté depuis l'Étape 5 (`render()`
+y est un stub `unreachable!()`). Les deux bancs Divan appelaient de même
+`ContentCoreProjection::render(...)` directement dans leurs benchmarks
+`render/single/*` et dans `bench_certify_zero_alloc`. Aucun de ces quatre
+points de rupture n'a été détecté avant cette vérification — ces fichiers
+n'ont jamais fait partie du critère de complétion d'aucune étape (1-8), et
+rien n'indique que `cargo test -p marius-render` ait tourné après l'Étape 5.
+
+**Corrigé** (non exécuté en conditions réelles — interruption de
+disponibilité) :
+- `dispatcher.rs` : `render_batch_pure()` et le test appellent désormais
+  `render_segments()`, avec un `Vec<Segment>` local (même raison qu'à
+  l'Étape 4 : `Segment<'a>` emprunte sur `varlena`, durée de vie différente à
+  chaque appel — pas un champ de struct).
+- `hot_path_render.rs`/`hot_path_certify.rs` : les 4 benchmarks `render/single/*`
+  et `certify/zero_alloc_in_render` corrigés de même. Une nouvelle section
+  (« IV. Benchmarks chemin segmenté ») ajoutée aux deux fichiers : fixtures
+  `is_readable=1` + corps HTML de 200 Ko (les fixtures existantes,
+  `is_readable=0`, n'exerçaient jamais la branche segmentée) — un benchmark
+  de débit (`render/segmented/single_large`, `render/segmented/sequential_large`)
+  et une certification zéro-allocation dédiée
+  (`certify/zero_alloc_in_render_segments_large_body`), qui échouerait
+  spécifiquement si `Segment::Borrowed` venait à copier son contenu au lieu
+  de rester une référence zéro-copie — un scénario de régression que la
+  certification originale (fixture toujours `content: None`) ne peut pas
+  détecter.
+
+**Enseignement, dans l'esprit de `PHASE1-CLOSURE.md` §7** : un Contrat clos et
+vert ne garantit que les fichiers qu'il a effectivement touchés ou dont les
+tests ont réellement tourné — pas l'absence de rupture dans des fichiers
+adjacents jamais réexécutés. La clôture d'un Contrat n'est pas une preuve
+d'absence de régression ailleurs dans le crate.
+
+**À confirmer à votre retour** : `cargo build && cargo test -p marius-render
+&& cargo bench -p marius-render --bench hot_path_certify && cargo bench -p
+marius-render --bench hot_path_render`. Rien de ce qui précède n'a été
+exécuté cette session.

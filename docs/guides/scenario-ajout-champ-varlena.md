@@ -37,6 +37,25 @@ VALUES ('content.document', 0, 'identity', 'person_biography', 'entity_id')
 ON CONFLICT (component_id, join_slot_idx) DO NOTHING;
 ```
 
+**Note ajoutée le 25/07/2026, à vérifier avant d'exécuter cet exemple tel
+quel** : `component_id = 'content.document'` ci-dessus n'a jamais été
+confronté au schéma réel du projet dans cette session (l'exemple de ce guide
+est un cas pédagogique, `author_biography`, distinct du cas réellement traité
+en session, `content.body.content`). Une session précédente a découvert, sur
+un cas voisin, que le `component_id` correct n'est pas toujours la table qui
+semble porter la donnée « logiquement » — c'est le composant qui **rend**
+effectivement le champ (celui qui porte `render()`/`render_segments()` dans
+`generated_schema.rs`) qui compte. Sur le schéma réel, `content.document` est
+la spine identifiant pure (`id`, `doc_type`), sans jointure varlena ni rendu
+HTML propre à ce jour — vérifier contre `meta.containment_intent`/le seed réel
+(`10_meta_seed/01_manifest.sql`) avant d'exécuter cet exemple, plutôt que de
+supposer que `content.document` est le bon choix par analogie de nom.
+
+**Si le composant cible porte déjà une jointure varlena** (`join_slot_idx = 0`
+déjà pris), incrémenter `join_slot_idx` plutôt que d'écraser — le multi-slot
+est supporté nativement (`CONTRAT-implementation-multi-slot-varlena.md`),
+plusieurs `ref_table` distinctes peuvent cohabiter sur un même composant.
+
 **Point de vigilance** : `ref_table` doit être une **table physique**. Une vue
 sémantique (`content.v_article`, ADR-012) ne porte jamais de contrainte `CHECK`
 — la détection de borne y échouerait systématiquement. Les vues sémantiques et
@@ -81,6 +100,28 @@ Directive `.marius` — seule étape réellement requise côté Marius :
 recalcule `PAGE_TOTAL_CAP`. Voir `guide-fragment-forge.md` §2.4 pour le détail
 du mécanisme Hot/Cold/Erreur.
 
+**Si `author_biography` est du HTML déjà constitué plutôt que du texte à
+échapper** (note ajoutée le 25/07/2026) : le facteur ×6 ci-dessus est le
+mauvais mécanisme — il échapperait les balises au lieu de les rendre. Deux
+tags `pg_description` couvrent ce cas, à poser sur la colonne AVANT `cargo
+build` :
+
+```sql
+-- Contenu HTML de taille normale, reste dans le buffer partagé :
+COMMENT ON COLUMN identity.person_biography.author_biography IS 'marius:raw';
+
+-- Contenu HTML volumineux (au-delà de quelques dizaines de Ko), ne doit
+-- jamais dimensionner le buffer partagé — devient un segment autonome :
+COMMENT ON COLUMN identity.person_biography.author_biography IS 'marius:large_content';
+```
+
+Dans le second cas, `cargo build` génère `render_segments()` au lieu de
+`render()` pour le composant concerné — voir `guide-fragment-forge.md` §4.8bis
+et `CONTRAT-implementation-projection-segmentee.md` pour le mécanisme complet.
+Sans objet pour une biographie de 2000 caractères borné par `CHECK`
+ci-dessus (§1) — mentionné ici pour complétude, pas parce que ce cas
+particulier en a besoin.
+
 ### 4. Extraction et invalidation
 
 ```bash
@@ -123,3 +164,12 @@ voir discussion de session sur le pattern « Property Bag », écarté).
 _Créé le 7 juillet 2026, à la suite de l'audit d'un scénario tiers (Gemini)
 contenant trois erreurs de fond : schéma de registre inventé, stride supposé
 croissant, source de données de régénération supposée être `store.bin`._
+
+_Complété le 25 juillet 2026, en préparation d'une interruption prolongée de
+disponibilité — non revérifié par exécution réelle après cette révision :
+note de prudence sur le choix de `component_id` (Cas A, étape 1) et mention
+des tags `marius:raw`/`marius:large_content` comme alternative au facteur ×6
+par défaut (Cas A, étape 3) — deux mécanismes réels ajoutés en session,
+absents de la version précédente de ce document. Voir
+`CONTRAT-implementation-multi-slot-varlena.md`, `CONTRAT-implementation-
+varlena-raw.md`, `CONTRAT-implementation-projection-segmentee.md`._

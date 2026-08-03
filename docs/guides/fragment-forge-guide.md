@@ -117,7 +117,7 @@ ALTER TABLE person ADD CONSTRAINT person_biography_length_check
   CHECK (length(biography) <= 2000);
 ```
 
-Il n'existe **pas** de troisième mécanisme par annotation (`COMMENT ... 'marius:max_len=N'`) — seul `marius:pre_escaped` (ci-dessous) est un tag `pg_description` reconnu. Un `TEXT` sans l'un de ces deux mécanismes reste `max_len: None`, quoi que vous mettiez en commentaire SQL.
+Il n'existe **pas** de troisième mécanisme de *bornage* par annotation (`COMMENT ... 'marius:max_len=N'`) — seuls `VARCHAR(N)` et `CHECK` (ci-dessus) déterminent `max_len`. Un `TEXT` sans l'un de ces deux mécanismes reste `max_len: None`, quoi que vous mettiez en commentaire SQL. **Distinct** de la politique d'*échappement* (`marius:pre_escaped`/`marius:raw`/`marius:large_content`, ci-dessous) — trois tags `pg_description` bien réels, mais qui ne bornent rien : ils ne font que choisir comment le contenu déjà borné (ou non, pour `large_content`, cf. plus bas) est traité au runtime.
 
 **Forme exacte requise pour un `CHECK` détectable.** La détection repose sur un parsing textuel de la définition de contrainte, pas sur une analyse structurelle de l'arbre SQL — une déviation de forme, sémantiquement équivalente, échoue à être bornée. **Ce n'est pas silencieux** : `cargo:warning` est émis avec le texte brut de la contrainte au moment de l'échec (`DB-Forge [...]: CHECK trouvé mais longueur non parsable : ...`) — visible dans `cargo build -vv`, absent du terminal en `cargo build` par défaut. Pour une détection fiable dès l'écriture du DDL, sans dépendre de ce filet :
 
@@ -136,7 +136,38 @@ Un champ annoté `marius:pre_escaped` (commentaire SQL `COMMENT ON COLUMN ... IS
 
 ⚠️ **`pre_escaped` désactive tout échappement HTML pour ce champ** — aucun filet de rattrapage à l'exécution. Cette annotation certifie l'absence de `<`, `>`, `&`, `"`, `'` dans toute valeur possible de la colonne. Réservez-la aux champs contrôlés par l'application (slugs générés, identifiants techniques, dates formatées) — jamais à une donnée saisie par un utilisateur, même validée côté applicatif : la certification porte sur la colonne SQL elle-même, pas sur un chemin de saisie particulier.
 
-**Plusieurs champs varlena distincts dans un même template** : autorisé, sans limite de nombre. `total_dynamic_bytes` est la somme de `max_escaped_len()` de chaque champ varlena référencé — `{{ person.biography }}` (borné à 2000) et `{{ person.summary }}` (borné à 500) contribuent chacun indépendamment (12 000 + 3 000 = 15 000 octets), sans interaction entre eux. Un seul d'entre eux non borné suffit à faire échouer tout le template (`UnboundedField`), même si les autres sont correctement contraints.
+**Correction (23/07/2026) — `pre_escaped` n'est plus le seul tag `pg_description` reconnu.** L'affirmation précédente de ce guide (« il n'existe pas de troisième mécanisme par annotation ») est devenue fausse : trois tags coexistent aujourd'hui, correspondant aux trois variantes de l'enum fermé `EscapePolicy` (`VarlenField::escape_policy`) :
+
+| Tag                     | `EscapePolicy` | Facteur | Échappé au runtime ? | Dans `buf` ? |
+| ------------------------ | -------------- | ------- | --------------------- | ------------- |
+| *(aucun)*                | `Escaped`      | × 6     | Oui                    | Oui            |
+| `marius:pre_escaped`      | `PreEscaped`   | × 1     | Oui (défense en profondeur) | Oui      |
+| `marius:raw`              | `Raw`          | × 1     | **Jamais**             | Oui            |
+| `marius:large_content`    | `Raw` + segmenté | **0** | **Jamais**             | **Non**        |
+
+**`marius:raw`** : le contenu est du HTML déjà constitué (balisage voulu tel
+quel), à l'opposé de `pre_escaped` qui certifie l'*absence* de caractères
+spéciaux — `raw` certifie au contraire leur présence *intentionnelle*.
+`buf.push_str(s)` direct dans le corps généré, jamais `marius_html_escape`.
+
+**`marius:large_content`** : variante de `raw` pour un champ qui ne doit
+**jamais dimensionner le buffer partagé** (`{NAME}_TOTAL_CAP`) — typiquement
+un corps d'article pouvant atteindre plusieurs centaines de Ko à quelques Mo.
+Contribution nulle à `total_dynamic_bytes` (contrairement à tout autre champ,
+cf. principe de multiplicité ci-dessous), **exempté du seuil AOT absolu de
+64 Ko** (`introspect.rs`) qui s'applique sinon à tout champ varlena borné, et
+traité différemment par le compilateur : le composant génère
+`render_segments()` (une séquence de `Segment::Buffered`/`Segment::Borrowed`)
+au lieu du simple `render()` décrit dans ce guide jusqu'ici — voir §4.8bis
+ci-dessous et `CONTRAT-implementation-projection-segmentee.md` pour le détail
+complet. `render()` devient alors un stub qui panique s'il est appelé
+directement (il ne l'est jamais en usage normal — `BatchRenderer` appelle
+toujours `render_segments()`).
+
+Un seul tag à la fois par colonne — `marius:large_content` implique déjà
+`Raw`, ne jamais cumuler les deux.
+
+**Plusieurs champs varlena distincts dans un même template** : autorisé, sans limite de nombre. `total_dynamic_bytes` est la somme de `max_escaped_len()` de chaque champ varlena référencé — `{{ person.biography }}` (borné à 2000) et `{{ person.summary }}` (borné à 500) contribuent chacun indépendamment (12 000 + 3 000 = 15 000 octets), sans interaction entre eux. Un seul d'entre eux non borné suffit à faire échouer tout le template (`UnboundedField`), même si les autres sont correctement contraints. **Exception (23/07/2026)** : un champ `marius:large_content` contribue **0** à cette somme, quelle que soit sa borne réelle — c'est tout l'objet du mécanisme de segmentation (§2.4, tableau ci-dessus) ; il reste néanmoins soumis à la même règle Hot/Cold/Erreur s'il est référencé sans aucune borne connue.
 
 ### 2.5 Exemples réels
 
@@ -354,6 +385,17 @@ Le résultat de la fusion est un AST **plat**, du même type `FlatPageToken` que
 
 ### 4.8 Au runtime : `render()` et `render_page()` coexistent, jamais l'un n'appelle l'autre
 
+**Réserve ajoutée le 25/07/2026, à vérifier** : dans le code généré et le
+générateur (`codegen/projection.rs`) confrontés en session, seule la méthode
+`render()` (méthode du trait `Projection`) est jamais émise — y compris pour
+`content.core`, un composant Mode Page. `render_page` n'apparaît que dans un
+commentaire de `build.rs`, jamais comme fonction réellement générée dans tout
+ce qui a été audité cette session. Il est possible que cette section décrive
+une intention non (ou plus) implémentée telle quelle, ou que `render_page()`
+existe dans une partie du pipeline non vue cette session — **non tranché,
+faute d'avoir vu 100 % du code source**. Ne pas supposer l'existence de
+`render_page()` sans l'avoir vérifiée sur le code réel au moment de la lecture.
+
 Une fois compilées, les deux fonctions vivent dans le même `impl` :
 
 - `render()` (mode fragment) : mises à jour partielles HTMX.
@@ -366,6 +408,44 @@ Ce découplage n'est pas accessoire : ADR-008 tranche qu'**aucune page complète
 **Exception délibérée, ajoutée le 17 juillet 2026 : les pages de `STATIC_PAGES`.** Certaines pages `.marius` (aujourd'hui : `offline`/`offline`, une page de routage sans donnée dynamique — pas une sous-ressource) ne suivent **aucun** des deux chemins ci-dessus. `build.rs` les détecte via une liste explicite (`STATIC_PAGES`, `(schema, table)`), **avant** même l'ouverture du pool Postgres, et les fait passer par le même pipeline `scan → parse_page_tokens → link → lower → validate_ast → resolve_and_measure`, mais avec un `SchemaIndex` **toujours vide** (`fixed: &[], varlena: &[]`) — garde-fou structurel : la moindre référence `{{ record.* }}`/`{% if %}` échoue avec `UnknownField` avant qu'un seul octet ne soit produit. Le flux de tokens résolu est ensuite matérialisé **directement en HTML** (`emit_static_html`, nouvelle fonction de `build.rs`) et écrit une fois sur disque (`build/{theme}/{table}.html`) — **aucun `render_page()` n'est jamais généré ni compilé pour ces pages**. Conséquence pour le cycle de vie runtime (voir `guide-cycle-de-vie-runtime.md`, désormais mis à jour en conséquence) : ces pages ne participent à AUCUN des trois artefacts habituels, ne sont jamais invalidées par `NOTIFY`, et leur seul déclencheur de régénération est un `cargo build` du crate `core/schema`.
 
 À réserver aux pages qui n'ont structurellement aucune raison de dépendre d'une ligne de base de données — une page candidate qui référencerait un jour `{{ record.* }}` casse le build plutôt que de produire un HTML figé et faux, par construction du garde-fou ci-dessus, pas par discipline d'équipe.
+
+### 4.8bis `render_segments()` — troisième fonction possible, composants `marius:large_content` (25/07/2026)
+
+Un composant portant au moins un champ `is_segment` (tag `marius:large_content`,
+§2.4) reçoit une troisième forme de sortie, générée par
+`generate_segmented_snippet` (`fragment-forge/lib.rs`) au lieu de
+`generate_aot_snippet` :
+
+```rust
+fn render(record: &Self::Record, _varlena: &{Name}VarlenOwned, buf: &mut String) {
+    unreachable!("...composant segmenté, BatchRenderer appelle toujours render_segments().");
+}
+
+const MAX_SEGMENTS: usize = 2 * N + 1; // N = nombre de champs is_segment référencés
+
+fn render_segments<'seg>(record: &Self::Record, varlena: &'seg {Name}VarlenOwned, buf: &mut String, segments: &mut Vec<marius_projection::Segment<'seg>>) {
+    // en-têtes/pieds statiques → buf.push_str/marius_html_escape, comme render()
+    // champ is_segment → segments.push(Segment::Borrowed(...)), jamais dans buf
+}
+```
+
+`render()` devient un stub qui **panique s'il est appelé** — jamais en usage
+normal, puisque `BatchRenderer::render_batch`/`render_batch_pure` appellent
+systématiquement `render_segments()` (avec une implémentation par défaut, sur
+le trait `Projection`, qui délègue à `render()` pour tout composant sans champ
+segmenté — donc aucun changement de comportement pour l'immense majorité des
+composants). Voir `CONTRAT-implementation-projection-segmentee.md` pour
+l'algorithme complet de scission du token stream (§ « Étape 5 »).
+
+**Conséquence pratique si vous ajoutez `marius:large_content` à un champ
+existant** : tout code appelant `P::render()` directement (au lieu de
+`P::render_segments()`) pour ce composant se met à paniquer. Régression déjà
+rencontrée en session (23/07/2026) sur `render_batch_pure`/un test de
+`dispatcher.rs`, non détectée immédiatement car ces fichiers ne font partie
+d'aucun Contrat touchant `fragment-forge`/`db-forge` — à garder en tête si
+vous étendez ce mécanisme à un nouveau composant : vérifier tout appelant
+direct de `render()` pour ce type, pas seulement les chemins déjà connus
+(`BatchRenderer`).
 
 ### 4.9 Ce qui ne change pas en passant au mode page
 
@@ -404,3 +484,4 @@ Toute violation est une erreur de compilation (`cargo build` échoue), jamais un
 
 _Vérifié et corrigé le 7 juillet 2026 (v2 : frontière vues sémantiques \/ tables physiques ajoutée) — audit croisé + revue de code (`lib.rs`, `introspect.rs`) contre le guide._
 _Mis à jour le 17 juillet 2026 (v3) : `{% asset %}`/`{% script %}` documentés (§4.5bis, absents des versions précédentes bien que réels et implémentés depuis le début) ; contradiction §0/§4 sur le statut de la Partie 2 corrigée ; exception `STATIC_PAGES` ajoutée (§4.8) — session de mise en œuvre du pipeline `[service_worker]`/`offline.html` de `marius-assets`._
+_Corrigé le 25 juillet 2026 (v4), en préparation d'une interruption prolongée de disponibilité — non revérifié par exécution réelle après cette révision : §2.4, l'affirmation « `pre_escaped` est le seul tag `pg_description` reconnu » était devenue fausse (`marius:raw`/`marius:large_content` ajoutés en session, `CONTRAT-implementation-varlena-raw.md`/`CONTRAT-implementation-projection-segmentee.md`) ; §4.8bis ajouté (`render_segments()`) ; §4.8 : réserve ajoutée sur l'existence réelle de `render_page()`, jamais rencontrée dans le code confronté cette session — à vérifier, pas tranché._

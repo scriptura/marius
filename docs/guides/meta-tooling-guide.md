@@ -96,7 +96,7 @@ Déclare la table portant les champs texte (varlena) d'un composant.
 | Colonne         | Type      | Description                                                                                                                                          |
 | --------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `component_id`  | `text` FK | Référence `containment_intent`                                                                                                                       |
-| `join_slot_idx` | `int2`    | `0` en Phase 1 (slot unique)                                                                                                                         |
+| `join_slot_idx` | `int2`    | Ordre déterministe du JOIN — **plusieurs slots par composant sont supportés** (corrigé le 23/07/2026, `CONTRAT-implementation-multi-slot-varlena.md` : `registry.rs` chargeait auparavant uniquement `join_slot_idx = 0`, limite Phase 1 jamais comblée, retirée depuis). `content.core` porte réellement 2 slots aujourd'hui : `0` → `content.identity`, `1` → `content.body` |
 | `ref_schema`    | `text`    | Schéma de la table varlena                                                                                                                           |
 | `ref_table`     | `text`    | Table varlena — **table physique uniquement**, jamais une vue sémantique (ADR-012) : la détection de borne (`CHECK`, §3) n'existe que sur les tables |
 | `fk_column`     | `text`    | Colonne FK entre les deux tables                                                                                                                     |
@@ -107,6 +107,22 @@ INSERT INTO meta.component_varlena_join
 VALUES
     ('content.article', 0, 'content', 'identity', 'document_id');
 ```
+
+**Attention au choix de `component_id`** (piège réel rencontré en session, corrigé après confrontation au schéma réel — pas une supposition) : ce doit être le composant qui **rend** effectivement le champ (celui qui porte `render()`/`render_segments()` dans `generated_schema.rs`), pas nécessairement la table « logique » qui semblerait porter la donnée. Sur le schéma réel du projet, `content.document` est la spine identifiant pure (`id`, `doc_type`) — sans `VarlenOwned` ni rendu propre ; c'est `content.core` qui porte la jointure varlena et le rendu HTML. Vérifier contre le seed réel (`10_meta_seed/01_manifest.sql`) avant d'inventer un `component_id`, plutôt que de supposer par analogie de nom.
+
+**Plusieurs slots sur un même composant** — exemple réel, `content.core` (2 slots) :
+
+```sql
+INSERT INTO meta.component_varlena_join
+    (component_id, join_slot_idx, ref_schema, ref_table, fk_column)
+VALUES
+    ('content.core', 0, 'content', 'identity', 'document_id'),
+    ('content.core', 1, 'content', 'body',     'document_id');
+```
+
+`join_slot_idx` dicte l'ordre déterministe des champs varlena en mémoire (`{Name}VarlenOwned`, INV-8) — les champs du slot 0 précèdent toujours ceux du slot 1, quel que soit l'ordre d'insertion SQL (le tri `ORDER BY component_id, join_slot_idx` de `registry.rs` le garantit).
+
+**Collision de nom entre deux slots, ou entre un slot et une colonne propre du composant** : échec de build explicite (`panic!` nommant le composant, la colonne, et les deux tables sources), jamais une désambiguïsation automatique — politique DDL-driven arbitrée le 22/07/2026, `CONTRAT-implementation-multi-slot-varlena.md` Étape 3. Renommer la colonne en conflit côté SQL est la seule issue.
 
 ---
 
@@ -162,16 +178,64 @@ grep "author_entity_id" target/debug/build/marius-schema-*/out/generated_schema.
 # → author_entity_id: r.author_entity_id.unwrap_or(-1),
 ```
 
-### 3.2 `marius:pre_escaped`
+### 3.2 Politique d'échappement varlena — trois états, pas un booléen (corrigé 23/07/2026)
 
-Indique que la colonne est déjà échappée HTML en base.
-Fragment-Forge utilise un facteur d'échappement de 1 au lieu de 6,
-réduisant `DYNAMIC_CAP` et l'empreinte mémoire des buffers de rendu.
+Ce document affirmait auparavant que `marius:pre_escaped` était **le seul** tag
+`pg_description` reconnu pour l'échappement. **Faux depuis
+`CONTRAT-implementation-varlena-raw.md`/`CONTRAT-implementation-projection-
+segmentee.md`** : trois tags coexistent, correspondant à trois valeurs de
+l'enum fermé `EscapePolicy` (`marius_projection`/`fragment-forge`) :
 
+| Tag `pg_description`       | `EscapePolicy` | Facteur capacité | Échappé au runtime ? | Concaténé dans `buf` ? |
+| --------------------------- | -------------- | ---------------- | --------------------- | ----------------------- |
+| *(aucun)*                   | `Escaped`      | × 6               | Oui                    | Oui                      |
+| `marius:pre_escaped`        | `PreEscaped`   | × 1               | Oui (défense en profondeur) | Oui                |
+| `marius:raw`                | `Raw`          | × 1               | **Jamais**             | Oui                      |
+| `marius:large_content`      | `Raw` + segmenté | **0** (aucune contribution) | **Jamais** | **Non** — `Segment::Borrowed` autonome |
+
+**`marius:pre_escaped`** — inchangé depuis la version précédente de ce guide :
 ```sql
 COMMENT ON COLUMN content.identity.description
     IS 'marius:pre_escaped';
 ```
+Certifie un contenu sans caractère spécial (slug, titre normalisé) — échappé
+quand même au runtime par défense en profondeur, facteur de capacité réduit à 1.
+
+**`marius:raw`** — HTML déjà constitué, à injecter tel quel, **jamais**
+échappé au runtime (`buf.push_str` direct, aucun appel à
+`marius_html_escape`) :
+```sql
+COMMENT ON COLUMN content.body.content
+    IS 'marius:raw';
+```
+Distinct de `pre_escaped` : le contenu contient au contraire potentiellement
+beaucoup de caractères spéciaux intentionnels (balises) — ce n'est pas leur
+absence qui justifie l'exemption d'échappement, c'est leur nature de balisage
+déjà voulu tel quel. ⚠️ Réservé à un contenu HTML dont la production est
+maîtrisée côté application (jamais une saisie utilisateur brute non
+sanitizée en amont).
+
+**`marius:large_content`** — variante de `marius:raw` pour un contenu
+**volumineux**, qui ne doit jamais dimensionner le buffer partagé de rendu
+(`{NAME}_TOTAL_CAP`) :
+```sql
+COMMENT ON COLUMN content.body.content
+    IS 'marius:large_content';
+```
+Implique toujours `EscapePolicy::Raw` (un seul tag, pas deux à cumuler) et
+marque en plus le champ `is_segment == true` : `fragment-forge` génère alors
+`render_segments()` au lieu de `render()` pour ce composant — le champ devient
+un `Segment::Borrowed` autonome (référence zéro-copie sur la donnée déjà
+possédée), jamais concaténé dans `buf`, jamais compté dans `DYNAMIC_CAP`, et
+**exempté du seuil AOT absolu de 64 Ko** (`introspect.rs`) qui s'applique à
+tout autre champ varlena. `render()` devient alors un stub `unreachable!()` —
+`BatchRenderer`/`render_batch_pure` appellent systématiquement
+`render_segments()`, jamais `render()` directement, pour tout composant
+portant un tel champ. Voir `CONTRAT-implementation-projection-segmentee.md`
+pour le détail complet du mécanisme (`Segment<'a>`, `MAX_SEGMENTS`).
+
+**Un seul tag à la fois par colonne** — `marius:raw` et `marius:large_content`
+ne se cumulent jamais : le second implique déjà le premier.
 
 ---
 
@@ -240,6 +304,11 @@ VALUES ('content.article', 0, 'content', 'article_identity', 'document_id');
 -- 4. Annoter les sentinels domain-specific si besoin
 COMMENT ON COLUMN content.article.author_id IS 'marius:sentinel=0';
 ```
+
+Exemple minimal ci-dessus : un seul slot, échappement par défaut. Pour un
+second JOIN varlena sur le même composant (`join_slot_idx` suivant), ou un
+champ HTML pré-constitué/volumineux (`marius:raw`/`marius:large_content`),
+voir §2.2/§3.2-3.4 ci-dessus.
 
 ```bash
 # 5. Laisser cargo build calculer la densité
@@ -333,4 +402,4 @@ cargo test -p marius-schema
 
 ---
 
-_Créé le 17 Juin 2026 (Phase 4 db-forge). Vérifié et daté le 7 juillet 2026. Corrigé le 22 juillet 2026 après la session de correction de la réactivité varlena — voir note de statut en tête de document._
+_Créé le 17 Juin 2026 (Phase 4 db-forge). Vérifié et daté le 7 juillet 2026. Corrigé le 22 juillet 2026 après la session de correction de la réactivité varlena — voir note de statut en tête de document. Corrigé le 23-25 juillet 2026 (§2.2, §3) après confrontation au code réel : le multi-slot varlena (`join_slot_idx` > 0) et deux nouveaux tags `pg_description` (`marius:raw`, `marius:large_content`) sont devenus réels en session — voir `CONTRAT-implementation-multi-slot-varlena.md`, `CONTRAT-implementation-varlena-raw.md`, `CONTRAT-implementation-projection-segmentee.md`, qui font désormais autorité sur ces points._

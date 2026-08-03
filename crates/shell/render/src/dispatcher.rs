@@ -40,7 +40,7 @@ use tokio::sync::Notify;
 use tokio::time::interval;
 
 use marius_collector::Collector;
-use marius_projection::Projection;
+use marius_projection::{Projection, Segment};
 
 /// Configuration d'exécution d'un Shard de Dispatcher.
 ///
@@ -243,11 +243,25 @@ where
 ///   après le premier render(). Concurrence inter-shard assurée par Tokio en
 ///   amont (Dispatcher::run), pas par ce chemin — séquentialité délibérée
 ///   intra-lot, conforme au manifeste révisé.
+///
+/// ─── Correction (23/07/2026) ──────────────────────────────────────────────
+///
+///   Appelait auparavant `P::render(...)` directement — cassé pour tout
+///   composant segmenté depuis CONTRAT-implementation-projection-segmentee.md
+///   Étape 5 (`render()` y est un stub `unreachable!()`, `BatchRenderer`
+///   appelle toujours `render_segments()`). Régression non détectée avant
+///   cette session : ce fichier n'a jamais fait partie d'aucune étape des
+///   Contrats varlena-raw/projection-segmentee. `segments` est local à la
+///   fonction (pas de struct ici, contrairement à `BatchRenderer` — même
+///   raison qu'à l'Étape 4 : `Segment<'a>` emprunte sur `varlena`, dont la
+///   durée de vie change à chaque appel).
 pub fn render_batch_pure<P: Projection>(batch: Vec<(P::Record, P::VarlenOwned)>) {
     let mut buf = String::new();
+    let mut segments: Vec<Segment> = Vec::with_capacity(P::MAX_SEGMENTS);
     for (record, varlena) in &batch {
         buf.clear();
-        P::render(record, varlena, &mut buf);
+        segments.clear();
+        P::render_segments(record, varlena, &mut buf, &mut segments);
     }
 }
 
@@ -263,6 +277,7 @@ mod tests {
     // le trait nommé permet la résolution statique de la méthode de trait.
     #[allow(unused_imports)]
     use marius_projection::Projection;
+    use marius_projection::Segment;
 
     // =========================================================================
     // Constantes du jeu de données
@@ -364,6 +379,15 @@ mod tests {
         // (BatchRenderer::render_batch), pas une reconstitution par thread.
         let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
 
+        // Correction (23/07/2026) : content.core est segmenté depuis CONTRAT-
+        // implementation-projection-segmentee.md Étape 5 — render() y est un
+        // stub unreachable!(), render_segments() est la seule voie valide.
+        // segments : local, pré-alloué à MAX_SEGMENTS, même raison qu'à
+        // l'Étape 4 de BatchRenderer (Segment<'a> emprunte sur varlena, dont
+        // la durée de vie change à chaque itération de ce lot).
+        let mut segments: Vec<Segment> =
+            Vec::with_capacity(<ContentCoreProjection as Projection>::MAX_SEGMENTS);
+
         // Compteur de records effectivement projetés, pour vérifier qu'aucun
         // n'est silencieusement sauté.
         let mut projected = 0usize;
@@ -371,8 +395,9 @@ mod tests {
         for (i, (storage, varlena)) in batch.iter().enumerate() {
             let cap_before = buf.capacity();
             buf.clear();
+            segments.clear();
 
-            ContentCoreProjection::render(storage, varlena, &mut buf);
+            ContentCoreProjection::render_segments(storage, varlena, &mut buf, &mut segments);
 
             // ── Invariant no-realloc inter-itération (primaire) ───────────────
             // La capacité ne doit pas avoir crû, dès la première itération :
@@ -380,7 +405,7 @@ mod tests {
             assert_eq!(
                 buf.capacity(),
                 cap_before,
-                "REALLOC détecté à l'itération {i} : capacité {} → {} après render(). \
+                "REALLOC détecté à l'itération {i} : capacité {} → {} après render_segments(). \
                  DYNAMIC_CAP ({}) sous-estime le pire cas varlena.",
                 cap_before,
                 buf.capacity(),

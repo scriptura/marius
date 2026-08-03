@@ -109,15 +109,54 @@ fn batch(
     (0..size).map(|_| f()).collect()
 }
 
+/// Taille volontairement plus modeste que la borne DDL réelle (VARCHAR(2000000)) —
+/// suffisant pour dépasser largement l'ancien seuil AOT de 64 Ko, sans exiger
+/// des centaines de Mo de RAM cumulés sur un lot. Dupliquée depuis
+/// hot_path_render.rs — même convention que record_nominal/record_worst_case/batch
+/// ci-dessus, chaque binaire de bench porte ses propres fixtures.
+const SEGMENTED_BODY_LEN_TARGET: usize = 200_000;
+
+/// Corps HTML volumineux représentatif d'un article réel — HTML déjà valide,
+/// rien à échapper (EscapePolicy::Raw).
+fn large_html_body() -> String {
+    const FRAGMENT: &str = "<p>Paragraphe de test pour le contenu segmenté.</p>\n";
+    FRAGMENT.repeat(SEGMENTED_BODY_LEN_TARGET / FRAGMENT.len() + 1)
+}
+
+/// Enregistrement avec champ segmenté actif (is_readable=1, condition réelle
+/// du template core.marius) et corps volumineux emprunté — CONTRAT-
+/// implementation-projection-segmentee.md.
+fn record_segmented_large() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
+    let storage = ContentCoreStorageRow {
+        published_at: 1_700_000_000_000_000i64,
+        created_at: 1_700_000_000_000_000i64,
+        modified_at: 1_700_000_000_000_000i64,
+        document_id: 7i32,
+        author_entity_id: 3i32,
+        status: 1i16,
+        is_readable: 1, // active la branche {% if %} contenant le champ segmenté
+        is_commentable: 0,
+        is_visible_comments: 0,
+    };
+    let varlena = ContentCoreVarlenOwned {
+        headline: Some("Article de test — contenu volumineux".to_string()),
+        description: Some("Benchmark du chemin segmenté.".to_string()),
+        alternative_headline: Some("Segmented Path Benchmark".to_string()),
+        content: Some(large_html_body()),
+        ..Default::default()
+    };
+    (storage, varlena)
+}
+
 // =============================================================================
 // II. Benchmarks render() — granularité enregistrement unique
 // =============================================================================
 
-/// Coût brut de render() sur un enregistrement nominal.
+/// Coût brut de render_segments() sur un enregistrement nominal.
 ///
-/// buf est recréé à chaque sample via with_inputs() — Divan isole le setup
-/// hors de la fenêtre de mesure. black_box(buf) empêche LLVM d'éliminer
-/// les push_str dont le résultat n'est pas observé.
+/// Correction (23/07/2026) : appelait render() directement — cassé pour
+/// content.core, segmenté depuis CONTRAT-implementation-projection-
+/// segmentee.md Étape 5 (render() y est un stub unreachable!()).
 #[divan::bench(name = "render/single/nominal")]
 fn bench_render_single_nominal(bencher: Bencher) {
     let (storage, varlena) = record_nominal();
@@ -125,20 +164,21 @@ fn bench_render_single_nominal(bencher: Bencher) {
     bencher
         .counter(ItemsCount::new(1usize))
         .counter(BytesCount::new(CONTENT_CORE_TOTAL_CAP))
-        .with_inputs(|| String::with_capacity(CONTENT_CORE_TOTAL_CAP))
-        .bench_local_values(|mut buf| {
-            ContentCoreProjection::render(&storage, &varlena, &mut buf);
-            // black_box sur buf.len() : force LLVM à considérer le contenu
-            // du buffer comme observable, empêchant l'élimination du rendu.
-            black_box(buf.len())
+        .with_inputs(|| {
+            (
+                String::with_capacity(CONTENT_CORE_TOTAL_CAP),
+                Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS),
+            )
+        })
+        .bench_local_values(|(mut buf, mut segments)| {
+            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            black_box((buf.len(), segments.len()))
         });
 }
 
-/// Coût brut de render() sur un enregistrement pire cas.
+/// Coût brut de render_segments() sur un enregistrement pire cas.
 ///
-/// Mesure le chemin le plus long de marius_html_escape() :
-/// toutes les branches activées, buf.len() proche de TOTAL_CAP.
-/// Révèle le coût réel du pipeline en conditions dégradées.
+/// Correction (23/07/2026) : même correctif que bench_render_single_nominal.
 #[divan::bench(name = "render/single/worst_case")]
 fn bench_render_single_worst_case(bencher: Bencher) {
     let (storage, varlena) = record_worst_case();
@@ -146,10 +186,15 @@ fn bench_render_single_worst_case(bencher: Bencher) {
     bencher
         .counter(ItemsCount::new(1usize))
         .counter(BytesCount::new(CONTENT_CORE_TOTAL_CAP))
-        .with_inputs(|| String::with_capacity(CONTENT_CORE_TOTAL_CAP))
-        .bench_local_values(|mut buf| {
-            ContentCoreProjection::render(&storage, &varlena, &mut buf);
-            black_box(buf.len())
+        .with_inputs(|| {
+            (
+                String::with_capacity(CONTENT_CORE_TOTAL_CAP),
+                Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS),
+            )
+        })
+        .bench_local_values(|(mut buf, mut segments)| {
+            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            black_box((buf.len(), segments.len()))
         });
 }
 
@@ -252,48 +297,113 @@ fn bench_render_sequential_worst_case(bencher: Bencher, batch_size: usize) {
 fn bench_certify_zero_alloc(bencher: Bencher) {
     bencher
         .with_inputs(|| {
-            // with_inputs produit le tuple (storage, varlena, buf) à chaque sample.
-            // Inclure storage et varlena dans le tuple est nécessaire pour que Divan
-            // reconnaisse un input complet et produise un rapport de timing visible.
-            // Les capturer hors de with_inputs comme références produit un affichage
-            // tronqué : Divan ne voit pas d'input à mesurer et n'affiche pas les temps.
+            // with_inputs produit le tuple (storage, varlena, buf, segments) à
+            // chaque sample. Inclure storage et varlena dans le tuple est
+            // nécessaire pour que Divan reconnaisse un input complet et
+            // produise un rapport de timing visible. Les capturer hors de
+            // with_inputs comme références produit un affichage tronqué :
+            // Divan ne voit pas d'input à mesurer et n'affiche pas les temps.
             //
-            // buf est pré-chauffé ici (hors fenêtre de certification) : le premier
-            // render() garantit que capacity >= TOTAL_CAP après l'éventuel arrondi
-            // page de l'allocateur. Les allocations de ce setup sont hors reset/read.
+            // buf et segments sont pré-chauffés ici (hors fenêtre de
+            // certification) : le premier render_segments() garantit que
+            // capacity >= TOTAL_CAP après l'éventuel arrondi page de
+            // l'allocateur, et que segments a la bonne capacité. Les
+            // allocations de ce setup sont hors reset/read.
+            //
+            // Correction (23/07/2026) : appelait render() directement — cassé
+            // pour content.core, segmenté depuis CONTRAT-implementation-
+            // projection-segmentee.md Étape 5.
             let (storage, varlena) = record_worst_case();
             let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
-            ContentCoreProjection::render(&storage, &varlena, &mut buf);
-            (storage, varlena, buf)
+            let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            (storage, varlena, buf, segments)
         })
-        .bench_local_values(|(storage, varlena, mut buf)| {
+        .bench_local_values(|(storage, varlena, mut buf, mut segments)| {
             // ── Fenêtre de certification ──────────────────────────────────────
-            // buf.clear() : len=0, capacity inchangée — buf est prêt pour render().
+            // buf.clear()/segments.clear() : len=0, capacity inchangée — prêts
+            // pour render_segments().
             buf.clear();
-            // reset() : barrière SeqCst — garantit la visibilité avant render().
+            segments.clear();
+            // reset() : barrière SeqCst — garantit la visibilité avant l'appel.
             CountingAlloc::reset();
 
-            ContentCoreProjection::render(&storage, &varlena, &mut buf);
+            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
 
             // ── Lecture et assertion ──────────────────────────────────────────
-            // SeqCst : garantit que toutes les écritures de render() sont visibles.
+            // SeqCst : garantit que toutes les écritures de render_segments()
+            // sont visibles.
             let allocs = CountingAlloc::alloc_count();
             let bytes = CountingAlloc::alloc_bytes();
 
             assert_eq!(
                 allocs, 0,
                 "CERTIFICATION ÉCHOUÉE : {allocs} allocation(s) détectée(s) \
-                 dans render() ({bytes} octets). \
+                 dans render_segments() ({bytes} octets). \
                  DYNAMIC_CAP ({CONTENT_CORE_TOTAL_CAP}B) sous-estime le pire cas. \
                  Vérifier max_display_width (FieldKind) et max_escaped_len (VarlenField) \
                  dans crates/forge/fragment-forge/src/lib.rs."
             );
 
-            // black_box sur la référence — force LLVM à considérer buf comme
-            // observable sans retourner de valeur scalaire à Divan.
-            // Retourner un usize (buf.len()) confond Divan qui l'interprète comme
-            // un compteur d'items et supprime la ligne de timing dans le rapport.
-            // La closure retourne () implicitement : Divan mesure le temps pur.
-            black_box(&buf);
+            // black_box sur les références — force LLVM à considérer buf et
+            // segments comme observables sans retourner de valeur scalaire à
+            // Divan (cf. commentaire original sur la confusion compteur/timing).
+            black_box((&buf, &segments));
+        });
+}
+
+/// Certifie que P::render_segments() n'alloue pas, même avec un champ
+/// segmenté volumineux (plusieurs centaines de Ko) — CONTRAT-implementation-
+/// projection-segmentee.md, ajoutée le 23/07/2026 en préparation d'une
+/// interruption prolongée de disponibilité (pas exécutée cette session).
+///
+/// ─── Ce que cette certification prouve, au-delà de zero_alloc_in_render ──────
+///
+///   zero_alloc_in_render (ci-dessus) utilise record_worst_case(), dont le
+///   champ content est toujours None (is_readable=0 dans cette fixture) — le
+///   mécanisme Segment n'y est jamais exercé. Cette certification-ci utilise
+///   record_segmented_large() : is_readable=1, content = ~200 Ko de HTML.
+///   Si Segment::Borrowed copiait silencieusement son contenu quelque part
+///   (au lieu de rester une référence zéro-copie), cette certification
+///   échouerait ici alors que la précédente resterait verte — c'est
+///   précisément le scénario qu'elle est conçue pour détecter.
+#[divan::bench(name = "certify/zero_alloc_in_render_segments_large_body", sample_count = 100)]
+fn bench_certify_zero_alloc_large_body(bencher: Bencher) {
+    bencher
+        .with_inputs(|| {
+            let (storage, varlena) = record_segmented_large();
+            let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
+            let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            (storage, varlena, buf, segments)
+        })
+        .bench_local_values(|(storage, varlena, mut buf, mut segments)| {
+            buf.clear();
+            segments.clear();
+            CountingAlloc::reset();
+
+            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+
+            let allocs = CountingAlloc::alloc_count();
+            let bytes = CountingAlloc::alloc_bytes();
+
+            assert_eq!(
+                allocs, 0,
+                "CERTIFICATION ÉCHOUÉE : {allocs} allocation(s) détectée(s) dans \
+                 render_segments() avec un corps volumineux ({bytes} octets alloués). \
+                 Le champ segmenté ne devrait jamais être copié — vérifier que \
+                 generate_segmented_snippet (fragment-forge/lib.rs) émet bien \
+                 Segment::Borrowed(s) et non une recopie dans buf."
+            );
+
+            assert_eq!(
+                segments.len(),
+                3,
+                "3 segments attendus (en-tête/corps/pied) — {} obtenus, le \
+                 mécanisme de segmentation ne s'est peut-être pas déclenché.",
+                segments.len()
+            );
+
+            black_box((&buf, &segments));
         });
 }
