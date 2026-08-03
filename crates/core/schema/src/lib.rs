@@ -115,9 +115,20 @@ mod tests {
         let (storage, varlena) = &results[0];
 
         let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
-        ContentCoreProjection::render(storage, varlena, &mut buf);
+        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+        // Correction (26/07/2026) : appelait render() directement — cassé
+        // pour content.core, segmenté depuis CONTRAT-implementation-
+        // projection-segmentee.md Étape 5.
+        ContentCoreProjection::render_segments(storage, varlena, &mut buf, &mut segments);
         println!("ContentCore[0] : {buf}");
 
+        // ⚠️ Assertions non revérifiées contre le template réel actuel
+        // (core.marius produit désormais class="article", pas class=
+        // "content-core", et aucun <dt>document_id</dt> — cf. le dump de
+        // generated_schema.rs confronté en session le 23/07/2026). Décalage
+        // préexistant, sans rapport avec la segmentation — ce test est
+        // #[ignore] par défaut, jamais exécuté depuis. À corriger contre le
+        // template réel au moment de le réactiver, pas deviné ici.
         assert!(buf.contains("content-core"), "classe CSS absente");
         assert!(
             buf.contains("<dt>document_id</dt>"),
@@ -172,8 +183,18 @@ mod tests {
 
         let initial_cap = CONTENT_CORE_TOTAL_CAP;
         let mut buf = String::with_capacity(initial_cap);
+        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
 
-        ContentCoreProjection::render(&storage, &varlena, &mut buf);
+        // Correction (26/07/2026) : appelait render() directement — cassé
+        // pour content.core, segmenté depuis CONTRAT-implementation-
+        // projection-segmentee.md Étape 5 (render() y est un stub
+        // unreachable!(), render_segments() est la seule voie valide).
+        // varlena.content == None ici (Default::default()) : le champ
+        // segmenté ne traverse de toute façon jamais buf, borné ou non —
+        // ce test reste donc un test valide de l'invariant no-realloc pour
+        // la partie STATIC_CAP/DYNAMIC_CAP du composant, inchangé par la
+        // segmentation.
+        ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
 
         assert_eq!(
             buf.capacity(),
@@ -196,6 +217,66 @@ mod tests {
             initial_cap,
             buf.len(),
             buf.len() as f64 / initial_cap as f64 * 100.0
+        );
+    }
+
+    /// Complète test_content_core_no_realloc ci-dessus, dont `varlena.content`
+    /// est toujours `None` (`Default::default()`) — la branche segmentée
+    /// (`{% if record.is_readable %}`) n'y est jamais exercée. Ce test-ci
+    /// active `is_readable=1` avec un corps volumineux, pour prouver que
+    /// `buf` ne réalloue jamais MÊME quand `Segment::Borrowed` est
+    /// effectivement poussé — c'est l'invariant central du mécanisme, et il
+    /// n'était certifié nulle part au niveau bloquant avant ce test (ajouté
+    /// le 26/07/2026, CONTRAT-implementation-projection-segmentee.md ; seuls
+    /// les bancs Divan optionnels — jamais exécutés en CI — l'exerçaient).
+    #[test]
+    fn test_content_core_no_realloc_with_segmented_content() {
+        let storage = ContentCoreStorageRow {
+            published_at: i64::MIN,
+            created_at: i64::MIN,
+            modified_at: i64::MIN,
+            document_id: i32::MIN,
+            author_entity_id: i32::MIN,
+            status: i16::MIN,
+            is_readable: 1, // active la branche {% if %} contenant le champ segmenté
+            is_commentable: 0,
+            is_visible_comments: 0,
+            _pad: [0; 3],
+        };
+
+        // Corps volumineux, largement au-delà de l'ancien seuil AOT de 64 Ko
+        // (introspect.rs) — ne doit jamais influencer buf.capacity() puisqu'il
+        // devient un Segment::Borrowed autonome, jamais concaténé dans buf.
+        let large_body = "<p>Paragraphe de test pour le contenu segmenté.</p>\n".repeat(10_000);
+
+        let varlena = ContentCoreVarlenOwned {
+            content: Some(large_body),
+            ..Default::default()
+        };
+
+        let initial_cap = CONTENT_CORE_TOTAL_CAP;
+        let mut buf = String::with_capacity(initial_cap);
+        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+
+        ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+
+        assert_eq!(
+            buf.capacity(),
+            initial_cap,
+            "REALLOC détecté sur ContentCore AVEC contenu segmenté volumineux : \
+             capacity {} → {}. Le champ marius:large_content ne devrait jamais \
+             influencer buf, quelle que soit sa taille réelle.",
+            initial_cap,
+            buf.capacity(),
+        );
+
+        assert_eq!(
+            segments.len(),
+            3,
+            "3 segments attendus (en-tête Buffered / corps Borrowed / pied \
+             Buffered) — {} obtenus. Le mécanisme de segmentation ne s'est \
+             peut-être pas déclenché (vérifier is_readable=1 sur la fixture).",
+            segments.len()
         );
     }
 
@@ -278,7 +359,14 @@ mod tests {
         };
 
         let mut buf = String::new();
-        ContentCoreProjection::render(&storage, &varlena, &mut buf);
+        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+        // Correction (26/07/2026) : appelait render() directement — cassé
+        // depuis la segmentation. is_readable=0 par défaut ci-dessus : le
+        // ratio mesuré ici ne reflète toujours que la partie STATIC/DYNAMIC
+        // du composant (en-tête + pied), jamais le champ marius:large_content
+        // — cohérent avec le sens même de ce diagnostic (CONTENT_CORE_TOTAL_CAP
+        // ne compte plus ce champ non plus, cf. Étape 1 du Contrat).
+        ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
 
         let ratio = buf.len() as f64 / CONTENT_CORE_TOTAL_CAP as f64 * 100.0;
         eprintln!(

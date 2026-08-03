@@ -2,12 +2,21 @@
 
 # Marius, moteur de Projection Réactive
 
+[![Architecture](https://img.shields.io/badge/Architecture-ECS%2FDOD-E85D04?style=for-the-badge)]()
+[![Design](https://img.shields.io/badge/Design-Data--Oriented-2D6A4F?style=for-the-badge)]()
+[![Projection](https://img.shields.io/badge/Projection-AOT%20Native-D90429?style=for-the-badge)]()
+[![Zero ORM](https://img.shields.io/badge/Transformation-Zero%20ORM-B7094C?style=for-the-badge)]()
+[![Zero JSON](https://img.shields.io/badge/Protocole-Zero%20JSON-89023E?style=for-the-badge)]()
+[![Chemin Chaud](https://img.shields.io/badge/Chemin%20Chaud-Zero%20Allocation-F77F00?style=for-the-badge)]()
+[![Mechanical Sympathy](https://img.shields.io/badge/CPU-Mechanical%20Sympathy-D62828?style=for-the-badge)]()
+[![Cache L1](https://img.shields.io/badge/Layout-L1%20Cache%20Friendly-FCBF49?style=for-the-badge)]()
+[![I/O Zero-Copy](https://img.shields.io/badge/I%2FO-sendfile(2)%20%7C%20pread-118AB2?style=for-the-badge)]()
+
 Marius est une architecture expérimentale qui repense la construction
 d'applications web orientées données. Plutôt qu'empiler les couches
 traditionnelles (Base de données → ORM → API JSON → Framework front-end
 → Navigateur), Marius s'inspire des moteurs de jeux vidéo pour proposer
 un chemin direct et prédictible entre la donnée brute et l'écran.
-
 
 ## Le concept : moins d'intermédiaires, plus de certitudes
 

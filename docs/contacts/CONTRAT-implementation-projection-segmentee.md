@@ -358,3 +358,33 @@ d'absence de régression ailleurs dans le crate.
 && cargo bench -p marius-render --bench hot_path_certify && cargo bench -p
 marius-render --bench hot_path_render`. Rien de ce qui précède n'a été
 exécuté cette session.
+
+### Complément (26/07/2026) — troisième foyer, trouvé au retour
+
+`cargo build` vert, mais `cargo test` a révélé deux échecs supplémentaires
+dans `crates/core/schema/src/lib.rs` (`tests::diag_content_core_ratio`,
+`tests::test_content_core_no_realloc`) — même régression, un troisième
+fichier jamais vu par aucun Contrat ni par le premier passage de l'Addendum
+du 25/07. Corrigé : les 3 sites appelant `ContentCoreProjection::render()`
+directement (2 tests + le test ignoré `test_fetch_content_core`) basculés
+vers `render_segments()`.
+
+**Lacune structurelle comblée au passage** : `test_content_core_no_realloc`
+(le test bloquant primaire) a `varlena.content == None` en permanence
+(`Default::default()`) — il n'exerçait donc jamais la branche segmentée.
+L'invariant central du Contrat (`buf` ne réalloue jamais même avec le champ
+`marius:large_content` actif) n'était certifié **nulle part au niveau
+bloquant** avant cette correction — seulement dans les bancs Divan, jamais
+exécutés en CI. Nouveau test ajouté :
+`test_content_core_no_realloc_with_segmented_content` (`is_readable=1` +
+corps de ~270 Ko), désormais bloquant.
+
+**Enseignement affiné** : la leçon du 25/07 (« un Contrat clos ne couvre que
+les fichiers qu'il a réellement touchés ») s'étend — même les fichiers
+*apparemment* couverts (`crates/core/schema` a bien été touché, à
+répétition, tout au long de ce Contrat) peuvent cacher un test dont la
+fixture n'exerce jamais le nouveau chemin de code. Vérifier qu'un test
+« passe » ne suffit pas ; vérifier qu'il **exerce réellement** l'invariant
+qu'il prétend garantir est une question distincte, trop facile à manquer
+quand une fixture par défaut (`Default::default()`) neutralise silencieusement
+la branche qui compte.
