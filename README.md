@@ -7,7 +7,7 @@
 [![Projection](https://img.shields.io/badge/Projection-AOT%20Native-D90429?style=for-the-badge)]()
 [![Zero ORM](https://img.shields.io/badge/Transformation-Zero%20ORM-B7094C?style=for-the-badge)]()
 [![Zero JSON](https://img.shields.io/badge/Protocole-Zero%20JSON-89023E?style=for-the-badge)]()
-[![Hot Path](https://img.shields.io/badge/Chemin%20Chaud-Zero%20Allocation-F77F00?style=for-the-badge)]()
+[![Hot Path](https://img.shields.io/badge/Hot%20Path-Zero%20Allocation-F77F00?style=for-the-badge)]()
 [![Mechanical Sympathy](https://img.shields.io/badge/CPU-Mechanical%20Sympathy-D62828?style=for-the-badge)]()
 [![Cache L1](https://img.shields.io/badge/Layout-L1%20Cache%20Friendly-FCBF49?style=for-the-badge)]()
 [![I/O Zero-Copy](https://img.shields.io/badge/I%2FO-sendfile(2)%20%7C%20pread-118AB2?style=for-the-badge)]()
