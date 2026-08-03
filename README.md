@@ -1,4 +1,4 @@
-<figure style="background-color: #333"><img src="./assets/default/images/marius.png" alt="Logo de Marius, moteur de projection réactive" width="1408" height="768" style="width: 100%"></figure>
+<img src="./assets/default/images/marius.png" alt="Logo de Marius, moteur de projection réactive" width="1408" height="768" style="width: 100%">
 
 # Marius, moteur de Projection Réactive
 
@@ -57,7 +57,7 @@ Mutation SQL  →  pg_notify  →  Collector Rust  →  Projection  →  Artéfa
 5. **Projection** :chaque entité est transformée en HTML par le pipeline AOT natif,
    compilé en code machine à la construction du binaire.
 6. **Distribution** : le serveur Axum sert l'artéfact via `sendfile(2)`.
-   Latence de lecture : ~~~100 µs~~ → finalement nous sommes dans une fourchette moyenne de 582.2 ns à 1.135 µs après mesure, coût CPU quasi nul.
+   Latence de lecture : ~~100 µs~~ → finalement nous sommes dans une fourchette moyenne de 582.2 ns à 1.135 µs après mesure, coût CPU quasi nul.
 
 ### Pourquoi cette architecture est stable sous charge
 
