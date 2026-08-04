@@ -13,9 +13,9 @@ categories = ["web-programming"]
 memmap2 = "0.9.10"
 bytemuck = { version = "1.14", features = ["derive"] }
 arc-swap = "1.9.1"
-marius-collector = { path = "../../core/collector", version = "=0.5.0" }
-marius-projection = { path = "../../core/projection", version = "=0.5.0" }
-marius-schema = { path = "../../core/schema", version = "=0.5.0" }
+marius-collector = { version = "=0.5.0", path = "../../core/collector" }
+marius-projection = { version = "=0.5.0", path = "../../core/projection" }
+marius-schema = { version = "=0.5.0", path = "../../core/schema" }
 
 # Shell — Tokio et Rayon vivent uniquement ici (pas dans le Core)
 tokio = { workspace = true }
@@ -24,10 +24,10 @@ sqlx = { workspace = true }
 
 [dev-dependencies]
 divan = "0.1"
-marius-schema = { path = "../../core/schema", version = "=0.5.0" }
+marius-schema = { version = "=0.5.0", path = "../../core/schema" }
 
 [build-dependencies]
-marius-fragment-forge = { path = "../../forge/fragment-forge", version = "=0.5.0" }
+marius-fragment-forge = { version = "=0.5.0", path = "../../forge/fragment-forge" }
 
 [[bench]]
 name = "hot_path_render"

@@ -17,4 +17,4 @@ tokio = { workspace = true }
 # Interface partagée : VarlenField, FieldSpec, FieldKind, generate_render, generate_capacity_consts.
 # Dépendance unidirectionnelle : db-forge → fragment-forge.
 # fragment-forge n'importe jamais db-forge (INV-4).
-marius-fragment-forge = { path = "../fragment-forge", version = "=0.5.0" }
+marius-fragment-forge = { version = "=0.5.0", path = "../fragment-forge" }
