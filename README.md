@@ -1,6 +1,6 @@
 <img src=".github/assets/marius.png" alt="Logo de Marius, moteur de projection réactive" width="1408" height="768" style="width: 100%">
 
-# Marius, moteur de Projection Réactive
+# Marius, moteur de projection réactive
 
 [![Architecture](https://img.shields.io/badge/Architecture-ECS%2FDOD-E85D04?style=for-the-badge)]()
 [![Design](https://img.shields.io/badge/Design-Data--Oriented-2D6A4F?style=for-the-badge)]()
