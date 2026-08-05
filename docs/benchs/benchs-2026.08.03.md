@@ -1,6 +1,6 @@
 # Benchs du 3 août 2026
 
-## Métriques
+## Setup
 
 ```
 $ sudo lshw -short
@@ -25,6 +25,8 @@ multiplication des MHz du/des CPU(s) :    38%
 Vitesse maximale du processeur en MHz :   4547.9458
 Vitesse minimale du processeur en MHz :   410.9590
 ```
+
+## Métriques
 
 ```
 $ cargo bench -p marius-render --bench hot_path_certify

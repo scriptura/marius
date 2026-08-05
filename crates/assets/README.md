@@ -103,10 +103,10 @@ Exécution du linter :
 cargo clippy -p marius-assets --all-targets -- -D warnings
 ```
 
-Formatage :
+Compilation des assets d'un thème (ici celui par défaut) :
 
 ```bash
-cargo fmt --all
+cargo run --release --bin marius-assets -- ./assets/default
 ```
 
 ---
