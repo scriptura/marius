@@ -13,7 +13,7 @@ use marius_schema::{CONTENT_CORE_TOTAL_CAP, ContentCoreProjection};
 /// → server proscrit (Document 3 §7, séparation Shell/Forge déjà actée
 /// pour build.rs, même principe ici pour les binaires).
 static DUMP_ROUTE_TABLE: &[RouteEntry] = &[RouteEntry {
-    pattern: "/content/:id",
+    pattern: "/content/{id}",
     packfile_key: "content_core",
     id_source: IdSource::PathParam("id"),
     content_type: "text/html; charset=utf-8",

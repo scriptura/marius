@@ -44,7 +44,7 @@ use crate::pack_html_index::PackHtmlIndex;
 /// D'où vient l'id au moment de la requête (spec §4).
 #[derive(Debug, Clone, Copy)]
 pub enum IdSource {
-    /// Extrait d'un paramètre de route Axum — ex: "/produit/:id".
+    /// Extrait d'un paramètre de route Axum — ex: "/produit/{id}".
     PathParam(&'static str),
     /// Constante — page singleton (ADR-009 : artefact dont la "collection"
     /// a déjà été résolue en amont par PostgreSQL, pas par ce composant).
@@ -55,7 +55,7 @@ pub enum IdSource {
 /// exposé en lecture directe, un par template de page (ADR-008 §4.2).
 #[derive(Debug, Clone, Copy)]
 pub struct RouteEntry {
-    /// Pattern Axum, ex: "/produit/:id", "/".
+    /// Pattern Axum, ex: "/produit/{id}", "/".
     pub pattern: &'static str,
     /// Identifiant stable du packfile à interroger — clé du LiveRegistry.
     /// Plusieurs RouteEntry peuvent partager la même clé (ex: page complète
@@ -383,7 +383,7 @@ mod tests {
         let route_table: &'static [RouteEntry] = Box::leak(
             vec![
                 RouteEntry {
-                    pattern: "/a/:id",
+                    pattern: "/a/{id}",
                     packfile_key: key_a,
                     id_source: IdSource::PathParam("id"),
                     content_type: "text/html; charset=utf-8",
@@ -417,7 +417,7 @@ mod tests {
 
         let route_table: &'static [RouteEntry] = Box::leak(
             vec![RouteEntry {
-                pattern: "/absent/:id",
+                pattern: "/absent/{id}",
                 packfile_key: missing_key,
                 id_source: IdSource::PathParam("id"),
                 content_type: "text/html; charset=utf-8",
@@ -452,13 +452,13 @@ mod tests {
         let route_table: &'static [RouteEntry] = Box::leak(
             vec![
                 RouteEntry {
-                    pattern: "/page/:id",
+                    pattern: "/page/{id}",
                     packfile_key: shared_key,
                     id_source: IdSource::PathParam("id"),
                     content_type: "text/html; charset=utf-8",
                 },
                 RouteEntry {
-                    pattern: "/fragment/:id",
+                    pattern: "/fragment/{id}",
                     packfile_key: shared_key,
                     id_source: IdSource::PathParam("id"),
                     content_type: "text/html; charset=utf-8",

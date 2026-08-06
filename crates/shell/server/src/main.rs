@@ -75,13 +75,13 @@ include!(concat!(env!("OUT_DIR"), "/asset_routes.rs"));
 /// couvre les deux IdSource (PathParam, Fixed).
 static ROUTE_TABLE: &[RouteEntry] = &[
     RouteEntry {
-        pattern: "/product/:id",
+        pattern: "/product/{id}",
         packfile_key: "commerce_product_core",
         id_source: IdSource::PathParam("id"),
         content_type: "text/html; charset=utf-8",
     },
     RouteEntry {
-        pattern: "/content/:id",
+        pattern: "/content/{id}",
         packfile_key: "content_core",
         id_source: IdSource::PathParam("id"),
         content_type: "text/html; charset=utf-8",
@@ -520,7 +520,7 @@ mod tests {
         let route_table: &'static [RouteEntry] = Box::leak(
             vec![
                 RouteEntry {
-                    pattern: "/produit/:id",
+                    pattern: "/produit/{id}",
                     packfile_key: key,
                     id_source: IdSource::PathParam("id"),
                     content_type: "text/html; charset=utf-8",
@@ -586,7 +586,7 @@ mod tests {
         let key = unique_test_key("load");
         let route_table: &'static [RouteEntry] = Box::leak(
             vec![RouteEntry {
-                pattern: "/produit/:id",
+                pattern: "/produit/{id}",
                 packfile_key: key,
                 id_source: IdSource::PathParam("id"),
                 content_type: "text/html; charset=utf-8",
@@ -631,7 +631,7 @@ mod tests {
         let key = unique_test_key("swap");
         let route_table: &'static [RouteEntry] = Box::leak(
             vec![RouteEntry {
-                pattern: "/produit/:id",
+                pattern: "/produit/{id}",
                 packfile_key: key,
                 id_source: IdSource::PathParam("id"),
                 content_type: "text/html; charset=utf-8",
