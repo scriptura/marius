@@ -1,4 +1,4 @@
-//! # DB-Forge · `crates/core/schema/build.rs`
+//! `crates/core/schema/build.rs`
 //!
 //! Orchestrateur build-time.
 //!

@@ -11,6 +11,8 @@
 
 // ─── Constantes immuables ────────────────────────────────────────────────────
 
+import "leaflet.js";
+
 const TILE_DEFAULT = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const TILE_PROBE = Object.freeze({ z: "16", x: "33440", y: "23491" });
 const ANIM_CLASS = "start-map";

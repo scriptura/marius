@@ -1,12 +1,5 @@
-marius$ tree -I "doc|target|build|artifacts|assets|implementation-history|logs"
+marius$ tree -I "doc|target|build|artifacts|assets|logs"
 .
-├── archives
-│   └── pre-adr007
-│       ├── body.rs
-│       ├── generator.rs
-│       ├── orchestrator.rs
-│       ├── prologue.rs
-│       └── README.md
 ├── Cargo.lock
 ├── Cargo.toml
 ├── crates
@@ -176,10 +169,14 @@ marius$ tree -I "doc|target|build|artifacts|assets|implementation-history|logs"
 │   │   ├── pipeline-mode-page-architecture.md
 │   │   └── runtime-data-flow
 │   │       ├── CONTRAT-implementation-phase1.md
+│   │       ├── DESIGN-runtime-segment-pipeline (post-ADR-011).md
 │   │       ├── DESIGN-store-registry.md
 │   │       ├── DFS-phase1-reactivite-cow.md
 │   │       ├── PHASE1-CLOSURE.md
 │   │       └── runtime-data-flow-invariants.md
+│   ├── benchs
+│   │   ├── benchs-2026.08.03.md
+│   │   └── benchs-2026.08.06.md
 │   ├── contacts
 │   │   ├── CONTRAT-implementation-multi-slot-varlena.md
 │   │   ├── CONTRAT-implementation-projection-segmentee.md
@@ -194,6 +191,9 @@ marius$ tree -I "doc|target|build|artifacts|assets|implementation-history|logs"
 │   │   ├── postgres-cmd.md
 │   │   ├── runtime-lifecycle-guide.md
 │   │   └── scenario-ajout-champ-varlena.md
+│   ├── handoffs
+│   │   ├── handoff-cartographie-hyper(ADR-011).md
+│   │   └── HANDOFF-js-deps-capacites-frontend.md
 │   ├── manifestos
 │   │   ├── article-0.md
 │   │   ├── DESIGN-projection-composition.md
@@ -228,40 +228,43 @@ marius$ tree -I "doc|target|build|artifacts|assets|implementation-history|logs"
 │   ├── reflexivity
 │   │   ├── when-architecture-ceases-to-be-a-plan-and-becomes-an-instrument-of-discovery.md
 │   │   └── why-marius-could-only-emerge-outside-the-tech-world.md
-│   └── rust
-│       ├── adr
-│       │   ├── ADR-001-hashset-to-bit-vector.md
-│       │   ├── ADR-002-reactive-projection-and-hybrid-state-management.md
-│       │   ├── ADR-003-thread-alignment-projection-varlena-transport-and-thread-invariants.md
-│       │   ├── ADR-004-normalization-of-configuration-indexes-and-memory-offsets.md
-│       │   ├── ADR-005-HTMX-versus-Web-Components.md
-│       │   ├── ADR-006-safeguarding-the-read-path-via-sendfile(2).md
-│       │   ├── ADR-007-introspection-varlena-bounds.md
-│       │   ├── ADR-008-topologie-artefact-lecture.md
-│       │   ├── ADR-009-pages-non-adressables-pk.md
-│       │   ├── ADR-010-chunking-of-large-varlena-objects.md
-│       │   └── ADR-rust-versus-zig.md
-│       ├── note-post-phase-5.3-generate-main.md
-│       └── specifications
-│           ├── db-forge-roadmap.md
-│           ├── db-forge-specification.md
-│           ├── dependances-mode-page
-│           │   ├── core-system-blueprint.md
-│           │   ├── doc1-parser-mode-page.md
-│           │   ├── doc2-linker-lowering.md
-│           │   ├── doc3-orchestration-build-rs.md
-│           │   ├── graphe-dependances-mode-page.md
-│           │   └── mode-page-implementation-roadmap.md
-│           ├── marius-assets-roadmap.md
-│           ├── marius-assets-specification.md
-│           ├── marius-compilateur-projections-html-roadmap.md
-│           ├── marius-compilateur-projections-html-specification.md
-│           ├── marius-merge-rcu-specification-roadmap.md
-│           ├── marius-render-shell-roadmap.md
-│           ├── marius-render-shell-specification.md
-│           ├── orchestration-main-roadmap.md
-│           ├── orchestration-main-specification.md
-│           └── provisioning-projection-specification.md
+│   ├── rust
+│   │   ├── adr
+│   │   │   ├── ADR-001-hashset-to-bit-vector.md
+│   │   │   ├── ADR-002-reactive-projection-and-hybrid-state-management.md
+│   │   │   ├── ADR-003-thread-alignment-projection-varlena-transport-and-thread-invariants.md
+│   │   │   ├── ADR-004-normalization-of-configuration-indexes-and-memory-offsets.md
+│   │   │   ├── ADR-005-HTMX-versus-Web-Components.md
+│   │   │   ├── ADR-006-safeguarding-the-read-path-via-sendfile(2).md
+│   │   │   ├── ADR-007-introspection-varlena-bounds.md
+│   │   │   ├── ADR-008-topologie-artefact-lecture.md
+│   │   │   ├── ADR-009-pages-non-adressables-pk.md
+│   │   │   ├── ADR-010-chunking-of-large-varlena-objects.md
+│   │   │   ├── ADR-011-projections-ordonnancees.md
+│   │   │   └── ADR-rust-versus-zig.md
+│   │   ├── note-post-phase-5.3-generate-main.md
+│   │   └── specifications
+│   │       ├── db-forge-roadmap.md
+│   │       ├── db-forge-specification.md
+│   │       ├── dependances-mode-page
+│   │       │   ├── core-system-blueprint.md
+│   │       │   ├── doc1-parser-mode-page.md
+│   │       │   ├── doc2-linker-lowering.md
+│   │       │   ├── doc3-orchestration-build-rs.md
+│   │       │   ├── graphe-dependances-mode-page.md
+│   │       │   └── mode-page-implementation-roadmap.md
+│   │       ├── marius-assets-roadmap.md
+│   │       ├── marius-assets-specification.md
+│   │       ├── marius-compilateur-projections-html-roadmap.md
+│   │       ├── marius-compilateur-projections-html-specification.md
+│   │       ├── marius-merge-rcu-specification-roadmap.md
+│   │       ├── marius-render-shell-roadmap.md
+│   │       ├── marius-render-shell-specification.md
+│   │       ├── orchestration-main-roadmap.md
+│   │       ├── orchestration-main-specification.md
+│   │       └── provisioning-projection-specification.md
+│   └── tree
+│       └── tree.md
 ├── README.md
 └── scripts
     ├── certify_frugality.sh
