@@ -179,13 +179,19 @@ const AppPipeline = (() => {
 							scripts.set(s, idx === entry.scripts.length - 1 ? cb : undefined);
 						}
 					});
-					entry.styles.forEach(({ url, media }) => styles.set(url, media));
+					for (const { url, media } of entry.styles) {
+						styles.set(url, media);
+					}
 				}
 			}
 
 			// Phase Write
-			styles.forEach((media, url) => this.injectStyle(url, media));
-			scripts.forEach((onload, url) => this.injectScript(url, onload));
+			for (const [url, media] of styles) {
+				this.injectStyle(url, media);
+			}
+			for (const [url, onload] of scripts) {
+				this.injectScript(url, onload);
+			}
 		},
 	};
 
@@ -241,28 +247,32 @@ const AppPipeline = (() => {
 		init() {
 			// Pré-remplissage date du jour
 			// @bugfixed Comportement instable sur certains navigateurs — à surveiller
-			document
-				.querySelectorAll("input[type=date].today-date")
-				.forEach((e) => (e.valueAsDate = new Date()));
+			for (const e of document.querySelectorAll(
+				"input[type=date].today-date",
+			)) {
+				e.valueAsDate = new Date();
+			}
 
 			// Multiple select : affiche toutes les options si en dessous du seuil
 			const MAX_SIZE = 7;
-			document.querySelectorAll(".input select[multiple]").forEach((select) => {
+			for (const select of document.querySelectorAll(
+				".input select[multiple]",
+			)) {
 				const size = Math.min(select.length, MAX_SIZE);
 				select.size = size;
 				if (select.length < MAX_SIZE) select.style.overflow = "hidden";
-			});
+			}
 
 			// Color input → synchronisation du champ <output>
-			document
-				.querySelectorAll(".input:has([type=color] + output) input")
-				.forEach((input) => {
-					const output = input.nextElementSibling;
-					output.textContent = input.value;
-					input.addEventListener("input", function () {
-						output.textContent = this.value;
-					});
+			for (const input of document.querySelectorAll(
+				".input:has([type=color] + output) input",
+			)) {
+				const output = input.nextElementSibling;
+				output.textContent = input.value;
+				input.addEventListener("input", function () {
+					output.textContent = this.value;
 				});
+			}
 		},
 	};
 
@@ -282,9 +292,9 @@ const AppPipeline = (() => {
 
 	// — Préchargement images lazy (amorçage cache SW) —
 	const preloadLazyImages = () => {
-		document.querySelectorAll('img[loading="lazy"]').forEach((img) => {
+		for (const img of document.querySelectorAll('img[loading="lazy"]')) {
 			new Image().src = img.src;
-		});
+		}
 	};
 
 	// ---------------------------------------------------------------------------
