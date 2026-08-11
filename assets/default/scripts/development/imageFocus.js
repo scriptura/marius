@@ -7,7 +7,7 @@
  */
 
 const CONFIG = {
-	TRIGGER_SELECTOR: '[class*="-focus"]',
+	TRIGGER_SELECTOR: ".figure-image-focus",
 	OVERLAY_ID: "picture-focus-overlay",
 	OVERLAY_CLASS: "picture-area",
 };
@@ -158,10 +158,3 @@ export const init = () => {
 	document.removeEventListener("keydown", handleKeyDown);
 	document.addEventListener("keydown", handleKeyDown);
 };
-
-// Auto-bootstrap uniquement si importé directement sans orchestrateur
-if (document.readyState === "loading") {
-	document.addEventListener("DOMContentLoaded", init);
-} else {
-	init();
-}
