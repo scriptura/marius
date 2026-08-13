@@ -572,6 +572,34 @@ pub enum FlatPageToken<'src> {
         rel_from_manifest: &'src str,
         len: usize,
     },
+
+    /// Point d'extension textuel post-abaissement : `<!-- MARIUS_MODULES -->`
+    /// dans `base.marius`, position sœur de `ScriptStart`/`ScriptEnd`
+    /// (HANDOFF-js-deps-capacites-frontend-v2.md, § Lowering AOT de
+    /// `js_deps`). Jamais produit par le scanner/parser — `{% %}`/`{{ }}`
+    /// restent les seules syntaxes actives de ce crate. Injecté directement
+    /// dans le flux de tokens par `build.rs`, après `lower`, par recherche
+    /// de sous-chaîne dans un `Static` : même mécanisme que
+    /// `SCRIPTS_PLACEHOLDER`/`splice_hoisted_scripts`, jamais un nouveau
+    /// chemin de parsing.
+    ///
+    /// Ne porte aucune donnée propre : `build.rs` calcule intégralement, en
+    /// amont, la vue de compilation `bit → (URL, activation)` (lecture de
+    /// `theme.toml`, `scripts_registry.lock`, `AssetManifest`) et la fournit
+    /// à `resolve_and_measure` sous forme d'une longueur (mesure), puis à
+    /// `generate_aot_snippet`/`generate_segmented_snippet` sous forme d'une
+    /// chaîne de code Rust déjà assemblée (émission) — `fragment-forge` ne
+    /// connaît et ne doit connaître aucune des trois sources.
+    ///
+    /// Contexte de lowering dépendant de l'appelant — propriété du
+    /// CONTEXTE, jamais de ce token lui-même : `resolve_page_template`
+    /// (Mode Page, `record` réel) fournit la vue calculée ; `resolve_static_page`
+    /// (`STATIC_PAGES`, aucun `record`) fournit systématiquement 0 octet /
+    /// chaîne vide — un ensemble de capacités par définition vide pour une
+    /// page sans état éditorial, jamais un cas d'erreur ni un no-op
+    /// accidentel : c'est le comportement normal du lowering dans ce
+    /// pipeline.
+    ModulesPlaceholder,
 }
 
 #[cfg(test)]
@@ -598,7 +626,7 @@ mod tests_phase_1_1 {
     /// Si `Copy` manquait (champ non-Copy), ce test ne compilerait pas.
     #[test]
     fn all_variants_are_copy() {
-        let tokens: [FlatPageToken<'_>; 5] = [
+        let tokens: [FlatPageToken<'_>; 6] = [
             FlatPageToken::Static("content"),
             FlatPageToken::Field {
                 entity: "user",
@@ -614,6 +642,7 @@ mod tests_phase_1_1 {
                 rel_from_manifest: "../templates/header.html",
                 len: 42,
             },
+            FlatPageToken::ModulesPlaceholder,
         ];
 
         let _a = tokens[0]; // premier move apparent
@@ -1449,10 +1478,16 @@ pub fn validate_ast<'src>(tokens: &[FlatPageToken<'src>]) -> Result<(), Vec<Sema
             }
 
             // Static, Field, StaticInclude, AssetRef : aucun effet sur les FSM.
+            // ModulesPlaceholder : jamais produit à ce stade (injecté par
+            // build.rs après validate_ast, même ordre que ScriptStart/
+            // ScriptEnd hissés par hoist_and_dedupe_scripts) — présent ici
+            // uniquement pour l'exhaustivité du match, pas parce que ce
+            // point est atteignable en pratique.
             FlatPageToken::Static(_)
             | FlatPageToken::Field { .. }
             | FlatPageToken::StaticInclude { .. }
-            | FlatPageToken::AssetRef(_) => {}
+            | FlatPageToken::AssetRef(_)
+            | FlatPageToken::ModulesPlaceholder => {}
         }
     }
 
@@ -1693,6 +1728,13 @@ pub fn resolve_and_measure<'src>(
     schema: &SchemaIndex<'_>,
     get_file_size: impl Fn(&str) -> Result<usize, String>,
     resolve_asset_len: impl Fn(&str) -> AssetLookup,
+    // Contribution en octets de ModulesPlaceholder, calculée intégralement
+    // par `build.rs` (voir doc du variant) — pire cas : somme des snippets
+    // de TOUTES les capacités actives, jamais une hypothèse d'exclusivité
+    // mutuelle entre bits du bitset `js_deps`. `0` pour tout appelant dont
+    // le flux ne contient jamais ce token (Mode Fragment isolé,
+    // STATIC_PAGES, tests sans capacité) — valeur alors simplement inerte.
+    modules_static_bytes: usize,
 ) -> Result<TemplateMetrics, Vec<ResolverError<'src>>> {
     let mut metrics = TemplateMetrics {
         total_static_bytes: 0,
@@ -1780,6 +1822,13 @@ pub fn resolve_and_measure<'src>(
                     errors.push(ResolverError::AssetNotFound { key, suggestion });
                 }
             },
+
+            // Contribution directe, valeur fournie par l'appelant — même
+            // famille que Static/AssetRef, aucune mutation en place (le
+            // token ne porte aucun champ propre à patcher).
+            FlatPageToken::ModulesPlaceholder => {
+                metrics.total_static_bytes += modules_static_bytes;
+            }
         }
     }
 
@@ -1831,6 +1880,7 @@ mod tests_phase_2_1 {
                 other => Err(format!("unknown : {other}")),
             },
             |_| unreachable!("aucun AssetRef dans ce test"),
+            0, // aucune capacité js_deps dans cette fixture
         );
 
         // Métriques correctes.
@@ -1889,6 +1939,7 @@ mod tests_phase_2_1 {
                 other => Err(format!("introuvable : {other}")),
             },
             |_| unreachable!("aucun AssetRef dans ce test"),
+            0, // aucune capacité js_deps dans cette fixture
         );
 
         // Exactement 1 erreur accumulée.
@@ -1957,6 +2008,7 @@ mod tests_phase_2_1 {
                 &schema,
                 |_| unreachable!("get_file_size ne doit pas être appelé sans StaticInclude"),
                 |_| unreachable!("aucun AssetRef dans ce test"),
+                0, // aucune capacité js_deps dans cette fixture
             ),
             Ok(TemplateMetrics {
                 total_static_bytes: 7,
@@ -2028,6 +2080,7 @@ mod tests_phase_2_1 {
             &schema,
             |_| unreachable!("aucun StaticInclude dans ce test"),
             |_| unreachable!("aucun AssetRef dans ce test"),
+            0, // aucune capacité js_deps dans cette fixture
         );
 
         assert_eq!(
@@ -2060,6 +2113,7 @@ mod tests_phase_2_1 {
             &schema,
             |_| unreachable!("aucun StaticInclude dans ce test"),
             |_| unreachable!("aucun AssetRef dans ce test"),
+            0, // aucune capacité js_deps dans cette fixture
         )
         .expect("champ borné référencé : résolution attendue en succès");
 
@@ -2091,6 +2145,7 @@ mod tests_phase_2_1 {
             &schema,
             |_| unreachable!("aucun StaticInclude dans ce test"),
             |_| unreachable!("aucun AssetRef dans ce test"),
+            0, // aucune capacité js_deps dans cette fixture
         )
         .expect("champ Cold non référencé : résolution attendue en succès");
 
@@ -2139,6 +2194,7 @@ mod tests_phase_2_1 {
                 assert_eq!(key, "main.css");
                 AssetLookup::Found(20) // longueur de l'URL versionnée, pas du fichier
             },
+            0, // aucune capacité js_deps dans cette fixture
         )
         .expect("clé présente : résolution attendue en succès");
 
@@ -2172,6 +2228,7 @@ mod tests_phase_2_1 {
                     suggestion: Some("vouliez-vous dire 'utils.svg' ?".to_string()),
                 }
             },
+            0, // aucune capacité js_deps dans cette fixture
         );
 
         let errors = result.expect_err("clé absente : Err attendu");
@@ -2207,6 +2264,7 @@ mod tests_phase_2_1 {
             &schema,
             |_| unreachable!("aucun StaticInclude dans ce test"),
             |_| AssetLookup::NotFound { suggestion: None },
+            0, // aucune capacité js_deps dans cette fixture
         );
 
         let errors = result.expect_err("clé absente : Err attendu");
@@ -2275,6 +2333,12 @@ pub fn generate_aot_snippet<'src, 'r>(
     tokens: &[FlatPageToken<'src>],
     schema: &SchemaIndex<'_>,
     resolve_asset_url: impl Fn(&str) -> &'r str,
+    // Code Rust déjà assemblé par `build.rs` pour ModulesPlaceholder — une
+    // ligne `if record.js_deps & BIT != 0 { buf.push_str(...); }` par
+    // capacité active, chaîne vide si aucune. Inséré verbatim (ce N'EST PAS
+    // un littéral à échapper comme AssetRef/StaticInclude : c'est déjà du
+    // code source, pas une valeur) — voir doc du variant.
+    modules_snippet: &str,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(25 + tokens.len() * 60);
@@ -2387,6 +2451,14 @@ pub fn generate_aot_snippet<'src, 'r>(
                 let url = resolve_asset_url(key);
                 writeln!(out, "{}buf.push_str({:?});", indent, url).unwrap();
             }
+
+            // Insertion verbatim — `modules_snippet` est déjà du code Rust
+            // complet (0 à N lignes `if record.js_deps & BIT != 0 { ... }`),
+            // jamais une valeur à formater/échapper comme les autres
+            // variantes de cette fonction.
+            FlatPageToken::ModulesPlaceholder => {
+                out.push_str(modules_snippet);
+            }
         }
     }
 
@@ -2428,6 +2500,10 @@ pub fn generate_segmented_snippet<'src, 'r>(
     tokens: &[FlatPageToken<'src>],
     schema: &SchemaIndex<'_>,
     resolve_asset_url: impl Fn(&str) -> &'r str,
+    // Voir doc du paramètre homonyme de `generate_aot_snippet` — même
+    // contrat : code Rust déjà assemblé, inséré verbatim, jamais une valeur
+    // à formater.
+    modules_snippet: &str,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(25 + tokens.len() * 60);
@@ -2541,6 +2617,13 @@ pub fn generate_segmented_snippet<'src, 'r>(
             FlatPageToken::AssetRef(key) => {
                 let url = resolve_asset_url(key);
                 writeln!(out, "{indent}buf.push_str({url:?});").unwrap();
+            }
+
+            // Insertion verbatim, même contrat que generate_aot_snippet —
+            // `modules_snippet` n'est jamais imbriqué dans un run segmenté
+            // (le marqueur vit dans <head>, hors de tout champ is_segment).
+            FlatPageToken::ModulesPlaceholder => {
+                out.push_str(modules_snippet);
             }
         }
     }
@@ -3071,9 +3154,12 @@ mod tests_phase_2_2 {
             },
         ];
 
-        let got = generate_aot_snippet(tokens, &schema, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        });
+        let got = generate_aot_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
 
         // Varlena ref déclarée en tête, triée.
         assert!(
@@ -3132,9 +3218,12 @@ mod tests_phase_2_2 {
             field: "content",
         }];
 
-        let got = generate_aot_snippet(tokens, &schema, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        });
+        let got = generate_aot_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
 
         assert!(
             got.contains("let content_ref: Option<&str> = varlena.content.as_deref();"),
@@ -3167,9 +3256,12 @@ mod tests_phase_2_2 {
             },
             FlatPageToken::Static("</p>"),
         ];
-        let got = generate_aot_snippet(tokens, &schema, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        });
+        let got = generate_aot_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
         assert!(
             !got.contains("_ref"),
             "pas de déclaration ref sans varlena:\n{got}"
@@ -3211,9 +3303,12 @@ mod tests_phase_2_2 {
             FlatPageToken::Static("</article>"),
         ];
 
-        let got = generate_segmented_snippet(tokens, &schema, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        });
+        let got = generate_segmented_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
 
         assert!(
             got.contains("let mut seg_start: usize = buf.len();"),
@@ -3261,9 +3356,12 @@ mod tests_phase_2_2 {
             FlatPageToken::Static("</p>"),
         ];
 
-        let got = generate_segmented_snippet(tokens, &schema, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        });
+        let got = generate_segmented_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
 
         // Le push Buffered/Borrowed à l'intérieur du if doit être indenté —
         // preuve qu'il est bien conditionnel, pas exécuté inconditionnellement.
@@ -3300,9 +3398,12 @@ mod tests_phase_2_2 {
 
         let tokens: &[FlatPageToken<'_>] = &[FlatPageToken::Static("<p>Rien à segmenter</p>")];
 
-        let got = generate_segmented_snippet(tokens, &schema, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        });
+        let got = generate_segmented_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
 
         assert_eq!(
             got.matches("Segment::Buffered").count(),

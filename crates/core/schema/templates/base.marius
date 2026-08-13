@@ -20,6 +20,7 @@
     {% script %}
     <script src="{% asset serviceWorker.js %}" type="module"></script>{% endscript %}
     <!-- MARIUS_SCRIPTS -->
+    <!-- MARIUS_MODULES -->
 </head>
 
 <body>

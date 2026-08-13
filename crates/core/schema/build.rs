@@ -45,6 +45,67 @@ use marius_fragment_forge::{
 /// doivent apparaître.
 const SCRIPTS_PLACEHOLDER: &str = "<!-- MARIUS_SCRIPTS -->";
 
+/// Marqueur textuel du point d'injection des modules conditionnels pilotés
+/// par `content.core.js_deps` — HANDOFF-js-deps-capacites-frontend-v2.md.
+///
+/// Même mécanisme de principe que `SCRIPTS_PLACEHOLDER` (sous-chaîne d'un
+/// `FlatPageToken::Static`, jamais interprétée par le moteur de template),
+/// mais lowering DIFFÉRENT : `SCRIPTS_PLACEHOLDER` reste un simple
+/// commentaire HTML inoffensif s'il n'y a rien à hisser (aucun nouveau
+/// token) ; `MODULES_PLACEHOLDER` se lowerise systématiquement en
+/// `FlatPageToken::ModulesPlaceholder` — ajout délibéré à l'AST gelé,
+/// nécessaire parce que l'émission dépend d'un bitset RUNTIME
+/// (`record.js_deps`), jamais connaissable au moment de la composition
+/// Page/Fragment (contrairement au contenu statique d'un `{% script %}`).
+const MODULES_PLACEHOLDER: &str = "<!-- MARIUS_MODULES -->";
+
+/// Une entrée de `theme.toml` → `[scripts.capabilities.<nom>]`.
+///
+/// Désérialisation MINIMALE, propre à `build.rs` — délibérément dupliquée
+/// depuis `crates/marius-assets/src/config.rs` plutôt que partagée : même
+/// interdiction de couplage de types Rust entre `marius-assets` et les
+/// crates de la Forge que pour `suggest_asset_key`/`levenshtein` ci-dessus
+/// (Roadmap `marius-assets` §2.1). `markers` est déserialisé pour validation
+/// (non-vide) mais n'entre dans aucun codegen ici — sa consommation est
+/// exclusivement SQL (`compute_js_deps`, chantier séparé).
+#[derive(Deserialize)]
+struct CapabilityConfig {
+    entry: String,
+    markers: Vec<String>,
+    activation: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ScriptsSection {
+    #[serde(default)]
+    capabilities: HashMap<String, CapabilityConfig>,
+}
+
+/// Vue partielle de `theme.toml` — seule la section `[scripts.capabilities]`
+/// intéresse ce lowering ; `[theme]`, `[styles]`, `[sprites]`, etc. sont
+/// ignorées ici (déjà day-to-day consommées par `marius-assets`, jamais par
+/// `db-forge`).
+#[derive(Deserialize)]
+struct ThemeTomlScriptsOnly {
+    #[serde(default)]
+    scripts: ScriptsSection,
+}
+
+/// Résultat du lowering AOT de `js_deps` — calculé UNE SEULE FOIS pour tout
+/// le build (les capacités sont globales, jamais par composant), injecté
+/// ensuite à chaque site qui en a besoin.
+struct ModulesLowering {
+    /// Code Rust déjà assemblé : une ligne
+    /// `if record.js_deps & BIT != 0 { buf.push_str(...); }` par capacité
+    /// active, dans un ordre déterministe (tri par nom). Chaîne vide si
+    /// `[scripts.capabilities]` est absente ou vide.
+    snippet: String,
+    /// Somme des octets de TOUS les snippets HTML — pire cas où toutes les
+    /// capacités sont actives simultanément dans le bitset, jamais une
+    /// hypothèse d'exclusivité mutuelle entre bits.
+    static_bytes: usize,
+}
+
 /// Pages sans donnée dynamique : `(schema, table)`, résolues par
 /// `resolve_static_page` et matérialisées directement en HTML sur disque
 /// (`build/{theme}/{table}.html`) — jamais compilées en `render_page()`
@@ -122,6 +183,14 @@ fn emit_static_html<'r>(
                 );
                 return Err(());
             }
+            // Comportement NORMAL du lowering dans ce pipeline (addendum
+            // Option A, HANDOFF-js-deps-capacites-frontend-v2.md), jamais
+            // une erreur ni un no-op accidentel : l'ensemble des capacités
+            // js_deps d'une page sans `record` est par définition vide.
+            // Zéro octet émis — même token que resolve_page_template
+            // pourrait spliceer, mais résolu ici dans un contexte
+            // structurellement différent (aucun `record` en scope).
+            FlatPageToken::ModulesPlaceholder => {}
         }
     }
 
@@ -216,6 +285,230 @@ fn load_asset_manifest(manifest_dir: &str) -> Result<HashMap<String, AssetEntry>
     })?;
 
     Ok(parsed.assets)
+}
+
+/// Répertoire source du thème (contient `theme.toml`) — symétrique de
+/// `build_dir` ci-dessus (trois remontées identiques depuis
+/// `CARGO_MANIFEST_DIR` = `crates/core/schema`), confirmé par le message
+/// d'usage littéral de `marius-assets`
+/// (`marius-assets <chemin-du-dossier-de-theme> (ex: ./assets/default)`) :
+/// `workspace_root/assets/{THEME_NAME}`, jamais `workspace_root/build/...`
+/// (qui est un répertoire ENTIÈREMENT généré, jamais une source).
+fn theme_source_dir(manifest_dir: &str) -> PathBuf {
+    Path::new(manifest_dir)
+        .join("../../../assets")
+        .join(THEME_NAME)
+}
+
+/// Emplacement du registre de bits `scripts_registry.lock`.
+///
+/// PLACEMENT DE SESSION, À CONFIRMER : racine du workspace, sibling de
+/// `Cargo.lock` — même statut (fichier versionné, source de vérité
+/// d'identité stable dans le temps, jamais régénéré automatiquement par
+/// aucun binaire de ce workspace), même convention de nommage. À corriger
+/// ici si un autre emplacement est retenu.
+fn scripts_registry_path(manifest_dir: &str) -> PathBuf {
+    Path::new(manifest_dir).join("../../../scripts_registry.lock")
+}
+
+/// Identifiant Rust/JS valide — `activation` (theme.toml) est injecté
+/// VERBATIM, comme identifiant nu (pas comme littéral de chaîne échappé),
+/// dans le code Rust généré (`import{{{activation} as _n}}...`) : un texte
+/// libre non validé romprait la génération de code, voire l'injecterait.
+fn is_valid_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Calcule le lowering AOT complet de `js_deps` — lecture de
+/// `theme.toml` `[scripts.capabilities]`, bijection contre
+/// `scripts_registry.lock`, validité/unicité des bits, résolution de
+/// chaque `entry` contre le manifeste d'assets déjà chargé, assemblage du
+/// code Rust final. Échec fail-slow : toutes les erreurs de validation
+/// sont accumulées et rapportées ensemble, jamais une seule à la fois.
+///
+/// Aucune capacité déclarée : retour `Ok` immédiat, snippet vide,
+/// `scripts_registry.lock` n'est même pas requis d'exister — un projet
+/// Marius sans aucune capacité conditionnelle reste un état valide.
+fn build_modules_lowering(
+    manifest_dir: &str,
+    assets: &HashMap<String, AssetEntry>,
+) -> Result<ModulesLowering, ()> {
+    let theme_toml_path = theme_source_dir(manifest_dir).join("theme.toml");
+    println!("cargo:rerun-if-changed={}", theme_toml_path.display());
+
+    let raw_theme = std::fs::read_to_string(&theme_toml_path).map_err(|e| {
+        println!(
+            "cargo:error=DB-Forge : theme.toml introuvable ({}) : {e}",
+            theme_toml_path.display()
+        );
+    })?;
+    let theme: ThemeTomlScriptsOnly = toml::from_str(&raw_theme).map_err(|e| {
+        println!(
+            "cargo:error=DB-Forge : theme.toml malformé ({}) : {e}",
+            theme_toml_path.display()
+        );
+    })?;
+
+    let capabilities = &theme.scripts.capabilities;
+
+    let registry_path = scripts_registry_path(manifest_dir);
+    println!("cargo:rerun-if-changed={}", registry_path.display());
+
+    if capabilities.is_empty() {
+        // Rien à hisser, rien à valider — scripts_registry.lock peut même
+        // ne pas exister tant qu'aucune capacité ne l'exige.
+        return Ok(ModulesLowering {
+            snippet: String::new(),
+            static_bytes: 0,
+        });
+    }
+
+    let raw_registry = std::fs::read_to_string(&registry_path).map_err(|e| {
+        println!(
+            "cargo:error=DB-Forge : {} capacité(s) déclarée(s) dans [scripts.capabilities] \
+             mais scripts_registry.lock introuvable ({}) : {e}",
+            capabilities.len(),
+            registry_path.display()
+        );
+    })?;
+    let registry: HashMap<String, i64> = toml::from_str(&raw_registry).map_err(|e| {
+        println!(
+            "cargo:error=DB-Forge : scripts_registry.lock malformé ({}) : {e}",
+            registry_path.display()
+        );
+    })?;
+
+    let mut errors: Vec<String> = Vec::new();
+
+    // Entrées actives = clé ne commençant pas par "_retired_" — un nom
+    // retiré n'est jamais réattribuable, mais reste dans le fichier comme
+    // mémoire d'identité (le bit ne doit jamais être réutilisé par un
+    // futur nom différent).
+    let active_registry: HashMap<&str, i64> = registry
+        .iter()
+        .filter(|(k, _)| !k.starts_with("_retired_"))
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
+
+    // ── Bijection theme.toml capacités ↔ registre actif ─────────────────
+    for name in capabilities.keys() {
+        if !active_registry.contains_key(name.as_str()) {
+            errors.push(format!(
+                "capacité '{name}' déclarée dans [scripts.capabilities] mais absente de \
+                 scripts_registry.lock — attribution de bit manquante"
+            ));
+        }
+    }
+    for name in active_registry.keys() {
+        if !capabilities.contains_key(*name) {
+            errors.push(format!(
+                "bit '{name}' présent dans scripts_registry.lock (actif) mais aucune capacité \
+                 correspondante dans [scripts.capabilities] de theme.toml — capacité retirée \
+                 sans préfixe '_retired_', ou registre en avance sur la configuration"
+            ));
+        }
+    }
+
+    // ── Validité et unicité des bits ─────────────────────────────────────
+    let mut seen_bits: HashMap<i64, &str> = HashMap::new();
+    for (name, bit) in &active_registry {
+        if *bit <= 0 || (*bit & (*bit - 1)) != 0 {
+            errors.push(format!(
+                "bit invalide pour '{name}' : {bit} n'est pas une puissance de deux \
+                 strictement positive"
+            ));
+            continue;
+        }
+        if let Some(other) = seen_bits.insert(*bit, name) {
+            errors.push(format!(
+                "collision de bit {bit} entre '{other}' et '{name}' — deux capacités ne \
+                 peuvent jamais partager le même bit"
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        for e in &errors {
+            println!("cargo:error=DB-Forge [scripts_registry.lock] : {e}");
+        }
+        return Err(());
+    }
+
+    // ── Assemblage — ordre déterministe (tri par nom), jamais l'ordre
+    // d'itération d'une HashMap, qui varie d'un build à l'autre et
+    // romprait la reproductibilité du fichier généré. ───────────────────
+    let mut names: Vec<&String> = capabilities.keys().collect();
+    names.sort();
+
+    let mut snippet = String::new();
+    let mut static_bytes: usize = 0;
+
+    for name in names {
+        let cap = &capabilities[name];
+        let bit = active_registry[name.as_str()];
+
+        if !is_valid_identifier(&cap.activation) {
+            errors.push(format!(
+                "[scripts.capabilities.{name}].activation = {:?} n'est pas un identifiant \
+                 Rust/JS valide — jamais injecté tel quel dans le code généré",
+                cap.activation
+            ));
+            continue;
+        }
+
+        if cap.markers.is_empty() {
+            errors.push(format!(
+                "[scripts.capabilities.{name}].markers est vide — cette capacité ne pourrait \
+                 jamais être déclenchée par aucun contenu éditorial"
+            ));
+            continue;
+        }
+
+        let manifest_key = format!("{name}.js");
+        let url = match assets.get(&manifest_key) {
+            Some(entry) => &entry.url,
+            None => {
+                errors.push(format!(
+                    "'{name}' : clé '{manifest_key}' absente du manifeste d'assets — \
+                     [scripts.capabilities.{name}].entry ({:?}) n'a produit aucune entrée via \
+                     run_scripts_pipeline",
+                    cap.entry
+                ));
+                continue;
+            }
+        };
+
+        // Un seul <script type="module"> par capacité active : import ESM
+        // nommé, aliasé (évite toute collision — chaque `if` est un scope
+        // Rust distinct, `_n` n'entre jamais en conflit entre capacités),
+        // appelé immédiatement.
+        let html_snippet = format!(
+            r#"<script type="module">import{{{} as _n}}from{:?};_n();</script>"#,
+            cap.activation, url
+        );
+        static_bytes += html_snippet.len();
+
+        use std::fmt::Write as _;
+        writeln!(
+            snippet,
+            "if record.js_deps & {bit} != 0 {{ buf.push_str({html_snippet:?}); }}"
+        )
+        .unwrap();
+    }
+
+    if !errors.is_empty() {
+        for e in &errors {
+            println!("cargo:error=DB-Forge [theme.toml scripts.capabilities] : {e}");
+        }
+        return Err(());
+    }
+
+    Ok(ModulesLowering {
+        snippet,
+        static_bytes,
+    })
 }
 
 // =============================================================================
@@ -659,6 +952,7 @@ fn resolve_page_template<'src>(
     varlena: &[VarlenField],
     child_src: &'src str,
     child_extends: &'src str,
+    modules_lowering: &ModulesLowering,
 ) -> Result<(String, TemplateMetrics), ()> {
     let parent_path = PathBuf::from(relative_path_for_include_str(manifest_dir, child_extends));
 
@@ -765,7 +1059,7 @@ fn resolve_page_template<'src>(
         println!("cargo:error=DB-Forge [{schema}.{table}] : hoisting des scripts échoué : {e}");
     })?;
 
-    let mut tokens = if hoisted_blocks.is_empty() {
+    let tokens = if hoisted_blocks.is_empty() {
         // Rien à hisser — le marqueur, présent ou non dans le layout,
         // n'exige aucun traitement : s'il est là sans jamais être utilisé,
         // il reste un commentaire HTML inoffensif dans la sortie.
@@ -784,6 +1078,30 @@ fn resolve_page_template<'src>(
                 );
                 return Err(());
             }
+        }
+    };
+
+    // MARIUS_MODULES — lowering systématique, jamais conditionnel au
+    // nombre de capacités actives (contrairement au hoisting de scripts
+    // ci-dessus) : `base.marius` porte ce marqueur en permanence
+    // (décision de session), son absence signale une corruption du
+    // layout, pas une simple absence de contenu à hisser. Un
+    // `ModulesLowering.snippet` vide est un cas normal (0 capacité
+    // déclarée dans ce build) qui se traduit par un token présent, mais
+    // lowerisant vers zéro octet — jamais une raison de sauter le splice.
+    let mut tokens = match split_static_at_marker(tokens, MODULES_PLACEHOLDER) {
+        Some((mut tokens, splice_index)) => {
+            tokens.insert(splice_index, FlatPageToken::ModulesPlaceholder);
+            tokens
+        }
+        None => {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : marqueur {MODULES_PLACEHOLDER} \
+                 introuvable dans le layout {} — base.marius doit le porter en permanence \
+                 (avant la fermeture de </head>)",
+                parent_path.display()
+            );
+            return Err(());
         }
     };
 
@@ -819,6 +1137,7 @@ fn resolve_page_template<'src>(
         &schema_index,
         get_file_size,
         resolve_asset_len,
+        modules_lowering.static_bytes,
     )
     .map_err(|errors| {
         println!(
@@ -834,9 +1153,19 @@ fn resolve_page_template<'src>(
     // aucune valeur à faire transiter par le tuple de retour de cette fonction.
     let has_segment = varlena.iter().any(|v| v.is_segment);
     let body = if has_segment {
-        generate_segmented_snippet(&tokens, &schema_index, resolve_asset_url)
+        generate_segmented_snippet(
+            &tokens,
+            &schema_index,
+            resolve_asset_url,
+            &modules_lowering.snippet,
+        )
     } else {
-        generate_aot_snippet(&tokens, &schema_index, resolve_asset_url)
+        generate_aot_snippet(
+            &tokens,
+            &schema_index,
+            resolve_asset_url,
+            &modules_lowering.snippet,
+        )
     };
 
     Ok((body, metrics))
@@ -864,6 +1193,14 @@ fn resolve_page_template<'src>(
 ///  3. `emit_static_html` remplace `generate_aot_snippet` — sortie HTML
 ///     directe, aucun code Rust généré, aucune fonction `render()`
 ///     compilée dans le binaire pour ces pages.
+///  4. `ModulesPlaceholder` (MARIUS_MODULES) est tout de même splicé ici,
+///     comme dans `resolve_page_template` — mais `emit_static_html` s'en
+///     acquitte en émettant zéro octet. Ce n'est pas une exception au
+///     point 2 ci-dessus : l'ensemble des capacités js_deps d'une page
+///     SANS `record` est, PAR DÉFINITION, l'ensemble vide — comportement
+///     normal du lowering dans ce pipeline, jamais un no-op accidentel ni
+///     une raison de faire échouer `emit_static_html` (addendum Option A,
+///     HANDOFF-js-deps-capacites-frontend-v2.md).
 ///
 /// Mode Page exigé explicitement (`detect_extends` doit être vrai) : les
 /// pages de `STATIC_PAGES` connues à ce jour héritent toutes d'un layout
@@ -979,7 +1316,7 @@ fn resolve_static_page(
         println!("cargo:error=DB-Forge [{schema}.{table}] : hoisting des scripts échoué : {e}");
     })?;
 
-    let mut tokens = if hoisted_blocks.is_empty() {
+    let tokens = if hoisted_blocks.is_empty() {
         tokens
     } else {
         match split_static_at_marker(tokens, SCRIPTS_PLACEHOLDER) {
@@ -995,6 +1332,29 @@ fn resolve_static_page(
                 );
                 return Err(());
             }
+        }
+    };
+
+    // MARIUS_MODULES — même splice systématique que resolve_page_template
+    // (base.marius le porte en permanence), mais AUCUNE dépendance à
+    // ModulesLowering ici : l'ensemble des capacités js_deps d'une page
+    // sans `record` est par définition vide (point 4 de la doc ci-dessus,
+    // addendum Option A) — `resolve_and_measure` reçoit `0` en dur,
+    // `emit_static_html` émet zéro octet pour ce token, indépendamment de
+    // ce que d'autres pages du même build déclarent.
+    let mut tokens = match split_static_at_marker(tokens, MODULES_PLACEHOLDER) {
+        Some((mut tokens, splice_index)) => {
+            tokens.insert(splice_index, FlatPageToken::ModulesPlaceholder);
+            tokens
+        }
+        None => {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : marqueur {MODULES_PLACEHOLDER} \
+                 introuvable dans le layout {} — base.marius doit le porter en permanence \
+                 (avant la fermeture de </head>)",
+                parent_path.display()
+            );
+            return Err(());
         }
     };
 
@@ -1019,14 +1379,19 @@ fn resolve_static_page(
         })
     };
 
-    resolve_and_measure(&mut tokens, &schema_index, get_file_size, resolve_asset_len).map_err(
-        |errors| {
-            println!(
-                "cargo:error=DB-Forge [{schema}.{table}] : résolution de la page statique \
-                 échouée : {errors:?}"
-            );
-        },
-    )?;
+    resolve_and_measure(
+        &mut tokens,
+        &schema_index,
+        get_file_size,
+        resolve_asset_len,
+        0, // capacités js_deps par définition vides — aucun record ici
+    )
+    .map_err(|errors| {
+        println!(
+            "cargo:error=DB-Forge [{schema}.{table}] : résolution de la page statique \
+             échouée : {errors:?}"
+        );
+    })?;
 
     emit_static_html(&tokens, manifest_dir, schema, table, resolve_asset_url)
 }
@@ -1073,6 +1438,7 @@ fn resolve_template(
     table: &str,
     fixed: &[marius_fragment_forge::FieldSpec],
     varlena: &[VarlenField],
+    modules_lowering: &ModulesLowering,
 ) -> Result<Option<(String, TemplateMetrics)>, ()> {
     let template_path: PathBuf = Path::new(manifest_dir)
         .join("templates")
@@ -1126,6 +1492,7 @@ fn resolve_template(
             varlena,
             &src,
             child_extends,
+            modules_lowering,
         )?;
         return Ok(Some((body, metrics)));
     }
@@ -1167,6 +1534,13 @@ fn resolve_template(
         &schema_index,
         get_file_size,
         resolve_asset_len,
+        // Fragment isolé, jamais de <head>, jamais de marqueur
+        // MODULES_PLACEHOLDER dans ce flux — 0 en dur, pas
+        // `modules_lowering.static_bytes` (qui n'a ici aucune raison
+        // d'être consulté ; ce paramètre de fonction n'existe que pour le
+        // forward vers `resolve_page_template` dans la branche `extends`
+        // ci-dessus).
+        0,
     )
     .map_err(|errors| {
         println!(
@@ -1178,9 +1552,9 @@ fn resolve_template(
     // branchement que resolve_page_template ci-dessus.
     let has_segment = varlena.iter().any(|v| v.is_segment);
     let body = if has_segment {
-        generate_segmented_snippet(&tokens, &schema_index, resolve_asset_url)
+        generate_segmented_snippet(&tokens, &schema_index, resolve_asset_url, "")
     } else {
-        generate_aot_snippet(&tokens, &schema_index, resolve_asset_url)
+        generate_aot_snippet(&tokens, &schema_index, resolve_asset_url, "")
     };
 
     Ok(Some((body, metrics)))
@@ -1458,9 +1832,13 @@ mod tests_phase_6_6_full_pipeline {
         let get_file_size =
             |_: &str| -> Result<usize, String> { Err("aucun static attendu dans ce test".into()) };
 
-        let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        })
+        let metrics = resolve_and_measure(
+            &mut tokens,
+            &schema_index,
+            get_file_size,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            0,
+        )
         .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
 
         // "<html>" (6) + "ChildTitle" (10) + "</html>" (7) = 23 — le contenu
@@ -1469,9 +1847,12 @@ mod tests_phase_6_6_full_pipeline {
         assert_eq!(metrics.total_dynamic_bytes, 0);
         assert_eq!(metrics.include_count, 0);
 
-        let body = generate_aot_snippet(&tokens, &schema_index, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        });
+        let body = generate_aot_snippet(
+            &tokens,
+            &schema_index,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
         assert!(body.contains("buf.push_str(\"ChildTitle\")"));
         assert!(!body.contains("ParentTitle"));
 
@@ -1518,9 +1899,13 @@ mod tests_phase_6_6_full_pipeline {
         let get_file_size =
             |_: &str| -> Result<usize, String> { Err("aucun static attendu dans ce test".into()) };
 
-        let metrics = resolve_and_measure(&mut tokens, &schema_index, get_file_size, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        })
+        let metrics = resolve_and_measure(
+            &mut tokens,
+            &schema_index,
+            get_file_size,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            0,
+        )
         .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
 
         // "<footer>" (8) + "ParentFooter" (12) + "</footer>" (9) = 29.
@@ -1528,9 +1913,12 @@ mod tests_phase_6_6_full_pipeline {
         assert_eq!(metrics.total_dynamic_bytes, 0);
         assert_eq!(metrics.include_count, 0);
 
-        let body = generate_aot_snippet(&tokens, &schema_index, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        });
+        let body = generate_aot_snippet(
+            &tokens,
+            &schema_index,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
         assert!(body.contains("buf.push_str(\"ParentFooter\")"));
 
         let _ = std::fs::remove_dir_all(parent_path.parent().unwrap());
@@ -1585,14 +1973,21 @@ mod tests_phase_6_6_full_pipeline {
         };
         let get_file_size =
             |_: &str| -> Result<usize, String> { Err("aucun static attendu dans ce test".into()) };
-        resolve_and_measure(&mut tokens, &schema_index, get_file_size, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        })
+        resolve_and_measure(
+            &mut tokens,
+            &schema_index,
+            get_file_size,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            0,
+        )
         .expect("aucun StaticInclude/Field dans ces fixtures : résolution triviale");
 
-        let body = generate_aot_snippet(&tokens, &schema_index, |_| {
-            unreachable!("aucun AssetRef dans ce test")
-        });
+        let body = generate_aot_snippet(
+            &tokens,
+            &schema_index,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
 
         let check_dir = std::env::temp_dir().join(format!(
             "marius-phase-6-6-rustc-check-{}",
@@ -1670,7 +2065,7 @@ mod tests_phase_6_6_full_pipeline {
 
         std::fs::write(
             &parent_path,
-            b"<html>{% block title %}Base{% endblock %}</html>",
+            b"<html>{% block title %}Base{% endblock %}<!-- MARIUS_MODULES --></html>",
         )
         .expect("écriture de la fixture parent");
         std::fs::write(
@@ -1680,6 +2075,10 @@ mod tests_phase_6_6_full_pipeline {
         .expect("écriture de la fixture enfant");
 
         let manifest_dir_str = manifest_dir.to_string_lossy().into_owned();
+        let modules_lowering = super::ModulesLowering {
+            snippet: String::new(),
+            static_bytes: 0,
+        };
         let result = super::resolve_template(
             &manifest_dir_str,
             &std::collections::HashMap::new(),
@@ -1687,6 +2086,7 @@ mod tests_phase_6_6_full_pipeline {
             "post",
             &[],
             &[],
+            &modules_lowering,
         );
 
         assert!(
@@ -1718,6 +2118,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let assets = load_asset_manifest(&manifest_dir).unwrap_or_else(|()| {
         // cargo:error déjà émis par load_asset_manifest — arrêt immédiat,
         // même discipline que resolve_template plus bas.
+        std::process::exit(1);
+    });
+
+    // Lecture unique du lowering js_deps — les capacités sont globales
+    // (theme.toml + scripts_registry.lock), jamais recalculées par
+    // composant. Avant la boucle STATIC_PAGES, pour la même raison que
+    // load_asset_manifest ci-dessus : fait échouer le build sur ce point
+    // précis avant toute tentative de connexion Postgres.
+    let modules_lowering = build_modules_lowering(&manifest_dir, &assets).unwrap_or_else(|()| {
         std::process::exit(1);
     });
 
@@ -1829,6 +2238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &comp.table,
             &field_specs,
             &varlena,
+            &modules_lowering,
         )
         .unwrap_or_else(|()| {
             // cargo:error déjà émis par resolve_template — arrêt immédiat.

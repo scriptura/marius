@@ -26,7 +26,7 @@
 //! | `webmanifest.rs` | `[webmanifest]` | Pipeline de génération du Web App Manifest. |
 //! | `sprites.rs` | `[sprites]` | Assemblage AOT des sprites. |
 //! | `styles.rs` | `[styles]` | Transformation CSS (résolution de `$variables`, boucles `@for`, `url()` et LightningCSS). |
-//! | `scripts.rs` | `[scripts.components]` | Lexer JS + arène ESM (Data-Oriented). |
+//! | `scripts.rs` | `[scripts.components]` + `[scripts.capabilities]` | Lexer JS + arène ESM (Data-Oriented). |
 //! | `js_minify.rs` | Partagé | Passe finale de minification `oxc` (partagée entre scripts et Service Worker). |
 //! | `service_worker.rs` | `[service_worker]` | Assemblage du SW (réutilise le lexer de `scripts.rs`). |
 //!
@@ -164,17 +164,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut manifest,
     )?;
 
-    // [scripts.components] (Phase 7) — dépend uniquement du registre
-    // d'URLs (les imports non-relatifs comme `/libs/leaflet.js` doivent
-    // déjà être hachés par verbatim), aucune dépendance avec
+    // [scripts.components] + [scripts.capabilities] (Phase 7, étendu par
+    // HANDOFF-js-deps-capacites-frontend-v2.md) — dépend uniquement du
+    // registre d'URLs (les imports non-relatifs comme `/libs/leaflet.js`
+    // doivent déjà être hachés par verbatim), aucune dépendance avec
     // sprites/styles/webmanifest. Placé en dernier des pipelines de
     // contenu par simple cohérence de lecture (ordre d'apparition dans
     // theme.toml), pas par nécessité d'ordonnancement.
+    //
+    // Vue fusionnée `name → entry` : un seul passage de
+    // `run_scripts_pipeline` pour les deux sources plutôt que deux
+    // pipelines indépendants (handoff, § Transport de `entry` vers
+    // `AssetManifest`) — réalisation préférée du mécanisme existant, pas
+    // une nouvelle décision d'architecture. `run_scripts_pipeline` ne
+    // reçoit et ne peut recevoir que des chemins : `markers`/`activation`
+    // s'arrêtent à `ThemeConfig`, jamais projetés dans `script_targets`
+    // ni dans `AssetManifest`.
+    //
+    // Collision de clé finale entre un nom de `components` et un nom de
+    // `capabilities` (même `"{name}.js"` en sortie) : erreur dure de la
+    // Forge, jamais un écrasement silencieux — le manifeste est un
+    // namespace d'assets JS commun aux deux sources.
+    let mut script_targets: HashMap<String, String> = theme.scripts.components.clone();
+    for (name, capability) in &theme.scripts.capabilities {
+        if script_targets.contains_key(name) {
+            return Err(format!(
+                "collision de manifeste scripts : '{name}' est déclaré à la fois \
+                 dans [scripts.components] et [scripts.capabilities] — les deux \
+                 produiraient la même clé '{name}.js' dans le manifeste d'assets"
+            )
+            .into());
+        }
+        script_targets.insert(name.clone(), capability.entry.clone());
+    }
+
     run_scripts_pipeline(
         &theme_dir,
         &build_root,
         &build_root_rel,
-        &theme.scripts.components,
+        &script_targets,
         &asset_url_registry,
         &mut manifest,
     )?;

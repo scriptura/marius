@@ -47,7 +47,8 @@ pub(crate) struct ThemeConfig {
 
     /// Points d'entrée des scripts et composants client (`[scripts]`).
     ///
-    /// Mappe les paires clé/valeur imbriquées sous `[scripts.components]`.
+    /// Mappe les paires clé/valeur imbriquées sous `[scripts.components]`
+    /// et `[scripts.capabilities]`.
     #[serde(default)]
     pub(crate) scripts: ScriptsConfig,
 
@@ -66,8 +67,48 @@ pub(crate) struct ServiceWorkerConfig {
 
 #[derive(Deserialize, Default)]
 pub(crate) struct ScriptsConfig {
+    /// Scripts inconditionnels — chargés sur toute page qui les référence,
+    /// sans dépendance à une donnée persistée (`[scripts.components]`).
     #[serde(default)]
     pub(crate) components: HashMap<String, String>,
+
+    /// Capacités frontend conditionnelles (`[scripts.capabilities.*]`).
+    ///
+    /// Amélioration progressive pilotée à l'exécution par
+    /// `content.core.js_deps` (bitset) — jamais chargées inconditionnellement
+    /// comme `components` ci-dessus. Clé de la `HashMap` = nom de capacité =
+    /// future clé d'attribution de bit dans `scripts_registry.lock` (source
+    /// de vérité de l'identité `capacité → bit`, distincte de ce fichier et
+    /// non lue par ce binaire — voir HANDOFF-js-deps-capacites-frontend-v2.md,
+    /// § Déterminisme de l'attribution des bits).
+    #[serde(default)]
+    pub(crate) capabilities: HashMap<String, CapabilityConfig>,
+}
+
+/// Une entrée de `[scripts.capabilities.<nom>]`.
+///
+/// `markers`/`activation` ne transitent jamais au-delà de la désérialisation
+/// de ce binaire — ni vers `AssetManifest`, ni vers aucune autre structure
+/// partagée. Seul `entry` alimente `run_scripts_pipeline` (résolution d'URL
+/// hachée), exactement au même titre qu'une entrée de `components`. Ces deux
+/// champs sont lus en aval, hors de ce crate, par `schema/build.rs`
+/// (lecture de `theme.toml` en tant que source d'intention humaine, pas par
+/// `marius-assets`).
+#[derive(Deserialize)]
+pub(crate) struct CapabilityConfig {
+    pub(crate) entry: String,
+    /// Jamais lu par ce binaire (`marius-assets`) — seul `entry` alimente
+    /// `run_scripts_pipeline`. Consommé exclusivement par
+    /// `crates/core/schema/build.rs` (validation non-vide, lecture SQL en
+    /// aval), via sa propre désérialisation de `theme.toml`, distincte de
+    /// celle-ci (aucun type partagé entre les deux crates, Roadmap
+    /// `marius-assets` §2.1).
+    #[allow(dead_code)]
+    pub(crate) markers: Vec<String>,
+    /// Idem `markers` ci-dessus — consommé par `build.rs` pour le lowering
+    /// AOT de `js_deps` (import ESM nommé), jamais par ce binaire.
+    #[allow(dead_code)]
+    pub(crate) activation: String,
 }
 
 #[derive(Deserialize)]
