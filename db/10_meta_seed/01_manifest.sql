@@ -104,12 +104,20 @@ VALUES
     NULL
 ),
 
--- content.core — Layout : 3×TSTZ(24B) + doc_id INT4(4) + author INT4(4)
---                         + status INT2(2) + 3×BOOL(3B) + 1B pad
--- Header 32B (9 cols, null bitmap 2B, MAXALIGN 32B) + 38B données = 70B → MAXALIGN = 72B
+-- content.core — Layout STRUCT (StorageRow #[repr(C)]) = tuple Postgres réel
+-- désormais IDENTIQUES (Phase 2 walsn close, cette session — mapping.rs :
+-- pg_lsn is_fixed=true, sqlx::postgres::types::PgLsn → u64) :
+--   3×TSTZ(24B) + walsn(8B) + js_deps INT8(8B) + doc_id INT4(4)
+--   + author INT4(4) + status INT2(2) + 3×BOOL(3B)
+-- Header MAXALIGN(23+ceil(11/8))=32B. Payload = 53B, paddé à 56B.
+-- Tuple = 32 + 56 = 88B → ~93 tuples/page. fillfactor retiré.
+-- Les deux calculateurs (crates/forge/db-forge/src/validate.rs et
+-- meta.v_introspection_layout) convergent désormais sur cette même valeur
+-- — l'écart temporaire (72→80 puis 88) documenté dans l'historique de ce
+-- fichier est clos, plus deux périmètres distincts à maintenir.
 (
     'content.core',
-    72,
+    88,
     32768,
     ARRAY[
         'content.create_document(integer,character varying,character varying,smallint,smallint,text,character varying,character varying)',

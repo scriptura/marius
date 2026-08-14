@@ -1,4 +1,6 @@
-//! # marius-db-forge · `crates/forge/db-forge/src/lib.rs`
+// crates/forge/db-forge/src/lib.rs
+//
+//! # marius-db-forge - librairie de génération de code Rust depuis le schéma PostgreSQL.
 //!
 //! API publique du crate.  
 //! Exposé comme build-dependency de `crates/core/schema/build.rs`.

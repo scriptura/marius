@@ -1,5 +1,6 @@
-//! # marius-db-forge · `crates/forge/db-forge/src/mapping.rs`
-//!
+// crates/forge/db-forge/src/codegen/mapping.rs
+//
+//! # marius-db-forge - mapping
 //! Mapping SQL → Rust : types, layout, sentinels.
 
 /// Colonne issue de pg_attribute.
@@ -173,13 +174,30 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
                 alignment: 0,
             }
         }
-        // pg_lsn : 8 octets, pointeur WAL. Phase 1 : commenté. Phase 2 : u64 via mmap.
+        // pg_lsn : 8 octets, pointeur WAL (XLogRecPtr — entier 64 bits non
+        // signé côté Postgres). Phase 2 (HANDOFF-js-deps-capacites-frontend-v2.md,
+        // addendum content.core walsn) : sqlx expose nativement
+        // sqlx::postgres::types::PgLsn(pub u64) — pas de type custom à ce
+        // projet, juste le wrapper sqlx. .0 extrait le u64 (from_impl.rs).
+        // Sentinel 0 = LSN nulle ('0/0'::pg_lsn, le DEFAULT du DDL lui-même :
+        // 0 n'est donc jamais une valeur ambiguë avec une LSN réelle post-
+        // écriture WAL, qui commence toujours après le segment 0).
+        //
+        // CONSÉQUENCE OPÉRATIONNELLE (vérifiée contre store_registry.rs,
+        // marius_projection) : is_fixed=true agrandit {Schema}{Table}StorageRow
+        // pour toute table portant une colonne pg_lsn (content.core
+        // uniquement à ce jour) — le stride du store.bin correspondant
+        // change. PackfileReader::open valide stride au cold_start et
+        // rejette (Err, jamais silencieux) tout store.bin écrit avec
+        // l'ancien stride. Régénérer via marius-dump après ce changement,
+        // avant tout redémarrage du serveur — même nécessité que recharger
+        // les migrations SQL après un ALTER TABLE, sur un artefact distinct.
         "pg_lsn" => TypeMapping {
-            row_type: "/* PHASE2_ONLY: walsn → u64 via mmap */",
-            store_type: "/* PHASE2_ONLY */",
-            from_expr: "/* PHASE2_ONLY */",
-            default_sentinel: "",
-            is_fixed: false,
+            row_type: "sqlx::postgres::types::PgLsn",
+            store_type: "u64",
+            from_expr: "{field}.map(|v| v.0).unwrap_or({sentinel})",
+            default_sentinel: "0",
+            is_fixed: true,
             size_bytes: 8,
             alignment: 8,
         },
@@ -293,6 +311,19 @@ mod tests {
     #[test]
     fn map_date() {
         check("date", true, 4, 4, "0");
+    }
+
+    // pg_lsn : Phase 2 walsn — is_fixed=true depuis cette session, jamais
+    // testé avant (Phase 1 l'excluait entièrement du StorageRow).
+    #[test]
+    fn map_pg_lsn() {
+        check("pg_lsn", true, 8, 8, "0");
+    }
+    #[test]
+    fn map_pg_lsn_row_type_is_sqlx_native() {
+        let m = map_type("pg_lsn");
+        assert_eq!(m.row_type, "sqlx::postgres::types::PgLsn");
+        assert_eq!(m.store_type, "u64");
     }
 
     // ── Flottants ────────────────────────────────────────────────────────────

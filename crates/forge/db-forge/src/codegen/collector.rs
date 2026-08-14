@@ -1,4 +1,6 @@
-//! marius-db-forge · codegen/collector.rs
+// crates/forge/db-forge/src/codegen/collector.rs
+//
+//! marius-db-forge
 //! Génération du Collector<MAX, WORDS> statique.
 
 use std::fmt::Write as _;

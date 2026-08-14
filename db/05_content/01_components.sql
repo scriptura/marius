@@ -78,9 +78,19 @@ CREATE TABLE content.media_content (
 -- ==============================================================================
 
 -- CONTENT CORE — status / dates / auteur (TRÈS HAUTE fréquence)
--- Layout : pg_lsn · 3×TIMESTAMPTZ · document_id INT4 · author_entity_id INT4 · status SMALLINT
---          · 3×BOOL
--- Tuple 72 B (Data 45B alignée sur 48B + Header 24B) → ~113 tuples/page. fillfactor retiré.
+-- Layout : pg_lsn · 3×TIMESTAMPTZ · js_deps BIGINT · document_id INT4 · author_entity_id INT4
+--          · status SMALLINT · 3×BOOL
+-- Tuple 88 B (Header MAXALIGN(23+ceil(11/8))=32B + Payload 53B aligné à 56B)
+-- → ~93 tuples/page. fillfactor retiré.
+-- Phase 2 walsn close (cette session) : StorageRow #[repr(C)] généré et
+-- tuple Postgres réel convergent désormais sur cette même valeur — plus de
+-- divergence entre crates/forge/db-forge/src/validate.rs et
+-- meta.v_introspection_layout (cf. historique de 10_meta_seed/01_manifest.sql
+-- pour le détail de la période où ils divergeaient, 80B vs 88B).
+-- js_deps (HANDOFF-js-deps-capacites-frontend-v2.md) : bitset des capacités frontend
+-- conditionnelles détectées dans content.body.content (tokens `class`, jamais une
+-- sous-chaîne) — recalculé automatiquement par content.fn_sync_js_deps() à chaque
+-- INSERT/UPDATE de content.body.content, jamais écrit directement par l'application.
 -- FK cross-schéma RETIRÉE :
 --   author_entity_id → identity.entity(id) ON DELETE SET NULL (→ 07_cross_fk)
 CREATE TABLE content.core (
@@ -89,6 +99,7 @@ CREATE TABLE content.core (
   published_at        TIMESTAMPTZ   NULL,
   created_at          TIMESTAMPTZ   NOT NULL DEFAULT now(),
   modified_at         TIMESTAMPTZ   NULL,
+  js_deps             BIGINT        NOT NULL DEFAULT 0,
   
   -- Bloc 4 octets
   document_id         INT           NOT NULL,

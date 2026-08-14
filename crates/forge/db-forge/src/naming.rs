@@ -1,5 +1,6 @@
-//! # marius-db-forge · crates/forge/db-forge/src/naming.rs
-//!
+// crates/forge/db-forge/src/naming.rs
+//
+//! # marius-db-forge - naming
 //! Conventions de nommage pour les artefacts générés.
 
 /// `content_core` → `ContentCore`

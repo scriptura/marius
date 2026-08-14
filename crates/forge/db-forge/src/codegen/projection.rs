@@ -1,4 +1,6 @@
-//! marius-db-forge · crates/forge/db-forge/src/codegen/projection.rs
+// crates/forge/db-forge/src/codegen/projection.rs
+//
+//! # marius-db-forge - projection
 //! Génération AOT du stub `impl Projection` pour une table SQL.
 
 use std::fmt::Write as _;

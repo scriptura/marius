@@ -1,7 +1,7 @@
-// =============================================================================
-// marius-db-forge · codegen/storage.rs
-// Génération de {Name}StorageRow : struct #[repr(C)] + static_assertions.
-// =============================================================================
+// crates/forge/db-forge/src/codegen/storage.rs
+//
+//! # marius-db-forge - storage
+//! Génération de {Name}StorageRow : struct #[repr(C)] + static_assertions.
 
 use std::fmt::Write as _;
 

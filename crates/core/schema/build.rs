@@ -300,15 +300,12 @@ fn theme_source_dir(manifest_dir: &str) -> PathBuf {
         .join(THEME_NAME)
 }
 
-/// Emplacement du registre de bits `scripts_registry.lock`.
-///
-/// PLACEMENT DE SESSION, À CONFIRMER : racine du workspace, sibling de
-/// `Cargo.lock` — même statut (fichier versionné, source de vérité
-/// d'identité stable dans le temps, jamais régénéré automatiquement par
-/// aucun binaire de ce workspace), même convention de nommage. À corriger
-/// ici si un autre emplacement est retenu.
+/// Emplacement du registre de bits `scripts_registry.lock` — CONFIRMÉ en
+/// session : `assets/{THEME_NAME}/scripts_registry.lock`, sibling de
+/// `theme.toml` (même répertoire source, même statut de fichier manuel
+/// versionné).
 fn scripts_registry_path(manifest_dir: &str) -> PathBuf {
-    Path::new(manifest_dir).join("../../../scripts_registry.lock")
+    theme_source_dir(manifest_dir).join("scripts_registry.lock")
 }
 
 /// Identifiant Rust/JS valide — `activation` (theme.toml) est injecté

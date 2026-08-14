@@ -1,4 +1,6 @@
-//!marius-db-forge · codegen/from_impl.rs
+// crates/forge/db-forge/src/codegen/from_impl.rs
+//
+//! # marius-db-forge - from_impl
 //! Génération de From<{Name}Row> for {Name}StorageRow.
 
 use std::fmt::Write as _;
@@ -60,6 +62,7 @@ pub fn write_from_impl(out: &mut String, schema: &str, table: &str, columns: &[C
                 "chrono::DateTime<chrono::Utc>" => format!("r.{}.timestamp_micros()", col.name),
                 "chrono::NaiveDateTime" => format!("r.{}.and_utc().timestamp_micros()", col.name),
                 "chrono::NaiveDate" => format!("r.{}.num_days_from_ce()", col.name),
+                "sqlx::postgres::types::PgLsn" => format!("r.{}.0", col.name),
                 _ => format!("r.{}", col.name),
             }
         } else {

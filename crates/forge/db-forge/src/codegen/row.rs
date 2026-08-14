@@ -1,7 +1,7 @@
-// =============================================================================
-// marius-db-forge · codegen/row.rs
-// Génération de {Name}Row : struct de désérialisation sqlx.
-// =============================================================================
+// crates/forge/db-forge/src/codegen/row.rs
+//
+//! # marius-db-forge - row
+//! Génération de {Name}Row : struct de désérialisation sqlx.
 
 use std::fmt::Write as _;
 

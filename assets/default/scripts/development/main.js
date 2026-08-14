@@ -1,8 +1,8 @@
 import { initDisclosureSystem } from "./disclosure.js";
 //import { initMaps } from "./map.js";
-//import { initImageFocus } from "./imageFocus.js";
+//import { initImageFocus } from "./image-focus.js";
 //import { initMasonry } from "./masonry.js";
-//import { initMediaPlayer } from "./mediaPlayer.js";
+//import { initMediaPlayer } from "./media-player.js";
 import { initNavigation } from "./navigation.js";
 
 //import { mountAllSliders, setupSliderEvents } from "./range.js";

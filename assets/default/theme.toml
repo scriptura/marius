@@ -20,6 +20,13 @@ entries = ["styles/development/main.mcss", "styles/development/print.mcss"]
 main = "scripts/development/main.js"
 map = "scripts/development/map.js"
 
+[scripts.capabilities]
+
+[scripts.capabilities.image-focus]
+entry = "scripts/development/image-focus.js"
+markers = ["figure-image-focus"]
+activation = "init"
+
 [sprites]
 # Dictionnaire (HashMap) : Nom du Sprite -> Dossier Source.
 # Spécification §10.2 : SVG groupés dans un fichier `<cible>.<hash>.svg`.

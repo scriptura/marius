@@ -36,6 +36,134 @@ $$;
 
 
 -- ==============================================================================
+-- SECTION 9bis : LOWERING js_deps — capacités frontend conditionnelles
+-- HANDOFF-js-deps-capacites-frontend-v2.md
+-- ==============================================================================
+--
+-- Registre marqueur → bit — scripts_registry.lock (assets/default/) est la
+-- SOURCE DE VÉRITÉ des valeurs de bit ; la table ci-dessous DOIT lui rester
+-- rigoureusement synchronisée à la main (append-only, jamais régénérée),
+-- exactement comme crates/core/schema/build.rs la lit côté Rust pour le
+-- lowering AOT de ModulesPlaceholder. Un bit retiré ne doit JAMAIS être
+-- réattribué à un nom différent, dans aucun des deux fichiers.
+--
+--   disclosure      = 1   (marqueur non encore câblé ci-dessous — ouvert)
+--   map              = 2   (marqueur non encore câblé ci-dessous — ouvert)
+--   media-player     = 4   (marqueur non encore câblé ci-dessous — ouvert)
+--   line-mark        = 8   (marqueur non encore câblé ci-dessous — ouvert)
+--   image-focus      = 16  → class="figure-image-focus"
+--   range            = 32  → class="range" OU class="range-multithumb"
+--   youtube-embed    = 64  → class="video-youtube"
+--
+-- Les quatre premiers bits (1/2/4/8) sont actés en amont de cette session
+-- mais leurs marqueurs de classe ne m'ont pas été fournis — je ne les
+-- invente pas. compute_js_deps ci-dessous ne reconnaît donc, pour
+-- l'instant, QUE les trois capacités dont le vocabulaire m'a été donné
+-- (image-focus/range/youtube-embed) ; disclosure/map/media-player/line-mark
+-- ne sont jamais détectées par cette version de la fonction — leurs bits
+-- restent réservés, jamais mis à zéro par erreur, jamais réattribués.
+
+-- content.compute_js_deps — bitset des capacités frontend détectées.
+--
+-- Contrat js_deps (HANDOFF) : comparaison EXACTE de tokens `class`
+-- UNIQUEMENT — jamais une recherche de sous-chaîne, jamais un attribut
+-- `data-*` ni aucun autre motif. `range` et `range-multithumb` sont deux
+-- tokens distincts qui OR-ent le MÊME bit ; une capacité peut donc porter
+-- plusieurs marqueurs.
+--
+-- IMMUTABLE : dépend uniquement de p_body, aucun accès table, aucun effet
+-- de bord — jamais STRICT (p_body NULL doit renvoyer 0, pas NULL).
+--
+-- Hypothèse d'authoring assumée : attributs `class` toujours entre
+-- guillemets doubles (convention systématique des templates .marius de ce
+-- workspace) — jamais de guillemets simples à reconnaître ici.
+CREATE FUNCTION content.compute_js_deps(p_body TEXT)
+RETURNS BIGINT
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+  v_classes  TEXT[];
+  v_deps     BIGINT := 0;
+BEGIN
+  IF p_body IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  -- Ensemble dédupliqué de tous les tokens `class` réellement présents
+  -- dans le corps, tous attributs class="..." confondus, découpés sur les
+  -- espaces — jamais une simple recherche de sous-chaîne dans p_body.
+  SELECT array_agg(DISTINCT token)
+  INTO   v_classes
+  FROM   regexp_matches(p_body, 'class\s*=\s*"([^"]*)"', 'g') AS m(class_attr),
+  LATERAL regexp_split_to_table(m.class_attr[1], '\s+')       AS token
+  WHERE  token <> '';
+
+  IF v_classes IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  IF 'figure-image-focus' = ANY(v_classes) THEN
+    v_deps := v_deps | 16;  -- image-focus
+  END IF;
+
+  IF 'range' = ANY(v_classes) OR 'range-multithumb' = ANY(v_classes) THEN
+    v_deps := v_deps | 32;  -- range
+  END IF;
+
+  IF 'video-youtube' = ANY(v_classes) THEN
+    v_deps := v_deps | 64;  -- youtube-embed
+  END IF;
+
+  RETURN v_deps;
+END;
+$$;
+
+-- content.fn_sync_js_deps — trigger de recalcul, câblé sur content.body
+-- (jamais sur content.core lui-même : js_deps dépend du CORPS, pas d'une
+-- colonne propre à core). AFTER, jamais BEFORE : écrit dans une table
+-- SŒUR (content.core), la ligne content.body doit déjà être visible dans
+-- la transaction courante au moment de l'UPDATE croisé.
+--
+-- UPDATE conditionnel (IS DISTINCT FROM), jamais inconditionnel — deux
+-- raisons, découvertes en confrontant ce trigger à
+-- runtime-lifecycle-guide.md §3 :
+--   1. content.core porte son propre trigger trg_content_core_notify
+--      (AFTER INSERT OR UPDATE OR DELETE, sans WHEN) : un UPDATE
+--      inconditionnel déclenche un second pg_notify à CHAQUE écriture de
+--      content.body, en plus de trg_content_body_notify déjà émis par
+--      cette même écriture — double trafic Collector/Dispatcher pour la
+--      quasi-totalité des éditions (la plupart des corps ne touchent
+--      aucun marqueur de capacité, la valeur calculée est donc identique
+--      à l'existante).
+--   2. Réécriture de tuple systématique (bloat, perte de HOT) même quand
+--      rien ne change réellement — le genre de dérive que
+--      meta.v_performance_sentinel (bloat_alert) est conçu pour détecter.
+--
+-- Suppression de la ligne content.body (hors CASCADE document) : NON
+-- traitée par ce trigger (AFTER INSERT OR UPDATE OF content uniquement) —
+-- aucune procédure de ce fichier ne supprime une ligne content.body de
+-- façon autonome ; la seule voie de suppression réelle est
+-- ON DELETE CASCADE depuis content.document, qui supprime alors
+-- content.core dans le même mouvement (js_deps devient sans objet).
+CREATE FUNCTION content.fn_sync_js_deps()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+  v_new_deps BIGINT;
+BEGIN
+  v_new_deps := content.compute_js_deps(NEW.content);
+
+  UPDATE content.core
+  SET    js_deps = v_new_deps
+  WHERE  document_id = NEW.document_id
+    AND  js_deps IS DISTINCT FROM v_new_deps;
+
+  RETURN NEW;
+END;
+$$;
+
+
+-- ==============================================================================
 -- SECTION 10 : TRIGGERS — tables content
 -- ==============================================================================
 
@@ -83,6 +211,13 @@ CREATE TRIGGER core_deny_document_id_update
 BEFORE UPDATE ON content.core
 FOR EACH ROW WHEN (OLD.document_id IS DISTINCT FROM NEW.document_id)
 EXECUTE FUNCTION identity.fn_deny_entity_id_update();
+
+-- CONTENT.BODY : recalcul du bitset js_deps de content.core à chaque
+-- écriture du corps — HANDOFF-js-deps-capacites-frontend-v2.md, SECTION
+-- 9bis. AFTER (jamais BEFORE) : écrit dans content.core, une table sœur.
+CREATE TRIGGER content_body_sync_js_deps
+AFTER INSERT OR UPDATE OF content ON content.body
+FOR EACH ROW EXECUTE FUNCTION content.fn_sync_js_deps();
 
 
 -- ==============================================================================
@@ -521,4 +656,3 @@ FROM content.tag t;
 CREATE TRIGGER content_core_walsn
 BEFORE INSERT OR UPDATE ON content.core
 FOR EACH ROW EXECUTE FUNCTION meta.stamp_walsn();
-
