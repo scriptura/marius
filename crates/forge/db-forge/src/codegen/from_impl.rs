@@ -58,12 +58,28 @@ pub fn write_from_impl(out: &mut String, schema: &str, table: &str, columns: &[C
 
         let mut expr = if col.is_notnull {
             // NOT NULL : expression directe, pas de sentinel.
-            match m.row_type {
-                "chrono::DateTime<chrono::Utc>" => format!("r.{}.timestamp_micros()", col.name),
-                "chrono::NaiveDateTime" => format!("r.{}.and_utc().timestamp_micros()", col.name),
-                "chrono::NaiveDate" => format!("r.{}.num_days_from_ce()", col.name),
-                "sqlx::postgres::types::PgLsn" => format!("r.{}.0", col.name),
-                _ => format!("r.{}", col.name),
+            //
+            // pg_lsn traité AVANT le match sur m.row_type : depuis le
+            // correctif Phase 2 walsn (sqlx n'ayant aucun Decode natif pour
+            // pg_lsn, cf. mapping.rs), row_type de pg_lsn vaut "i64" — au
+            // même titre que bigint/int8. Impossible de les distinguer sur
+            // row_type seul ; col.sql_type reste la seule clé fiable.
+            // StorageRow attend u64 (store_type), Row porte i64 (déjà casté
+            // en SQL par select_cast) — cast Rust explicite requis, jamais
+            // un simple passthrough comme pour un bigint ordinaire.
+            if col.sql_type == "pg_lsn" {
+                format!("r.{} as u64", col.name)
+            } else {
+                match m.row_type {
+                    "chrono::DateTime<chrono::Utc>" => {
+                        format!("r.{}.timestamp_micros()", col.name)
+                    }
+                    "chrono::NaiveDateTime" => {
+                        format!("r.{}.and_utc().timestamp_micros()", col.name)
+                    }
+                    "chrono::NaiveDate" => format!("r.{}.num_days_from_ce()", col.name),
+                    _ => format!("r.{}", col.name),
+                }
             }
         } else {
             // NULLABLE : sentinel résolu depuis col.sentinel ou default_sentinel.

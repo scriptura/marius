@@ -9,6 +9,31 @@ use crate::mapping::{Column, PrimaryKey, map_type};
 use crate::naming::{to_pascal, to_screaming};
 use marius_fragment_forge::{FieldSpec, TemplateMetrics, VarlenField};
 
+/// Construit l'expression SELECT pour une colonne fixed-length.
+///
+/// Nom brut (qualifié ou non selon `qualifier`) dans l'immense majorité des
+/// cas. Cast explicite + alias `AS <nom>` quand `TypeMapping::select_cast`
+/// est renseigné — pg_lsn à ce jour (sqlx sans Decode natif pour ce type,
+/// vérifié contre docs.rs/sqlx : aucun autre type de mapping.rs n'a besoin
+/// de ce mécanisme). L'alias est obligatoire dès qu'un cast est appliqué :
+/// sans lui, `sqlx::FromRow` (dérivé, appariement par nom de colonne) ne
+/// retrouve plus le champ — Postgres nomme une expression castée d'après
+/// son opérateur final, jamais d'après la colonne source.
+///
+/// `qualifier` : préfixe `schema.table` appliqué à la référence de colonne
+/// (cast ou nom brut) — `None` en l'absence de JOIN (source unique, aucune
+/// ambiguïté possible, jamais besoin de qualifier).
+fn select_expr_for(col: &Column, qualifier: Option<&str>) -> String {
+    let qualified = match qualifier {
+        Some(q) => format!("{q}.{}", col.name),
+        None => col.name.clone(),
+    };
+    match map_type(&col.sql_type).select_cast {
+        Some(cast_tpl) => format!("{} AS {}", cast_tpl.replace("{}", &qualified), col.name),
+        None => qualified,
+    }
+}
+
 /// Génère le stub `impl Projection` complet pour une table.
 ///
 /// Émet dans l'ordre :
@@ -102,9 +127,16 @@ pub fn write_projection_stub(
             .iter()
             .map(|v| format!("{}.{}", v.ref_table, v.name))
             .collect();
-        let all_cols: Vec<String> = fixed_cols
+        // select_expr_for (pas un simple `format!("{schema}.{table}.{c}")`
+        // comme avant Phase 2 walsn) : porte le cast pg_lsn + alias quand
+        // nécessaire, nom qualifié brut sinon — colonne par colonne, dérivé
+        // indépendamment de `fixed_cols` (qui reste des noms bruts, utilisés
+        // ailleurs pour pk_col_name/ON/WHERE, jamais pour le SELECT).
+        let qualifier = format!("{schema}.{table}");
+        let all_cols: Vec<String> = columns
             .iter()
-            .map(|c| format!("{schema}.{table}.{c}"))
+            .filter(|c| map_type(&c.sql_type).is_fixed)
+            .map(|c| select_expr_for(c, Some(&qualifier)))
             .chain(varlena_cols)
             .collect();
         // Une clause LEFT JOIN par slot (join_slot_idx croissant, ordre déjà
@@ -121,7 +153,14 @@ pub fn write_projection_stub(
         let from = format!("{schema}.{table} {}", joins.join(" "));
         (all_cols.join(", "), from)
     } else {
-        (fixed_cols.join(", "), format!("{schema}.{table}"))
+        // Même logique que la branche JOIN ci-dessus, sans qualification
+        // (source unique) — select_expr_for(c, None).
+        let select_list: Vec<String> = columns
+            .iter()
+            .filter(|c| map_type(&c.sql_type).is_fixed)
+            .map(|c| select_expr_for(c, None))
+            .collect();
+        (select_list.join(", "), format!("{schema}.{table}"))
     };
 
     let where_clause = match pk {

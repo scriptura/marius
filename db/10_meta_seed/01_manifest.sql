@@ -157,12 +157,18 @@ VALUES
 -- ── DOMAINE COMMERCE ──────────────────────────────────────────────────────────
 
 -- commerce.product_core — fillfactor=80
--- Layout : price_cents INT8(8) + id INT4(4) + stock INT4(4) + media_id INT4(4)
---          + is_available BOOL(1) + 3B pad
--- Header 24B (5 cols, bitmap 1B, MAXALIGN 24B) + 24B = 48B → MAXALIGN = 48B
+-- Layout : walsn pg_lsn(8) + price_cents INT8(8) + id INT4(4) + stock INT4(4)
+--          + media_id INT4(4) + is_available BOOL(1)
+-- Phase 2 walsn (même correction que content.core, HANDOFF-js-deps-capacites-
+-- frontend-v2.md, addendum) : pg_lsn désormais is_fixed=true dans mapping.rs
+-- (crates/forge/db-forge) — walsn entre dans le StorageRow généré, entre
+-- donc dans le calcul de validate_layout. 6 colonnes.
+-- Header MAXALIGN(23+ceil(6/8)) = MAXALIGN(24) = 24B.
+-- Payload = 29B (8+8+4+4+4+1), paddé à max_align(8) = 32B.
+-- Tuple = 24 + 32 = 56B.
 (
     'commerce.product_core',
-    48,
+    56,
     262144,
     ARRAY[
         'commerce.create_product(character varying,character varying,bigint,integer,character varying)',

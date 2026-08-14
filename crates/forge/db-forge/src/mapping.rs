@@ -1,6 +1,7 @@
 // crates/forge/db-forge/src/codegen/mapping.rs
 //
 //! # marius-db-forge - mapping
+//!
 //! Mapping SQL → Rust : types, layout, sentinels.
 
 /// Colonne issue de pg_attribute.
@@ -48,6 +49,19 @@ pub struct TypeMapping {
     pub size_bytes: usize,
     /// Alignement naturel en octets (repr(C) aligne sur ce multiple).
     pub alignment: usize,
+    /// Expression de cast à appliquer AU NIVEAU DU SELECT SQL, si le type
+    /// n'est pas nativement décodable par sqlx (ex: pg_lsn — aucun Decode
+    /// natif, cf. docs.rs/sqlx, module postgres::types). `{}` = placeholder
+    /// remplacé par la référence de colonne (qualifiée schema.table.col ou
+    /// non, selon l'appelant). `None` = colonne sélectionnée telle quelle
+    /// (cas général, immense majorité des types).
+    ///
+    /// Contrat : si `Some`, codegen/projection.rs DOIT ajouter un alias
+    /// `AS <nom_original>` — ce template ne le fait jamais lui-même (il ne
+    /// connaît pas le nom de colonne, seulement sa référence qualifiée).
+    /// Sans cet alias, sqlx::FromRow (dérivé, appariement par nom de
+    /// colonne) ne retrouve plus le champ.
+    pub select_cast: Option<&'static str>,
 }
 
 /// Retourne le mapping SQL → Rust pour un type donné.
@@ -73,6 +87,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             is_fixed: true,
             size_bytes: 8,
             alignment: 8,
+            select_cast: None,
         },
         "int4" | "integer" | "int" | "serial" => TypeMapping {
             row_type: "i32",
@@ -83,6 +98,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             is_fixed: true,
             size_bytes: 4,
             alignment: 4,
+            select_cast: None,
         },
         "int2" | "smallint" => TypeMapping {
             row_type: "i16",
@@ -92,6 +108,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             is_fixed: true,
             size_bytes: 2,
             alignment: 2,
+            select_cast: None,
         },
         "bool" | "boolean" => TypeMapping {
             row_type: "bool",
@@ -101,6 +118,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             is_fixed: true,
             size_bytes: 1,
             alignment: 1,
+            select_cast: None,
         },
         "uuid" => TypeMapping {
             row_type: "[u8; 16]",
@@ -111,6 +129,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             is_fixed: true,
             size_bytes: 16,
             alignment: 1,
+            select_cast: None,
         },
         // TIMESTAMPTZ → i64 µs depuis l'epoch Unix.
         // Row : chrono::DateTime<Utc> (type riche, sqlx-compatible).
@@ -123,6 +142,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             is_fixed: true,
             size_bytes: 8,
             alignment: 8,
+            select_cast: None,
         },
         "timestamp" | "timestamp without time zone" => TypeMapping {
             row_type: "chrono::NaiveDateTime",
@@ -132,6 +152,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             is_fixed: true,
             size_bytes: 8,
             alignment: 8,
+            select_cast: None,
         },
         "date" => TypeMapping {
             row_type: "chrono::NaiveDate",
@@ -142,6 +163,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             is_fixed: true,
             size_bytes: 4,
             alignment: 4,
+            select_cast: None,
         },
         "float4" | "real" => TypeMapping {
             row_type: "f32",
@@ -151,6 +173,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             is_fixed: true,
             size_bytes: 4,
             alignment: 4,
+            select_cast: None,
         },
         "float8" | "double precision" => TypeMapping {
             row_type: "f64",
@@ -160,6 +183,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             is_fixed: true,
             size_bytes: 8,
             alignment: 8,
+            select_cast: None,
         },
         // Varlena : exclus du StorageRow repr(C).
         // Présents dans Row (transport sqlx), portés par VarlenOwned (rendu).
@@ -172,34 +196,58 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
                 is_fixed: false,
                 size_bytes: 0,
                 alignment: 0,
+                select_cast: None,
             }
         }
         // pg_lsn : 8 octets, pointeur WAL (XLogRecPtr — entier 64 bits non
         // signé côté Postgres). Phase 2 (HANDOFF-js-deps-capacites-frontend-v2.md,
-        // addendum content.core walsn) : sqlx expose nativement
-        // sqlx::postgres::types::PgLsn(pub u64) — pas de type custom à ce
-        // projet, juste le wrapper sqlx. .0 extrait le u64 (from_impl.rs).
+        // addendum content.core walsn).
+        //
+        // CORRECTIF (vérifié contre docs.rs/sqlx, module postgres::types,
+        // version courante) : sqlx N'A AUCUN support natif pour pg_lsn —
+        // pas de PgLsn, pas de Decode. Un premier essai de cette session
+        // (row_type = "sqlx::postgres::types::PgLsn") était une affirmation
+        // non vérifiée, fausse — cassait la compilation du schéma généré
+        // (E0425, type introuvable). Corrigé ici avec une source vérifiée.
+        //
+        // Stratégie retenue : cast explicite AU NIVEAU DU SELECT SQL plutôt
+        // qu'un Decode manuel — (col - '0/0'::pg_lsn)::int8 renvoie l'entier
+        // 64 bits brut de la LSN (soustraction pg_lsn → numeric, cast sans
+        // risque vers int8 : aucune LSN réelle n'approche i64::MAX octets de
+        // WAL). row_type devient un simple "i64", déjà nativement décodé par
+        // sqlx (BIGINT) — aucun wrapper à maintenir. select_cast porte ce
+        // template ; codegen/projection.rs l'applique et ajoute l'alias
+        // `AS <col>` requis par sqlx::FromRow.
+        //
+        // from_expr (cas NULLABLE générique) : "as u64" suffit, r.field est
+        // déjà un i64 après le cast SQL — pas de `.0` à extraire (plus de
+        // wrapper). Cas NOT NULL : traité spécifiquement dans from_impl.rs,
+        // sur col.sql_type == "pg_lsn" (row_type == "i64" est ambigu avec
+        // bigint/int8, qui ne doit lui jamais recevoir ce cast).
+        //
         // Sentinel 0 = LSN nulle ('0/0'::pg_lsn, le DEFAULT du DDL lui-même :
         // 0 n'est donc jamais une valeur ambiguë avec une LSN réelle post-
         // écriture WAL, qui commence toujours après le segment 0).
         //
         // CONSÉQUENCE OPÉRATIONNELLE (vérifiée contre store_registry.rs,
         // marius_projection) : is_fixed=true agrandit {Schema}{Table}StorageRow
-        // pour toute table portant une colonne pg_lsn (content.core
-        // uniquement à ce jour) — le stride du store.bin correspondant
-        // change. PackfileReader::open valide stride au cold_start et
-        // rejette (Err, jamais silencieux) tout store.bin écrit avec
-        // l'ancien stride. Régénérer via marius-dump après ce changement,
-        // avant tout redémarrage du serveur — même nécessité que recharger
-        // les migrations SQL après un ALTER TABLE, sur un artefact distinct.
+        // pour toute table portant une colonne pg_lsn (content.core et
+        // commerce.product_core à ce jour, cf. grep -rn "pg_lsn" db/) — le
+        // stride du store.bin correspondant change. PackfileReader::open
+        // valide stride au cold_start et rejette (Err, jamais silencieux)
+        // tout store.bin écrit avec l'ancien stride. Régénérer via
+        // marius-dump après ce changement, avant tout redémarrage du
+        // serveur — même nécessité que recharger les migrations SQL après
+        // un ALTER TABLE, sur un artefact distinct.
         "pg_lsn" => TypeMapping {
-            row_type: "sqlx::postgres::types::PgLsn",
+            row_type: "i64",
             store_type: "u64",
-            from_expr: "{field}.map(|v| v.0).unwrap_or({sentinel})",
+            from_expr: "{field}.map(|v| v as u64).unwrap_or({sentinel})",
             default_sentinel: "0",
             is_fixed: true,
             size_bytes: 8,
             alignment: 8,
+            select_cast: Some("({} - '0/0'::pg_lsn)::int8"),
         },
 
         "geometry" => TypeMapping {
@@ -210,6 +258,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
             is_fixed: false,
             size_bytes: 0,
             alignment: 0,
+            select_cast: None,
         },
 
         other => {
@@ -222,6 +271,7 @@ pub fn map_type(sql_type: &str) -> TypeMapping {
                 is_fixed: false,
                 size_bytes: 0,
                 alignment: 0,
+                select_cast: None,
             }
         }
     }
@@ -315,15 +365,31 @@ mod tests {
 
     // pg_lsn : Phase 2 walsn — is_fixed=true depuis cette session, jamais
     // testé avant (Phase 1 l'excluait entièrement du StorageRow).
+    // row_type="i64" (pas de wrapper : sqlx n'a aucun support natif pour
+    // pg_lsn, vérifié contre docs.rs — d'où le cast SQL porté par
+    // select_cast, appliqué en amont par codegen/projection.rs).
     #[test]
     fn map_pg_lsn() {
         check("pg_lsn", true, 8, 8, "0");
     }
     #[test]
-    fn map_pg_lsn_row_type_is_sqlx_native() {
+    fn map_pg_lsn_row_type_is_plain_i64() {
         let m = map_type("pg_lsn");
-        assert_eq!(m.row_type, "sqlx::postgres::types::PgLsn");
+        assert_eq!(m.row_type, "i64");
         assert_eq!(m.store_type, "u64");
+    }
+    #[test]
+    fn map_pg_lsn_has_select_cast() {
+        let m = map_type("pg_lsn");
+        assert_eq!(m.select_cast, Some("({} - '0/0'::pg_lsn)::int8"));
+    }
+    #[test]
+    fn map_bigint_has_no_select_cast() {
+        // Non-régression : bigint/int8 partage row_type="i64" avec pg_lsn
+        // mais ne doit JAMAIS recevoir le cast pg_lsn — select_cast est la
+        // seule distinction fiable entre les deux à ce niveau.
+        let m = map_type("bigint");
+        assert_eq!(m.select_cast, None);
     }
 
     // ── Flottants ────────────────────────────────────────────────────────────
