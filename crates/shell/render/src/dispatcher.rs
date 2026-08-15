@@ -1,4 +1,4 @@
-// marius-render · crates/shell/render/src/dispatcher.rs
+// crates/shell/render/src/dispatcher.rs
 
 //! # Dispatcher (Orchestrateur Réactif Shell)
 //!
@@ -303,9 +303,11 @@ mod tests {
     /// pré-alloué à sa borne supérieure exacte avant le premier render().
     fn worst_case_storage() -> ContentCoreStorageRow {
         ContentCoreStorageRow {
+            walsn: u64::MAX, // worst-case width — jamais rendu (WAL-sync interne), MAX = pire cas défensif
             published_at: i64::MIN, // 20 chars — max I64
             created_at: i64::MIN,
             modified_at: i64::MIN,
+            js_deps: -1, // tous les bits à 1 — exerce toutes les branches ModulesPlaceholder
             document_id: i32::MIN, // 11 chars — max I32
             author_entity_id: i32::MIN,
             status: i16::MIN, // 6 chars  — max I16

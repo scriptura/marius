@@ -398,15 +398,28 @@ pub fn write_projection_stub(
                 let sentinel = col.sentinel.as_deref().unwrap_or(m.default_sentinel);
 
                 let mut expr = if col.is_notnull {
-                    match m.row_type {
-                        "chrono::DateTime<chrono::Utc>" => {
-                            format!("{}.timestamp_micros()", col.name)
+                    // pg_lsn AVANT le match sur m.row_type — même correctif
+                    // que from_impl.rs (write_from_impl) : depuis Phase 2
+                    // walsn, row_type de pg_lsn vaut "i64", indiscernable de
+                    // bigint/int8 sur ce seul critère. col.sql_type reste la
+                    // seule clé fiable. Ce site est un DEUXIÈME générateur,
+                    // indépendant de write_from_impl (déstructuration/
+                    // reconstruction inline pour fetch_from_pg, jamais un
+                    // appel à From::from()) — découvert après coup, non
+                    // routé par le correctif de from_impl.rs.
+                    if col.sql_type == "pg_lsn" {
+                        format!("{} as u64", col.name)
+                    } else {
+                        match m.row_type {
+                            "chrono::DateTime<chrono::Utc>" => {
+                                format!("{}.timestamp_micros()", col.name)
+                            }
+                            "chrono::NaiveDateTime" => {
+                                format!("{}.and_utc().timestamp_micros()", col.name)
+                            }
+                            "chrono::NaiveDate" => format!("{}.num_days_from_ce()", col.name),
+                            _ => col.name.clone(),
                         }
-                        "chrono::NaiveDateTime" => {
-                            format!("{}.and_utc().timestamp_micros()", col.name)
-                        }
-                        "chrono::NaiveDate" => format!("{}.num_days_from_ce()", col.name),
-                        _ => col.name.clone(),
                     }
                 } else {
                     m.from_expr

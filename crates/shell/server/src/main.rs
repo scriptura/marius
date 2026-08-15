@@ -1,5 +1,6 @@
-// marius-render · crates/shell/server/src/main.rs
+// crates/shell/server/src/main.rs
 
+//! # marius-render · main
 //! Point d'Entrée & Orchestrateur Réactif (Shell/Server).
 //!
 //! Bootstrap de la frontière réseau (Axum/Tokio) et supervision des pipelines réactifs (Dispatchers).
@@ -34,10 +35,7 @@ use tokio::sync::{Notify, Semaphore};
 
 use marius_render::{Dispatcher, DispatcherConfig, IdSource, LiveRegistry, RouteEntry};
 
-use marius_schema::{
-    COMMERCE_PRODUCT_CORE_COLLECTOR, COMMERCE_PRODUCT_CORE_TOTAL_CAP, CONTENT_CORE_COLLECTOR,
-    CONTENT_CORE_TOTAL_CAP, CommerceProductCoreProjection, ContentCoreProjection,
-};
+use marius_schema::{CONTENT_CORE_COLLECTOR, CONTENT_CORE_TOTAL_CAP, ContentCoreProjection};
 
 use marius_collector::InsertResult;
 
@@ -71,15 +69,15 @@ pub struct AssetRoute {
 include!(concat!(env!("OUT_DIR"), "/asset_routes.rs"));
 
 /// Table de routage AOT — écrite à la main (cf. en-tête de fichier).
-/// 3 entrées : suffisant pour le Jalon 3 ("2-3 packfiles synthétiques"),
-/// couvre les deux IdSource (PathParam, Fixed).
+/// PoC : content_core uniquement. commerce_product_core désactivé (session
+/// HANDOFF-js-deps-capacites-frontend-v2.md) — resté fonctionnel jusqu'ici
+/// par accident de compilation (jamais retouché depuis une première PoC
+/// naïve), jamais un choix délibéré de couverture. Retiré ici plutôt que
+/// laissé bloquer le démarrage sur un store.bin jamais régénéré (aucun
+/// mécanisme de dump n'existe pour cette table — dump.rs est câblé
+/// exclusivement pour content_core). À réintroduire quand product_core
+/// reviendra au périmètre, avec son propre dump.
 static ROUTE_TABLE: &[RouteEntry] = &[
-    RouteEntry {
-        pattern: "/product/{id}",
-        packfile_key: "commerce_product_core",
-        id_source: IdSource::PathParam("id"),
-        content_type: "text/html; charset=utf-8",
-    },
     RouteEntry {
         pattern: "/content/{id}",
         packfile_key: "content_core",
@@ -125,21 +123,11 @@ struct ShardMetadata {
     config: DispatcherConfig,
 }
 
-static SHARDS: &[ShardMetadata] = &[
-    ShardMetadata {
-        packfile_key: "content_core",
-        channel: "content_core_updates",
-        config: DEFAULT_DISPATCHER_CONFIG,
-    },
-    ShardMetadata {
-        packfile_key: "commerce_product_core",
-        // Arbitrage architecte (cette session) : trigger DB déjà migré vers
-        // la convention symétrique {packfile_key}_updates (spec §10, acté).
-        // L'ancien nom "product_core_updates" (spec §2) n'est plus valide.
-        channel: "commerce_product_core_updates",
-        config: DEFAULT_DISPATCHER_CONFIG,
-    },
-];
+static SHARDS: &[ShardMetadata] = &[ShardMetadata {
+    packfile_key: "content_core",
+    channel: "content_core_updates",
+    config: DEFAULT_DISPATCHER_CONFIG,
+}];
 
 /// Construit le Router à partir d'une table de routage et d'un registre déjà
 /// initialisé — factorisé pour être réutilisé tel quel par les tests
@@ -167,20 +155,15 @@ fn build_router(route_table: &'static [RouteEntry], registry: Arc<LiveRegistry>)
 /// PgListener réactif (Phase 5.2). Boucle de reconnexion externe (invariant
 /// de disponibilité, pas une optimisation) + boucle de réception interne.
 /// Hors périmètre cette session : supervision JoinSet/select!/process::exit
-/// (Phase 5.3) — tokio::spawn nu, comme les deux Dispatcher depuis 5.1.
+/// (Phase 5.3) — tokio::spawn nu, comme le Dispatcher depuis 5.1.
 ///
-/// Pas de match unifié sur les deux branches de canal (arbitrage acté) :
-/// CONTENT_CORE_COLLECTOR et COMMERCE_PRODUCT_CORE_COLLECTOR sont deux types
-/// Collector<MAX, WORDS> distincts (monomorphisation) — un retour de branche
-/// commun échouerait à la compilation (E0308) sans dyn, exclu explicitement.
-/// Chaque branche reste donc autonome : routage, insert(), notify_one()
-/// inline, parsing du payload dupliqué (4 lignes/branche, accepté — même
-/// discipline que la construction des Dispatcher en 5.1).
-async fn run_pg_listener(
-    database_url: String,
-    content_core_notify: Arc<Notify>,
-    commerce_product_core_notify: Arc<Notify>,
-) {
+/// PoC content_core uniquement (commerce_product_core désactivé — voir
+/// ROUTE_TABLE) : un seul bras de match reste nécessaire, SHARDS ne porte
+/// plus qu'une entrée. La discipline "pas de match unifié entre types
+/// Collector<MAX,WORDS> distincts" documentée à l'origine pour ce fichier
+/// n'a donc plus lieu d'être illustrée ici tant que product_core reste hors
+/// périmètre — à réintroduire avec lui si besoin.
+async fn run_pg_listener(database_url: String, content_core_notify: Arc<Notify>) {
     let mut backoff = Duration::from_millis(500);
     const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -221,22 +204,6 @@ async fn run_pg_listener(
                             == InsertResult::ThresholdReached
                         {
                             content_core_notify.notify_one();
-                        }
-                    }
-                    c if c == SHARDS[1].channel => {
-                        let Ok(id) = notification.payload().parse::<i64>() else {
-                            eprintln!(
-                                "[pg_listener] payload non numérique sur {}: {:?}",
-                                notification.channel(),
-                                notification.payload()
-                            );
-                            continue;
-                        };
-                        if COMMERCE_PRODUCT_CORE_COLLECTOR
-                            .insert(id, SHARDS[1].config.threshold_flush)
-                            == InsertResult::ThresholdReached
-                        {
-                            commerce_product_core_notify.notify_one();
                         }
                     }
                     other => {
@@ -309,11 +276,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // exactement symétrique à ensure_provisioned pour pack.bin ci-dessus.
     // ensure_store_provisioned garantit sa présence (vide si absent, jamais
     // touché si déjà présent) avant que cold_start_store() ne le monte.
+    // PoC content_core uniquement — commerce_product_core désactivé (voir
+    // ROUTE_TABLE) : ensure_store_provisioned/cold_start_store de cette
+    // projection retirés, jamais un store.bin jamais régénéré ne doit
+    // bloquer le démarrage d'un shard hors périmètre.
     marius_render::ensure_store_provisioned::<ContentCoreProjection>().await?;
-    marius_render::ensure_store_provisioned::<CommerceProductCoreProjection>().await?;
     ContentCoreProjection::cold_start_store()?;
-    CommerceProductCoreProjection::cold_start_store()?;
-    eprintln!("[marius-server] StoreRegistry provisionné — 2 shard(s)");
+    eprintln!("[marius-server] StoreRegistry provisionné — 1 shard(s)");
 
     // ── Dispatcher — shard content_core ─────────────────────────────────────
     // Un seul Arc<Notify> par shard, jamais reconstruit. Phase 5.2 lui donne
@@ -331,17 +300,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let content_core_dispatcher = Dispatcher::<ContentCoreProjection, _, _>::new(
         &CONTENT_CORE_COLLECTOR,
         content_core_notify.clone(),
-        pool.clone(),
+        pool,
         SHARDS[0].config,
         CONTENT_CORE_TOTAL_CAP,
         registry.clone(),
         SHARDS[0].packfile_key,
-        io_semaphore.clone(),
+        io_semaphore,
     );
     // ── Supervision fail-fast (spec §6, Phase 5.3) ──────────────────────────
-    // Les trois tâches ci-dessous (deux Dispatcher + PgListener) ne sont
-    // jamais censées se terminer normalement — cf. tokio::select! en fin de
-    // main() pour le traitement de toute terminaison comme un bug.
+    // La tâche ci-dessous (Dispatcher + PgListener) n'est jamais censée se
+    // terminer normalement — cf. tokio::select! en fin de main() pour le
+    // traitement de toute terminaison comme un bug.
     let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     tasks.spawn(content_core_dispatcher.run());
@@ -350,42 +319,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SHARDS[0].packfile_key
     );
 
-    // ── Dispatcher — shard commerce_product_core ────────────────────────────
-    // Dernier usage de `pool` et de `io_semaphore` dans cette fonction :
-    // déplacés (pas de .clone()) — un seul clone de chaque ressource
-    // partagée suffit pour deux consommateurs (move sur le second).
-    // `commerce_product_core_notify` suit la même règle que content_core_notify
-    // ci-dessus : .clone() ici (second consommateur = run_pg_listener),
-    // binding d'origine déplacé plus bas.
-    let commerce_product_core_notify: Arc<Notify> = Arc::new(Notify::new());
-
-    let commerce_product_core_dispatcher = Dispatcher::<CommerceProductCoreProjection, _, _>::new(
-        &COMMERCE_PRODUCT_CORE_COLLECTOR,
-        commerce_product_core_notify.clone(),
-        pool,
-        SHARDS[1].config,
-        COMMERCE_PRODUCT_CORE_TOTAL_CAP,
-        registry.clone(),
-        SHARDS[1].packfile_key,
-        io_semaphore,
-    );
-    tasks.spawn(commerce_product_core_dispatcher.run());
-    eprintln!(
-        "[marius-server] Dispatcher démarré — shard \"{}\"",
-        SHARDS[1].packfile_key
-    );
-
     // ── PgListener (spec §5, Phase 5.2) ─────────────────────────────────────
-    // database_url et les deux Arc<Notify> d'origine : derniers usages,
-    // déplacés ici sans .clone() (Correctif 1 ci-dessus a déjà couvert le
-    // second consommateur côté Dispatcher). tasks.spawn (Phase 5.3) au lieu
-    // d'un tokio::spawn nu — même supervision fail-fast que les deux
-    // Dispatcher ci-dessus.
-    tasks.spawn(run_pg_listener(
-        database_url,
-        content_core_notify,
-        commerce_product_core_notify,
-    ));
+    // database_url et content_core_notify d'origine : derniers usages,
+    // déplacés ici sans .clone(). tasks.spawn (Phase 5.3) au lieu d'un
+    // tokio::spawn nu — même supervision fail-fast que le Dispatcher
+    // ci-dessus.
+    tasks.spawn(run_pg_listener(database_url, content_core_notify));
     eprintln!("[marius-server] PgListener démarré — backoff 500ms→30s");
 
     // ── Read Path (spec §7, inchangé) ───────────────────────────────────────

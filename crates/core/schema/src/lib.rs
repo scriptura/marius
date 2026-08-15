@@ -1,6 +1,6 @@
+// crates/core/schema/src/lib.rs
+
 //! # marius-schema
-//!
-//! **Crate** : `crates/core/schema/src/lib.rs`  
 //! **Projet Marius** · ADR-002 / ADR-003 / ADR-007
 //!
 //! Point d'entrée de la crate `schema`.  
@@ -165,9 +165,11 @@ mod tests {
     #[test]
     fn test_content_core_no_realloc() {
         let storage = ContentCoreStorageRow {
+            walsn: u64::MAX, // worst-case width — jamais rendu (WAL-sync interne), MAX = pire cas défensif
             published_at: i64::MIN,
             created_at: i64::MIN,
             modified_at: i64::MIN,
+            js_deps: -1, // tous les bits à 1 — exerce toutes les branches ModulesPlaceholder
             document_id: i32::MIN,
             author_entity_id: i32::MIN,
             status: i16::MIN,
@@ -232,9 +234,11 @@ mod tests {
     #[test]
     fn test_content_core_no_realloc_with_segmented_content() {
         let storage = ContentCoreStorageRow {
+            walsn: u64::MAX, // worst-case width — jamais rendu (WAL-sync interne), MAX = pire cas défensif
             published_at: i64::MIN,
             created_at: i64::MIN,
             modified_at: i64::MIN,
+            js_deps: -1, // tous les bits à 1 — exerce toutes les branches ModulesPlaceholder
             document_id: i32::MIN,
             author_entity_id: i32::MIN,
             status: i16::MIN,
@@ -283,6 +287,7 @@ mod tests {
     #[test]
     fn test_product_core_no_realloc() {
         let storage = CommerceProductCoreStorageRow {
+            walsn: u64::MAX, // worst-case width — jamais rendu (WAL-sync interne), MAX = pire cas défensif
             price_cents: i64::MIN,
             id: i32::MIN,
             stock: i32::MIN,
@@ -339,9 +344,11 @@ mod tests {
     #[test]
     fn diag_content_core_ratio() {
         let storage = ContentCoreStorageRow {
+            walsn: 12345, // représentatif, non exercé par ce diagnostic
             published_at: 1_700_000_000_000_000i64,
             created_at: 1_700_000_000_000_000i64,
             modified_at: 1_700_000_000_000_000i64,
+            js_deps: 0, // aucune capacité active — diagnostic non bloquant, pas un test de pire cas
             document_id: 42,
             author_entity_id: 7,
             status: 1,
@@ -381,6 +388,7 @@ mod tests {
     #[test]
     fn diag_product_core_ratio() {
         let storage = CommerceProductCoreStorageRow {
+            walsn: 12345, // représentatif, non exercé par ce diagnostic
             price_cents: 1999,
             id: 42,
             stock: 150,

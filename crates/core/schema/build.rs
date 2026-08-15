@@ -1,6 +1,6 @@
-//! `crates/core/schema/build.rs`
-//!
-//! Orchestrateur build-time.
+// crates/core/schema/build.rs
+
+//! # Orchestrateur build-time.
 //!
 //! ## Responsabilités
 //!

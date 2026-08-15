@@ -1,5 +1,6 @@
-// marius-render · crates/shell/render/src/bin/marius_verify.rs
+// crates/shell/render/src/bin/marius_verify.rs
 
+//! # marius-verify
 //! Outil de validation de cohérence binaire AOT (`marius-verify`).
 //!
 //! Exécuté hors ligne après la passe d'extraction (`marius-dump`). Valide la lisibilité,

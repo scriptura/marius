@@ -1,7 +1,8 @@
 // crates/shell/render/src/bin/dump.rs
-//
-// Exécuté manuellement au déploiement : cargo run --bin marius-dump
-// Jamais par cargo build, jamais par le Dispatcher.
+
+//! # marius-dump
+//! Exécuté manuellement au déploiement : cargo run --bin marius-dump
+//! Jamais par cargo build, jamais par le Dispatcher.
 
 use std::sync::Arc;
 
