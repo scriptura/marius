@@ -169,7 +169,7 @@ mod tests {
     fn minify_javascript_handles_plain_script_source() {
         let src =
             "const CACHE_NAME = 'MARIUS_CACHE_HASH';\nself.addEventListener('install', () => {});";
-        let out = minify_javascript(src, Path::new("serviceWorker.js")).unwrap();
+        let out = minify_javascript(src, Path::new("service-worker.js")).unwrap();
         assert!(out.contains("MARIUS_CACHE_HASH"));
     }
 }

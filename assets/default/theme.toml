@@ -20,7 +20,10 @@ entries = ["styles/development/main.mcss", "styles/development/print.mcss"]
 main = "scripts/development/main.js"
 map = "scripts/development/map.js"
 
-[scripts.capabilities]
+[scripts.capabilities.disclosure]
+entry = "scripts/development/disclosure.js"
+markers = ["tabs", "accordion"]
+activation = "initDisclosureSystem"
 
 [scripts.capabilities.image-focus]
 entry = "scripts/development/image-focus.js"
@@ -38,9 +41,9 @@ entry = "manifest.webmanifest"
 
 [service_worker]
 # Handoff §3 — point d'entrée unique, à la racine du thème, même
-# convention que [webmanifest].entry. À corriger si serviceWorker.js vit
+# convention que [webmanifest].entry. À corriger si service-worker.js vit
 # ailleurs dans votre arborescence réelle.
-entry = "scripts/development/serviceWorker.js"
+entry = "scripts/development/service-worker.js"
 
 # ==========================================
 # Pipelines de copie (Zéro-Transformation)

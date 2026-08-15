@@ -2,7 +2,7 @@
 
 //! Pipeline `[service_worker]` (Handoff §3).
 //!
-//! Traite `serviceWorker.js` comme un gabarit textuel déterministe, sans allouer d'AST.
+//! Traite `service-worker.js` comme un gabarit textuel déterministe, sans allouer d'AST.
 //! Réutilise le lexer bas niveau sur octets de `crate::scripts` (`skip_line_comment`,
 //! `skip_block_comment`, `find_unescaped_quote`) pour ne pas dupliquer la logique de parsing.
 //!
@@ -269,14 +269,14 @@ pub(crate) fn run_service_worker_pipeline(
     let bytes = final_content.as_bytes();
     let (full_hash, short_hash) = hash_content(bytes);
 
-    let hashed_filename = format!("serviceWorker.{short_hash}.js");
+    let hashed_filename = format!("service-worker.{short_hash}.js");
     let output_abs = build_root.join(&hashed_filename);
     fs::write(&output_abs, bytes)?;
 
     // Clé logique fixe, comme `manifest.webmanifest` — un seul Service
     // Worker par thème, indépendant du nom de fichier source réel.
     manifest.insert(
-        "serviceWorker.js".to_string(),
+        "service-worker.js".to_string(),
         AssetEntry {
             url: format!("/{hashed_filename}"),
             path: join_slash(build_root_rel, &hashed_filename),
@@ -374,7 +374,7 @@ mod tests {
     /// à l'intérieur d'un commentaire bloc ne doit jamais être vue comme un
     /// guillemet ouvrant — sinon tout le reste du fichier serait
     /// désynchronisé. Reproduction directe du motif réel de
-    /// `serviceWorker.js` (élision dans un bloc `/** ... */`).
+    /// `service-worker.js` (élision dans un bloc `/** ... */`).
     #[test]
     fn scan_and_resolve_service_worker_apostrophe_inside_block_comment_is_not_a_quote() {
         let registry = AssetUrlRegistry::new();
@@ -458,7 +458,7 @@ mod tests {
         fs::create_dir_all(&build_root).unwrap();
 
         fs::write(
-            theme_dir.join("serviceWorker.js"),
+            theme_dir.join("service-worker.js"),
             "const CACHE_NAME = \"MARIUS_CACHE_HASH\";\nconst r = ['/styles/main.css'];",
         )
         .unwrap();
@@ -467,7 +467,7 @@ mod tests {
         registry.insert("main.css".to_string(), "/styles/main.a1b2c.css".to_string());
         let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
         let config = ServiceWorkerConfig {
-            entry: "serviceWorker.js".to_string(),
+            entry: "service-worker.js".to_string(),
         };
 
         run_service_worker_pipeline(
@@ -480,9 +480,9 @@ mod tests {
         )
         .unwrap();
 
-        let entry = manifest.get("serviceWorker.js").expect("entrée attendue");
+        let entry = manifest.get("service-worker.js").expect("entrée attendue");
         assert!(!entry.url.contains("MARIUS_CACHE_HASH"));
-        assert!(entry.url.starts_with("/serviceWorker."));
+        assert!(entry.url.starts_with("/service-worker"));
         assert!(entry.url.ends_with(".js"));
 
         let written =
@@ -530,7 +530,7 @@ mod tests {
         fs::create_dir_all(&build_root).unwrap();
 
         fs::write(
-            theme_dir.join("serviceWorker.js"),
+            theme_dir.join("service-worker.js"),
             "const CACHE_NAME = \"MARIUS_CACHE_HASH\";\nconst r = ['/scripts/index.js'];",
         )
         .unwrap();
@@ -538,7 +538,7 @@ mod tests {
         let registry = AssetUrlRegistry::new(); // vide : rien à trouver
         let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
         let config = ServiceWorkerConfig {
-            entry: "serviceWorker.js".to_string(),
+            entry: "service-worker.js".to_string(),
         };
 
         let result = run_service_worker_pipeline(

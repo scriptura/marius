@@ -2162,7 +2162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // marius-assets. L'URL publique (`/offline.html`, non hachée —
         // décision de session, page de routage, pas une sous-ressource)
         // reste un littéral écrit à la main là où elle est référencée
-        // (`OFFLINE_URL` dans `serviceWorker.js`), jamais résolue via ce
+        // (`OFFLINE_URL` dans `service-worker.js`), jamais résolue via ce
         // manifeste.
         println!(
             "cargo:warning=DB-Forge [{schema}.{table}] : page statique -> {}",

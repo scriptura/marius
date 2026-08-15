@@ -247,7 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut manifest,
         )?;
 
-        if let Some(entry) = manifest.get_mut("serviceWorker.js") {
+        if let Some(entry) = manifest.get_mut("service-worker.js") {
             entry.version = theme.theme.version.clone();
         }
     }

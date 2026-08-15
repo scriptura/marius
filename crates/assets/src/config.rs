@@ -55,7 +55,7 @@ pub(crate) struct ThemeConfig {
     /// Configuration du Service Worker PWA (`[service_worker]`).
     ///
     /// Section optionnelle. Si absente, le Service Worker est supposé se trouver
-    /// à la racine du thème (`serviceWorker.js`).
+    /// à la racine du thème (`service-worker.js`).
     #[serde(default)]
     pub(crate) service_worker: Option<ServiceWorkerConfig>,
 }
