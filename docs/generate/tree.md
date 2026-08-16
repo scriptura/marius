@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-08-16 23:41:38
+**Généré le:** 2026-08-16 23:42:55
 
 ## Racine du Workspace
 
@@ -177,8 +177,6 @@
 
 52 directories, 117 files
 ```
-
----
 
 ## Documentation du projet
 

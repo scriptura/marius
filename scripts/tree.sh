@@ -27,8 +27,6 @@ tree "$PROJECT_ROOT" -I "docs|doc|target|build|artifacts|assets|logs" --dirsfirs
 cat >> "$OUTPUT" << EOF
 \`\`\`
 
----
-
 ## Documentation du projet
 
 \`\`\`text
