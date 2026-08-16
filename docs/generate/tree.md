@@ -1,10 +1,8 @@
 # Structure du Projet
 
-**Généré le:** 2026-08-16 23:28:03
+**Généré le:** 2026-08-16 23:41:38
 
----
-
-## 📁 Racine du Workspace
+## Racine du Workspace
 
 ```text
 /home/nunn/Development/GitHub/marius
@@ -182,7 +180,7 @@
 
 ---
 
-## 📁 Documentation
+## Documentation du projet
 
 ```text
 /home/nunn/Development/GitHub/marius/docs

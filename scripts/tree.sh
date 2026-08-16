@@ -17,9 +17,7 @@ cat > "$OUTPUT" << EOF
 
 **Généré le:** $TIMESTAMP
 
----
-
-## 📁 Racine du Workspace
+## Racine du Workspace
 
 \`\`\`text
 EOF
@@ -31,7 +29,7 @@ cat >> "$OUTPUT" << EOF
 
 ---
 
-## 📁 Documentation
+## Documentation du projet
 
 \`\`\`text
 EOF
