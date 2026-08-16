@@ -1,4 +1,6 @@
-//! # Marius Fragment Forge - crates/forge/fragment-forge/src/lib.rs
+// crates/forge/fragment-forge/src/lib.rs
+
+//! # Marius Fragment Forge
 //!
 //! Génération AOT (`build.rs`) du corps de `render()` pour les tables surveillées.
 //!
@@ -2676,6 +2678,138 @@ pub fn generate_segmented_snippet<'src, 'r>(
 // n'est JAMAIS appelée pour une cible Fragment isolé, décision prise
 // entièrement par l'orchestrateur.
 // =============================================================================
+
+// =============================================================================
+// Scan statique des marqueurs `class` — HANDOFF-js-deps-capacites-frontend-v2.md,
+// addendum « MARIUS_MODULES agrège deux sources ».
+// =============================================================================
+
+/// Extrait l'ensemble des tokens `class` présents dans le HTML **statique**
+/// d'un flux déjà abaissé (post-`lower()` — parent+enfant fusionnés, avant
+/// splice de `ModulesPlaceholder`).
+///
+/// Scanne EXCLUSIVEMENT `FlatPageToken::Static` — jamais l'intérieur d'un
+/// `{{ champ }}`/`{% if %}` : une classe qui dépend d'une donnée runtime
+/// (`class="{{ some_class }}"`) n'est structurellement pas détectable ici,
+/// et ne doit jamais l'être — c'est précisément la frontière entre ce que
+/// `fragment-forge` peut savoir à la compilation et ce que seul
+/// `content.compute_js_deps` (SQL, à l'écriture) peut savoir.
+///
+/// Contrat lexical partagé avec `content.compute_js_deps`
+/// (`db/05_content/02_systems.sql`) — même DÉFINITION du marqueur (token
+/// exact d'un attribut `class`, délimiteur `'` ou `"`, tokenisation sur les
+/// espaces), deux implémentations INDÉPENDANTES, aucune ne dérive de
+/// l'autre. Jamais une sous-chaîne, jamais un attribut `data-*`.
+pub fn extract_static_class_tokens<'src>(
+    tokens: &[FlatPageToken<'src>],
+) -> std::collections::HashSet<String> {
+    use std::sync::OnceLock;
+
+    // Ancrage de frontière sur le nom d'attribut ((?:^|[\s<])class=) — même
+    // principe que la regex PL/pgSQL, transposé : évite de matcher un
+    // attribut dont le nom se TERMINE par "class" (ex: "data-class=").
+    static CLASS_ATTR_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = CLASS_ATTR_RE.get_or_init(|| {
+        regex::Regex::new(r#"(?:^|[\s<])class=(?:"([^"]*)"|'([^']*)')"#)
+            .expect("regex statique — motif fixe, jamais construit depuis une entrée externe")
+    });
+
+    let mut out = std::collections::HashSet::new();
+    for token in tokens {
+        if let FlatPageToken::Static(s) = token {
+            for caps in re.captures_iter(s) {
+                let value = caps
+                    .get(1)
+                    .or_else(|| caps.get(2))
+                    .map(|m| m.as_str())
+                    .unwrap_or("");
+                for tok in value.split_whitespace() {
+                    if !tok.is_empty() {
+                        out.insert(tok.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests_extract_static_class_tokens {
+    use super::FlatPageToken;
+    use super::extract_static_class_tokens;
+
+    #[test]
+    fn finds_double_quoted_class() {
+        let tokens = vec![FlatPageToken::Static(r#"<pre class="add-line-marks">"#)];
+        let found = extract_static_class_tokens(&tokens);
+        assert!(found.contains("add-line-marks"));
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn finds_single_quoted_class() {
+        let tokens = vec![FlatPageToken::Static("<div class='map'>")];
+        let found = extract_static_class_tokens(&tokens);
+        assert!(found.contains("map"));
+    }
+
+    #[test]
+    fn splits_multiple_tokens_in_one_class_attr() {
+        let tokens = vec![FlatPageToken::Static(
+            r#"<div class="range range-multithumb extra">"#,
+        )];
+        let found = extract_static_class_tokens(&tokens);
+        assert!(found.contains("range"));
+        assert!(found.contains("range-multithumb"));
+        assert!(found.contains("extra"));
+        assert_eq!(found.len(), 3);
+    }
+
+    #[test]
+    fn never_matches_attribute_ending_in_class() {
+        // Ancrage de frontière : "data-class=" ne doit jamais être confondu
+        // avec "class=" — même piège que la regex SQL doit éviter.
+        let tokens = vec![FlatPageToken::Static(r#"<div data-class="not-a-marker">"#)];
+        let found = extract_static_class_tokens(&tokens);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn ignores_non_static_tokens() {
+        // Field/IfBool/etc. ne sont jamais scannés — seul le HTML
+        // véritablement statique participe à cette détection.
+        let tokens = vec![
+            FlatPageToken::Field {
+                entity: "record",
+                field: "class",
+            },
+            FlatPageToken::Static(r#"<div class="map">"#),
+        ];
+        let found = extract_static_class_tokens(&tokens);
+        assert_eq!(found.len(), 1);
+        assert!(found.contains("map"));
+    }
+
+    #[test]
+    fn empty_when_no_static_class_present() {
+        let tokens = vec![FlatPageToken::Static("<div>sans classe ici</div>")];
+        let found = extract_static_class_tokens(&tokens);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn scans_across_multiple_static_tokens() {
+        let tokens = vec![
+            FlatPageToken::Static(r#"<div class="map">"#),
+            FlatPageToken::Static(r#"<pre class="add-line-marks">"#),
+        ];
+        let found = extract_static_class_tokens(&tokens);
+        assert_eq!(found.len(), 2);
+        assert!(found.contains("map"));
+        assert!(found.contains("add-line-marks"));
+    }
+}
 
 /// Erreur de la passe de hoisting/déduplication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

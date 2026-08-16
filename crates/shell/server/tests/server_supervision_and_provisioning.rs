@@ -1,5 +1,6 @@
-//! crates/shell/server/tests/server_supervision_and_provisioning.rs
-//!
+// crates/shell/server/tests/server_supervision_and_provisioning.rs
+
+//! # Tests de supervision et de provisioning du serveur
 //! Validation des invariants structurels du pipeline déterministe (ECS/DOD/AOT).
 //! Trois contrats distincts, isolés mécaniquement :
 //!
@@ -37,9 +38,12 @@ fn fail_fast_panic_in_dispatcher_terminates_process() {
              bloquant (identique à 5.2, non couvert par ce test lui-même) : \
              instance Postgres accessible, migrations + \
              triggers_notify_dml.sql appliqués, packfiles déjà présents sur \
-             disque pour les trois entrées de ROUTE_TABLE (cold_start() est \
+             disque pour les deux entrées de ROUTE_TABLE (content_core, \
+             pages_homepage — commerce_product_core désactivé, hors \
+             périmètre PoC, HANDOFF-js-deps-capacites-frontend-v2.md) : \
+             cold_start() est \
              fatal sinon, et le binaire doit démarrer jusqu'au bout pour que \
-             ce test ait un sens)."
+             ce test ait un sens."
         )
     });
 
@@ -212,14 +216,14 @@ fn http_get_status_code(addr: &str, path: &str) -> std::io::Result<u16> {
 
 /// Démarre le binaire `marius` réel avec `MARIUS_ARTIFACTS_DIR` pointant
 /// vers un répertoire temporaire vide — aucun packfile ne préexiste pour
-/// aucune des trois entrées de ROUTE_TABLE. Preuve de bout en bout que :
+/// aucune des deux entrées de ROUTE_TABLE. Preuve de bout en bout que :
 ///
 ///   1. le processus démarre jusqu'au bout sans l'erreur fatale
 ///      `cold_start: échec ouverture packfile ... No such file or
 ///      directory` qui motive cette spécification — observé par sondage
 ///      HTTP actif, pas par lecture de code (même discipline que le test 1
 ///      : observation externe du processus enfant) ;
-///   2. les trois entrées de ROUTE_TABLE ont été provisionnées sur disque ;
+///   2. les deux entrées de ROUTE_TABLE ont été provisionnées sur disque ;
 ///   3. une requête sur une route provisionnée mais vide ("/",
 ///      pages_homepage, entry_count == 0) répond 404 — pas 500 — cf.
 ///      spec-provisioning §8 : conséquence directe du format valide produit
@@ -348,10 +352,14 @@ fn provisioning_on_empty_environment_starts_cleanly_and_serves_404() {
     let _ = child.kill();
     let _ = child.wait();
 
-    // Les trois entrées de ROUTE_TABLE doivent avoir été provisionnées —
+    // Les deux entrées de ROUTE_TABLE doivent avoir été provisionnées —
     // preuve directe sur le système de fichiers, pas seulement déduite du
-    // succès du démarrage.
-    for key in ["commerce_product_core", "content_core", "pages_homepage"] {
+    // succès du démarrage. commerce_product_core retiré (désactivé de
+    // ROUTE_TABLE/SHARDS — HANDOFF-js-deps-capacites-frontend-v2.md, PoC
+    // centrée sur content_core) : ce test suit désormais exactement
+    // ROUTE_TABLE réel, jamais une liste maintenue séparément qui pourrait
+    // diverger silencieusement au prochain retrait/ajout de route.
+    for key in ["content_core", "pages_homepage"] {
         let provisioned_path = artifacts_dir.join(format!("{key}.bin"));
         assert!(
             provisioned_path.exists(),

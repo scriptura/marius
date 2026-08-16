@@ -3,7 +3,8 @@ export LC_ALL=C.UTF-8
 export LANG=C.UTF-8
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DOCS_DIR="$PROJECT_ROOT/docs"
 GEN_DIR="$DOCS_DIR/generate"
 OUTPUT="$GEN_DIR/tree.md"
@@ -23,28 +24,26 @@ cat > "$OUTPUT" << EOF
 \`\`\`text
 EOF
 
-tree "$PROJECT_ROOT" -I "target|README.md|doc|docs|logs|artifacts|archives" --dirsfirst >> "$OUTPUT"
+tree "$PROJECT_ROOT" -I "docs|doc|target|build|artifacts|assets|logs" --dirsfirst >> "$OUTPUT"
 
-cat >> "$OUTPUT" << 'EOF'
-
-```
+cat >> "$OUTPUT" << EOF
+\`\`\`
 
 ---
 
 ## 📁 Documentation
 
-```text
+\`\`\`text
 EOF
 
 if [ -d "$DOCS_DIR" ]; then
-    tree "$DOCS_DIR" -I "implementation-history" --dirsfirst >> "$OUTPUT"
+    tree "$DOCS_DIR" --dirsfirst >> "$OUTPUT"
 else
     echo "⚠️ Dossier $DOCS_DIR introuvable." >> "$OUTPUT"
 fi
 
-cat >> "$OUTPUT" << 'EOF'
-
-```
+cat >> "$OUTPUT" << EOF
+\`\`\`
 
 EOF
 

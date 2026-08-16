@@ -47,21 +47,16 @@ $$;
 -- lowering AOT de ModulesPlaceholder. Un bit retiré ne doit JAMAIS être
 -- réattribué à un nom différent, dans aucun des deux fichiers.
 --
---   disclosure      = 1   (marqueur non encore câblé ci-dessous — ouvert)
---   map              = 2   (marqueur non encore câblé ci-dessous — ouvert)
---   media-player     = 4   (marqueur non encore câblé ci-dessous — ouvert)
---   line-mark        = 8   (marqueur non encore câblé ci-dessous — ouvert)
+--   disclosure       = 1   → class="tabs" OU class="accordion"
+--   map              = 2   → class="map"
+--   media-player     = 4   → class="media-player"
+--   line-mark        = 8   → class="add-line-marks"
 --   image-focus      = 16  → class="figure-image-focus"
 --   range            = 32  → class="range" OU class="range-multithumb"
---   youtube-embed    = 64  → class="video-youtube"
+--   youtube          = 64  → class="video-youtube"
 --
--- Les quatre premiers bits (1/2/4/8) sont actés en amont de cette session
--- mais leurs marqueurs de classe ne m'ont pas été fournis — je ne les
--- invente pas. compute_js_deps ci-dessous ne reconnaît donc, pour
--- l'instant, QUE les trois capacités dont le vocabulaire m'a été donné
--- (image-focus/range/youtube-embed) ; disclosure/map/media-player/line-mark
--- ne sont jamais détectées par cette version de la fonction — leurs bits
--- restent réservés, jamais mis à zéro par erreur, jamais réattribués.
+-- Les sept bits déclarés dans scripts_registry.lock sont désormais tous
+-- câblés ici.
 
 -- content.compute_js_deps — bitset des capacités frontend détectées.
 --
@@ -103,6 +98,22 @@ BEGIN
     RETURN 0;
   END IF;
 
+  IF 'tabs' = ANY(v_classes) OR 'accordion' = ANY(v_classes) THEN
+    v_deps := v_deps | 1;  -- disclosure
+  END IF;
+
+  IF 'map' = ANY(v_classes) THEN
+    v_deps := v_deps | 2;  -- map
+  END IF;
+
+  IF 'media-player' = ANY(v_classes) THEN
+    v_deps := v_deps | 4;  -- media-player
+  END IF;
+
+  IF 'add-line-marks' = ANY(v_classes) THEN
+    v_deps := v_deps | 8;  -- line-mark
+  END IF;
+
   IF 'figure-image-focus' = ANY(v_classes) THEN
     v_deps := v_deps | 16;  -- image-focus
   END IF;
@@ -112,7 +123,7 @@ BEGIN
   END IF;
 
   IF 'video-youtube' = ANY(v_classes) THEN
-    v_deps := v_deps | 64;  -- youtube-embed
+    v_deps := v_deps | 64;  -- youtube
   END IF;
 
   RETURN v_deps;

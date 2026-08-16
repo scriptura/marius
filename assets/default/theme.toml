@@ -18,17 +18,31 @@ entries = ["styles/development/main.mcss", "styles/development/print.mcss"]
 # Spécification §10.4.1 : un dossier = une cible de concaténation.
 # Le compilateur concatène le contenu du dossier et génère /scripts/<cible>.<hash>.js.
 main = "scripts/development/main.js"
-map = "scripts/development/map.js"
 
 [scripts.capabilities.disclosure]
 entry = "scripts/development/disclosure.js"
 markers = ["tabs", "accordion"]
 activation = "initDisclosureSystem"
 
+[scripts.capabilities.map]
+entry = "scripts/development/map.js"
+markers = ["map"]
+activation = "initMapsSystem"
+
+[scripts.capabilities.line-mark]
+entry = "scripts/development/line-mark.js"
+markers = ["add-line-marks"]
+activation = "boot"
+
 [scripts.capabilities.image-focus]
 entry = "scripts/development/image-focus.js"
 markers = ["figure-image-focus"]
-activation = "init"
+activation = "initImageFocusSystem"
+
+[scripts.capabilities.youtube]
+entry = "scripts/development/youtube.js"
+markers = ["video-youtube"]
+activation = "bootstrap"
 
 [sprites]
 # Dictionnaire (HashMap) : Nom du Sprite -> Dossier Source.
@@ -64,6 +78,17 @@ files = [
     "sprites/filter.svg",
     "sprites/silos/195v.svg",
     "images/logo.svg",
+    "images/tests/test.webp",
+    "images/tests/test-w4000.webp",
+    "images/tests/test-w3000.webp",
+    "images/tests/test-w2500.webp",
+    "images/tests/test-w2000.webp",
+    "images/tests/test-w1500.webp",
+    "images/tests/test-w1000.webp",
+    "images/tests/test-w800.webp",
+    "images/tests/test-w600.webp",
+    "images/tests/test-w400.webp",
+    "images/tests/test-w300.webp",
     "libraries/leaflet/leaflet.js",
     # "libraries/htmx.min.js",
 ]

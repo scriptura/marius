@@ -200,9 +200,9 @@ const observeMaps = (configs) => {
 /**
  * Point d'entrée à invoquer par l'AssetSystem une fois le DOM et Leaflet garantis.
  */
-export const initMaps = () => {
+export const initMapSystem = () => {
 	if (typeof L === "undefined") {
-		console.warn("initMaps: Leaflet (L) n'est pas instancié.");
+		console.warn("initMapSystem: Leaflet (L) n'est pas instancié.");
 		return;
 	}
 

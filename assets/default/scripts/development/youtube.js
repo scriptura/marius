@@ -1,3 +1,104 @@
+/**
+ * youtube.js — Architecture ECS/DOD (Zero-API Google)
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * Stratégie : endpoint oEmbed public YouTube (sans clé API, sans quota).
+ * @see https://youtube.com/oembed?url=http://www.youtube.com/watch?v={id}&format=json
+ *
+ * Pipeline par entité :
+ *   bootstrap() → FetchSystem → dataStore[id] → UIRenderSystem → DOM
+ *   Input (click) → CommandBuffer → CommandSystem → transition PLAYING
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * INVARIANTS STRUCTURELS
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * INV-1  DOM = buffer de sortie exclusif. UIRenderSystem est le seul
+ *        système autorisé à injecter des nœuds.
+ *
+ * INV-2  Zéro innerHTML dynamique à runtime. Deux templates AOT parsés
+ *        une fois au chargement ; cloneNode(true) à chaque instanciation.
+ *
+ * INV-3  Zéro listener par instance. Un listener click global délégué
+ *        sur document résout l'action via data-action + data-entity-id.
+ *
+ * INV-4  AbortController par entité. Un seul abort() annule le fetch
+ *        en cours ET invalide le listener d'interaction.
+ *
+ * INV-5  dataStore est la source de vérité. Le DOM ne contient aucune
+ *        donnée : ni titre, ni URL, ni état de lecture.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * ARBITRAGES ET COMPROMIS
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * ARB-1  FLAG D'ÉTAT vs FLAG DIRTY
+ *
+ *   Option rejetée : flag dirty binaire (pattern mediaPlayer.js).
+ *
+ *   Raison du rejet :
+ *     dirty est utile dans une boucle RAF à 60fps pour éviter les WRITE
+ *     inutiles sur des entités dont l'état n'a pas changé. Ici il n'y a
+ *     pas de boucle RAF — le rendu est déclenché une seule fois par entité,
+ *     après résolution asynchrone du fetch. Un dirty binaire n'apporterait
+ *     aucune économie de frame : il n'y a pas de frame.
+ *
+ *   Décision : machine d'états explicite à quatre valeurs.
+ *     PENDING  → fetch en cours, aucune interaction possible.
+ *     READY    → fetch résolu, vignette rendue, bouton play actif.
+ *     PLAYING  → iframe injectée, vignette retirée.
+ *     ERROR    → fetch échoué, UI d'erreur rendue.
+ *   Les transitions sont les seuls moments de WRITE DOM. L'état est la
+ *   garde qui empêche une transition illégitime (ex: double-clic play).
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * ARB-2  TEMPLATE IFRAME vs CREATEELEMENT
+ *
+ *   Option rejetée : HTMLTemplateElement pour l'iframe.
+ *
+ *   Raison du rejet :
+ *     L'iframe est créée une seule fois par entité, lors de la transition
+ *     PLAYING. Elle n'est pas instanciée en boucle. Un template ne ferait
+ *     que déplacer le createElement dans le parsing du template, sans gain
+ *     de parsing O(1) puisqu'il n'y a qu'une occurrence.
+ *     De plus, src et title sont des valeurs dynamiques (issues du store)
+ *     qui doivent être injectées après le clone de toute façon.
+ *
+ *   Décision : createElement direct dans le handler PLAY, les attributs
+ *   sont assignés depuis dataStore[id] exclusivement.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * ARB-3  ABORT CONTROLLER : USAGE DOUBLE
+ *
+ *   Un seul AbortController par entité couvre deux usages distincts :
+ *     a. fetch : signal passé en option à fetch(), annulé si dispose()
+ *        est appelé avant la résolution.
+ *     b. listeners : signal passé à addEventListener(), invalide le
+ *        listener global délégué si l'entité est détruite.
+ *   Un seul abort() suffit à nettoyer les deux. Pas de sur-allocation.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * ARB-4  PAS DE RAF / ENGINE
+ *
+ *   Le pipeline de mediaPlayer.js repose sur un Engine RAF car l'état
+ *   hardware (currentTime, buffered) mute en continu à 60fps. Ici, les
+ *   mutations d'état sont discrètes : une résolution fetch, un clic.
+ *   Faire tourner un RAF pour deux transitions par entité serait du gaspillage
+ *   CPU pur. Le modèle event-driven est le bon outil pour ce cas d'usage.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * ARB-5  format=json EXPLICITE
+ *
+ *   Le script original omettait &format=json dans l'URL oEmbed.
+ *   Sans ce paramètre, le serveur peut retourner XML selon le contexte
+ *   de la requête (Accept header). response.json() échouerait silencieusement.
+ *   Corrigé : &format=json systématique.
+ */
+
 // ── 0. États de la machine ─────────────────────────────────────────────
 // Valeurs d'état pour dataStore[id].status. Voir ARB-1.
 
@@ -16,9 +117,7 @@ const _TPL_THUMB = document.createElement("template");
 _TPL_THUMB.innerHTML = `
 <div class="thumbnail-youtube">
   <button class="yt-play-btn" data-action="PLAY" aria-label="Lire la vidéo">
-    <svg role="img" focusable="false">
-      <use href="/sprites/util.svg#youtube"></use>
-    </svg>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><path d="M549.655 124.083c-6.281-23.65-24.787-42.276-48.284-48.597C458.781 64 288 64 288 64S117.22 64 74.629 75.486c-23.497 6.322-42.003 24.947-48.284 48.597-11.412 42.867-11.412 132.305-11.412 132.305s0 89.438 11.412 132.305c6.281 23.65 24.787 41.5 48.284 47.821C117.22 448 288 448 288 448s170.78 0 213.371-11.486c23.497-6.321 42.003-24.171 48.284-47.821 11.412-42.867 11.412-132.305 11.412-132.305s0-89.438-11.412-132.305zm-317.51 213.508V175.185l142.739 81.205-142.739 81.201z"/></svg>
   </button>
   <div class="video-youtube-title"></div>
 </div>`;
@@ -29,9 +128,7 @@ _TPL_ERROR.innerHTML = `
   <div class="video-youtube-error">
     Erreur : cette vidéo n'existe pas !<br>
     (ou a été supprimée...)<br>
-    <svg role="img" focusable="false" class="icon scale" style="--scale:500%">
-      <use href="/sprites/util.svg#space-invader"></use>
-    </svg>
+    <svg xmlns="http://www.w3.org/2000/svg" width="1056" height="1024" viewBox="0 0 1056 1024"><path d="M958.816 799.424V609.12h-93.12v191.008h-97.184v94.496H542.976v-95.2h225.536V704.32H288.8v95.136l192.96.672v95.136H288.128v-94.432h-97.152v-192.32H97.824v190.304H0V510.688h95.84v-92.512h95.136v-97.824H288.8v-95.808h95.808v96.096l287.456.768v-96.864h95.808v97.152h97.824v95.168h94.496V512h96.448v287.424h-97.824zM384.608 416.16H288.8V512h95.808v-95.84zm383.264 0h-95.808V512h95.808v-95.84zM190.976 128.736H288.8v95.808h-97.824v-95.808zm674.72 0v95.808h-97.824v-95.808h97.824z"/></svg>
   </div>
 </div>`;
 
@@ -169,7 +266,7 @@ const UIRenderSystem = {
 // ── 7. InputSystem ─────────────────────────────────────────────────────
 //  Un seul listener click sur document (INV-3).
 //  Résolution : e.target → [data-action] → [data-entity-id] → dispatch().
-//  Signal AbortController global : invalidé par dispose() du module entier.
+//  Signal AbortController global : invalidé par InputSystem.dispose().
 
 const InputSystem = {
 	_ac: null,
@@ -200,7 +297,7 @@ const InputSystem = {
 //  Nettoyage complet d'une entité.
 //  abort() annule le fetch en cours ET invalide le listener (ARB-3).
 //  Retrait du DOM avant purge des stores (même ordre que mediaPlayer.js).
-
+/*
 const disposeEntity = (entityId) => {
 	dataStore[entityId]?._ac.abort();
 	domStore[entityId]?.thumbnail?.remove();
@@ -208,6 +305,7 @@ const disposeEntity = (entityId) => {
 	delete dataStore[entityId];
 	delete domStore[entityId];
 };
+*/
 
 // ── 9. Compteur module-scope ───────────────────────────────────────────
 //  Survit à plusieurs appels bootstrap(). Garantit l'unicité des entityIds.
@@ -225,8 +323,7 @@ export const bootstrap = (container = document) => {
 	for (const el of elements) {
 		if (el.dataset.ytEntityId !== undefined) continue; // guard idempotence
 
-		// NAMESPACE STRICT : On évite l'attribut générique data-id
-		const videoId = el.dataset.youtubeId;
+		const videoId = el.dataset.id;
 		if (!videoId) continue;
 
 		const entityId = _nextEntityId++;
@@ -255,16 +352,6 @@ export const bootstrap = (container = document) => {
 };
 
 // ── API publique ────────────────────────────────────────────────────────
-export const YouTubePlayer = {
-	/** Initialise les players dans un sous-arbre piloté par l'orchestrateur. */
-	bootstrap,
-	/** Commande impérative externe : YouTubePlayer.dispatch(0, 'PLAY') */
-	dispatch(entityId, type) {
-		dispatch(entityId, type);
-		_flushCommands();
-	},
-	/** Nettoyage d'une entité par son ID. */
-	dispose: disposeEntity,
-	/** Accès en lecture aux stores (tests, intégration externe). */
-	stores: { data: dataStore, dom: domStore },
-};
+//  bootstrap est le point d'entrée d'activation du module.
+//  L'orchestrateur AOT importe explicitement ce symbole puis l'appelle.
+//  Aucune initialisation automatique au chargement du module.

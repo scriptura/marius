@@ -11,5 +11,8 @@ readme = "README.md"
 keywords = ["codegen", "build-script", "marius"]
 categories = ["development-tools"]
 
-# Aucune dépendance — calculs purement statiques sur des slices de FieldSpec.
+# regex : non pas pour nous économiser quelques lignes de code,
+# mais afin de permettre exactement la même définition lexicale côté SQL et côté Forge,
+# exprimée de manière lisible et testable.
 [dependencies]
+regex = "1.13"

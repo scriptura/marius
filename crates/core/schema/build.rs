@@ -29,10 +29,10 @@ use marius_db_forge::{
 
 use marius_fragment_forge::{
     AssetLookup, FlatPageToken, PageArena, SchemaIndex, TemplateMetrics, VarlenField,
-    collect_blocks, collect_static_refs, detect_extends, generate_aot_snippet,
-    generate_segmented_snippet, hoist_and_dedupe_scripts, link, lower, parse_page_tokens,
-    parse_tokens, relative_path_for_include_str, resolve_and_measure, scan, splice_hoisted_scripts,
-    validate_ast,
+    collect_blocks, collect_static_refs, detect_extends, extract_static_class_tokens,
+    generate_aot_snippet, generate_segmented_snippet, hoist_and_dedupe_scripts, link, lower,
+    parse_page_tokens, parse_tokens, relative_path_for_include_str, resolve_and_measure, scan,
+    splice_hoisted_scripts, validate_ast,
 };
 
 /// Marqueur textuel du point d'injection des `<script>` hissés — décision
@@ -91,18 +91,54 @@ struct ThemeTomlScriptsOnly {
     scripts: ScriptsSection,
 }
 
-/// Résultat du lowering AOT de `js_deps` — calculé UNE SEULE FOIS pour tout
-/// le build (les capacités sont globales, jamais par composant), injecté
-/// ensuite à chaque site qui en a besoin.
+/// Une capacité entièrement validée et résolue — bit, activation, URL,
+/// marqueurs — prête pour le lowering par template. Calculée UNE SEULE FOIS
+/// pour tout le build (`validate_capabilities`), jamais recalculée par
+/// template : c'est `lower_modules_for_template` qui la croise, à chaque
+/// appel, avec le HTML statique du template en cours.
+struct CapabilityInfo {
+    bit: i64,
+    activation: String,
+    url: String,
+    /// Marqueurs de classe déclenchant cette capacité — nécessaires ici
+    /// pour le scan statique (comparés à `extract_static_class_tokens`),
+    /// pas seulement pour la validation de non-vacuité.
+    markers: Vec<String>,
+}
+
+/// Une émission calculée pour UN template donné, par `lower_modules_for_template`.
+///
+/// `bit: None` — émission INCONDITIONNELLE : soit le marqueur a été détecté
+/// statiquement dans le HTML du template (constant folding AOT — Forge sait
+/// déjà, à la compilation, que ce template en a besoin, quel que soit le
+/// record), soit l'appelant n'a structurellement aucun `record`
+/// (`STATIC_PAGES`) et l'émission ne peut alors provenir QUE du cas
+/// statique.
+///
+/// `bit: Some(BIT)` — émission CONDITIONNELLE : marqueur absent
+/// statiquement, dépend de `record.js_deps` — n'existe jamais pour un
+/// appelant sans `record`.
+struct ModuleEmission {
+    html: String,
+    bit: Option<i64>,
+}
+
+/// Résultat du lowering AOT de `ModulesPlaceholder`, assemblé en CODE RUST
+/// (Mode Page, `resolve_page_template`) — jamais utilisé par
+/// `resolve_static_page`, qui assemble du HTML littéral directement
+/// (`render_modules_as_static_html`, pas de code Rust généré pour
+/// `STATIC_PAGES`).
 struct ModulesLowering {
-    /// Code Rust déjà assemblé : une ligne
-    /// `if record.js_deps & BIT != 0 { buf.push_str(...); }` par capacité
-    /// active, dans un ordre déterministe (tri par nom). Chaîne vide si
-    /// `[scripts.capabilities]` est absente ou vide.
+    /// Code Rust déjà assemblé pour CE template — une ligne par capacité
+    /// concernée : `buf.push_str(...)` inconditionnel (marqueur détecté
+    /// statiquement) ou `if record.js_deps & BIT != 0 { buf.push_str(...); }`
+    /// (marqueur absent statiquement, dépend du record). Chaîne vide si
+    /// aucune capacité ne concerne ce template.
     snippet: String,
-    /// Somme des octets de TOUS les snippets HTML — pire cas où toutes les
-    /// capacités sont actives simultanément dans le bitset, jamais une
-    /// hypothèse d'exclusivité mutuelle entre bits.
+    /// Somme des octets des snippets HTML RÉELLEMENT concernés par ce
+    /// template (inconditionnels + pire cas des tests dynamiques) — jamais
+    /// les capacités qui ne concernent pas du tout ce template (exclues en
+    /// amont par `lower_modules_for_template`, jamais comptées ici).
     static_bytes: usize,
 }
 
@@ -147,6 +183,12 @@ fn emit_static_html<'r>(
     schema: &str,
     table: &str,
     resolve_asset_url: impl Fn(&str) -> &'r str,
+    // HTML déjà assemblé par render_modules_as_static_html — capacités
+    // détectées STATIQUEMENT dans ce template (jamais record.js_deps,
+    // structurellement absent ici). Chaîne vide si aucune capacité ne
+    // concerne ce template. Inséré verbatim, comme StaticInclude : c'est
+    // déjà du HTML final, pas une valeur à échapper.
+    static_html_modules: &str,
 ) -> Result<String, ()> {
     let mut html = String::new();
 
@@ -183,14 +225,13 @@ fn emit_static_html<'r>(
                 );
                 return Err(());
             }
-            // Comportement NORMAL du lowering dans ce pipeline (addendum
-            // Option A, HANDOFF-js-deps-capacites-frontend-v2.md), jamais
-            // une erreur ni un no-op accidentel : l'ensemble des capacités
-            // js_deps d'une page sans `record` est par définition vide.
-            // Zéro octet émis — même token que resolve_page_template
-            // pourrait spliceer, mais résolu ici dans un contexte
-            // structurellement différent (aucun `record` en scope).
-            FlatPageToken::ModulesPlaceholder => {}
+            // Émission LITTÉRALE du HTML déjà calculé par
+            // render_modules_as_static_html — jamais un no-op (correction
+            // apportée après l'addendum Option A d'origine : ce n'était
+            // vrai que pour la partie dynamique, structurellement absente
+            // ici ; la partie statique, elle, peut légitimement produire du
+            // contenu réel — voir doc de resolve_static_page, point 4).
+            FlatPageToken::ModulesPlaceholder => html.push_str(static_html_modules),
         }
     }
 
@@ -318,20 +359,19 @@ fn is_valid_identifier(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Calcule le lowering AOT complet de `js_deps` — lecture de
-/// `theme.toml` `[scripts.capabilities]`, bijection contre
-/// `scripts_registry.lock`, validité/unicité des bits, résolution de
-/// chaque `entry` contre le manifeste d'assets déjà chargé, assemblage du
-/// code Rust final. Échec fail-slow : toutes les erreurs de validation
-/// sont accumulées et rapportées ensemble, jamais une seule à la fois.
+/// Valide et résout GLOBALEMENT (une seule fois pour tout le build) la
+/// table canonique des capacités `js_deps` — bijection `theme.toml` ↔
+/// `scripts_registry.lock`, validité/unicité des bits, `activation` valide,
+/// résolution de chaque `entry` contre le manifeste d'assets. Ne connaît
+/// aucun template spécifique : `lower_modules_for_template` croise cette
+/// table, à chaque appel, avec le HTML statique du template en cours.
 ///
-/// Aucune capacité déclarée : retour `Ok` immédiat, snippet vide,
-/// `scripts_registry.lock` n'est même pas requis d'exister — un projet
-/// Marius sans aucune capacité conditionnelle reste un état valide.
-fn build_modules_lowering(
+/// Retourne les capacités triées par nom (ordre déterministe, reproductible
+/// d'un build à l'autre — jamais l'ordre d'itération d'une `HashMap`).
+fn validate_capabilities(
     manifest_dir: &str,
     assets: &HashMap<String, AssetEntry>,
-) -> Result<ModulesLowering, ()> {
+) -> Result<Vec<(String, CapabilityInfo)>, ()> {
     let theme_toml_path = theme_source_dir(manifest_dir).join("theme.toml");
     println!("cargo:rerun-if-changed={}", theme_toml_path.display());
 
@@ -354,12 +394,9 @@ fn build_modules_lowering(
     println!("cargo:rerun-if-changed={}", registry_path.display());
 
     if capabilities.is_empty() {
-        // Rien à hisser, rien à valider — scripts_registry.lock peut même
-        // ne pas exister tant qu'aucune capacité ne l'exige.
-        return Ok(ModulesLowering {
-            snippet: String::new(),
-            static_bytes: 0,
-        });
+        // Rien à valider — scripts_registry.lock peut même ne pas exister
+        // tant qu'aucune capacité ne l'exige.
+        return Ok(Vec::new());
     }
 
     let raw_registry = std::fs::read_to_string(&registry_path).map_err(|e| {
@@ -433,14 +470,13 @@ fn build_modules_lowering(
         return Err(());
     }
 
-    // ── Assemblage — ordre déterministe (tri par nom), jamais l'ordre
+    // ── Résolution — ordre déterministe (tri par nom), jamais l'ordre
     // d'itération d'une HashMap, qui varie d'un build à l'autre et
     // romprait la reproductibilité du fichier généré. ───────────────────
     let mut names: Vec<&String> = capabilities.keys().collect();
     names.sort();
 
-    let mut snippet = String::new();
-    let mut static_bytes: usize = 0;
+    let mut result: Vec<(String, CapabilityInfo)> = Vec::new();
 
     for name in names {
         let cap = &capabilities[name];
@@ -458,14 +494,15 @@ fn build_modules_lowering(
         if cap.markers.is_empty() {
             errors.push(format!(
                 "[scripts.capabilities.{name}].markers est vide — cette capacité ne pourrait \
-                 jamais être déclenchée par aucun contenu éditorial"
+                 jamais être déclenchée, ni par aucun contenu éditorial (content.compute_js_deps), \
+                 ni par aucun template (scan statique)"
             ));
             continue;
         }
 
         let manifest_key = format!("{name}.js");
         let url = match assets.get(&manifest_key) {
-            Some(entry) => &entry.url,
+            Some(entry) => entry.url.clone(),
             None => {
                 errors.push(format!(
                     "'{name}' : clé '{manifest_key}' absente du manifeste d'assets — \
@@ -477,22 +514,15 @@ fn build_modules_lowering(
             }
         };
 
-        // Un seul <script type="module"> par capacité active : import ESM
-        // nommé, aliasé (évite toute collision — chaque `if` est un scope
-        // Rust distinct, `_n` n'entre jamais en conflit entre capacités),
-        // appelé immédiatement.
-        let html_snippet = format!(
-            r#"<script type="module">import{{{} as _n}}from{:?};_n();</script>"#,
-            cap.activation, url
-        );
-        static_bytes += html_snippet.len();
-
-        use std::fmt::Write as _;
-        writeln!(
-            snippet,
-            "if record.js_deps & {bit} != 0 {{ buf.push_str({html_snippet:?}); }}"
-        )
-        .unwrap();
+        result.push((
+            name.clone(),
+            CapabilityInfo {
+                bit,
+                activation: cap.activation.clone(),
+                url,
+                markers: cap.markers.clone(),
+            },
+        ));
     }
 
     if !errors.is_empty() {
@@ -502,10 +532,113 @@ fn build_modules_lowering(
         return Err(());
     }
 
-    Ok(ModulesLowering {
+    Ok(result)
+}
+
+/// Lowering `ModulesPlaceholder` POUR UN TEMPLATE DONNÉ — jamais un calcul
+/// global (contrairement à `validate_capabilities`). Croise la table
+/// canonique des capacités avec les classes détectées statiquement dans CE
+/// template (`extract_static_class_tokens`, fragment-forge, appliquée sur
+/// le flux déjà fusionné parent+enfant) et la présence ou non d'un
+/// `record` dans le générateur appelant.
+///
+/// INVARIANT GARANTI PAR CONSTRUCTION (addendum HANDOFF-js-deps-capacites-
+/// frontend-v2.md, « MARIUS_MODULES agrège deux sources ») : pour chaque
+/// capacité et chaque template, cette fonction produit AU PLUS UNE émission
+/// — jamais un test `if record.js_deps & BIT != 0 { ... }` en plus d'une
+/// émission déjà inconditionnelle. La présence statique domine
+/// systématiquement le besoin dynamique :
+///   - marqueur présent dans le HTML statique du template → émission
+///     inconditionnelle (`bit: None`, constant folding AOT — Forge sait
+///     déjà, à la compilation, que ce template en a besoin, quel que soit
+///     le record) ;
+///   - marqueur absent statiquement, `has_record = true` → émission
+///     conditionnelle (`bit: Some(BIT)`) — le besoin dépend du contenu
+///     éditorial de CE record précis, décidé à l'écriture par
+///     `content.compute_js_deps` ;
+///   - marqueur absent statiquement, `has_record = false` (`STATIC_PAGES`)
+///     → rien : ni test possible (pas de record), ni besoin structurel
+///     (sinon il serait présent statiquement dans le template).
+fn lower_modules_for_template(
+    capabilities: &[(String, CapabilityInfo)],
+    static_classes: &std::collections::HashSet<String>,
+    has_record: bool,
+) -> Vec<ModuleEmission> {
+    let mut out = Vec::new();
+
+    for (_, cap) in capabilities {
+        let static_hit = cap.markers.iter().any(|m| static_classes.contains(m));
+
+        // Un seul <script type="module"> par capacité active : import ESM
+        // nommé, aliasé (chaque `if`/bloc est un scope Rust distinct, `_n`
+        // n'entre jamais en conflit entre capacités), appelé immédiatement.
+        let html = format!(
+            r#"<script type="module">import{{{} as _n}}from{:?};_n();</script>"#,
+            cap.activation, cap.url
+        );
+
+        if static_hit {
+            out.push(ModuleEmission { html, bit: None });
+        } else if has_record {
+            out.push(ModuleEmission {
+                html,
+                bit: Some(cap.bit),
+            });
+        }
+        // else : STATIC_PAGES, marqueur absent statiquement — rien à
+        // émettre pour cette capacité sur ce template (doc ci-dessus).
+    }
+
+    out
+}
+
+/// Assemble les émissions en CODE RUST — Mode Page (`resolve_page_template`),
+/// pour insertion verbatim par `generate_aot_snippet`/`generate_segmented_snippet`.
+fn render_modules_as_rust(emissions: &[ModuleEmission]) -> ModulesLowering {
+    use std::fmt::Write as _;
+
+    let mut snippet = String::new();
+    let mut static_bytes = 0usize;
+
+    for e in emissions {
+        static_bytes += e.html.len();
+        match e.bit {
+            None => writeln!(snippet, "buf.push_str({:?});", e.html).unwrap(),
+            Some(bit) => writeln!(
+                snippet,
+                "if record.js_deps & {bit} != 0 {{ buf.push_str({:?}); }}",
+                e.html
+            )
+            .unwrap(),
+        }
+    }
+
+    ModulesLowering {
         snippet,
         static_bytes,
-    })
+    }
+}
+
+/// Assemble les émissions en HTML LITTÉRAL — `STATIC_PAGES`
+/// (`resolve_static_page`), jamais de code Rust généré pour ce pipeline.
+///
+/// `has_record = false` dans l'appel à `lower_modules_for_template` qui
+/// produit `emissions` garantit STRUCTURELLEMENT qu'aucune émission ici ne
+/// porte `bit: Some(_)` — le `assert!` ci-dessous défend cet invariant
+/// plutôt que de le supposer silencieusement : un `Some` rencontré ici
+/// serait un bug de câblage (mauvais `has_record` passé en amont), jamais
+/// un cas runtime légitime à absorber.
+fn render_modules_as_static_html(emissions: &[ModuleEmission]) -> String {
+    let mut html = String::new();
+    for e in emissions {
+        assert!(
+            e.bit.is_none(),
+            "DB-Forge : bit conditionnel rencontré pour une page STATIC_PAGES — bug de \
+             câblage (has_record aurait dû valoir false dans lower_modules_for_template)"
+        );
+        html.push_str(&e.html);
+    }
+    html
 }
 
 // =============================================================================
@@ -949,7 +1082,7 @@ fn resolve_page_template<'src>(
     varlena: &[VarlenField],
     child_src: &'src str,
     child_extends: &'src str,
-    modules_lowering: &ModulesLowering,
+    capabilities: &[(String, CapabilityInfo)],
 ) -> Result<(String, TemplateMetrics), ()> {
     let parent_path = PathBuf::from(relative_path_for_include_str(manifest_dir, child_extends));
 
@@ -1078,14 +1211,20 @@ fn resolve_page_template<'src>(
         }
     };
 
-    // MARIUS_MODULES — lowering systématique, jamais conditionnel au
-    // nombre de capacités actives (contrairement au hoisting de scripts
-    // ci-dessus) : `base.marius` porte ce marqueur en permanence
-    // (décision de session), son absence signale une corruption du
-    // layout, pas une simple absence de contenu à hisser. Un
-    // `ModulesLowering.snippet` vide est un cas normal (0 capacité
-    // déclarée dans ce build) qui se traduit par un token présent, mais
-    // lowerisant vers zéro octet — jamais une raison de sauter le splice.
+    // MARIUS_MODULES — lowering PAR TEMPLATE (addendum « MARIUS_MODULES
+    // agrège deux sources » — scan statique des Static tokens de CE flux
+    // déjà fusionné parent+enfant, croisé avec record.js_deps). Jamais
+    // conditionnel au nombre de capacités actives (contrairement au
+    // hoisting de scripts ci-dessus) : `base.marius` porte ce marqueur en
+    // permanence, son absence signale une corruption du layout, pas une
+    // simple absence de contenu à hisser. Un snippet vide (0 capacité
+    // concerne ce template) est un cas normal qui se traduit par un token
+    // présent, mais lowerisant vers zéro octet — jamais une raison de
+    // sauter le splice.
+    let static_classes = extract_static_class_tokens(&tokens);
+    let emissions = lower_modules_for_template(capabilities, &static_classes, true);
+    let modules_lowering = render_modules_as_rust(&emissions);
+
     let mut tokens = match split_static_at_marker(tokens, MODULES_PLACEHOLDER) {
         Some((mut tokens, splice_index)) => {
             tokens.insert(splice_index, FlatPageToken::ModulesPlaceholder);
@@ -1190,14 +1329,20 @@ fn resolve_page_template<'src>(
 ///  3. `emit_static_html` remplace `generate_aot_snippet` — sortie HTML
 ///     directe, aucun code Rust généré, aucune fonction `render()`
 ///     compilée dans le binaire pour ces pages.
-///  4. `ModulesPlaceholder` (MARIUS_MODULES) est tout de même splicé ici,
-///     comme dans `resolve_page_template` — mais `emit_static_html` s'en
-///     acquitte en émettant zéro octet. Ce n'est pas une exception au
-///     point 2 ci-dessus : l'ensemble des capacités js_deps d'une page
-///     SANS `record` est, PAR DÉFINITION, l'ensemble vide — comportement
-///     normal du lowering dans ce pipeline, jamais un no-op accidentel ni
-///     une raison de faire échouer `emit_static_html` (addendum Option A,
-///     HANDOFF-js-deps-capacites-frontend-v2.md).
+///  4. `ModulesPlaceholder` (MARIUS_MODULES) est splicé ici comme dans
+///     `resolve_page_template`, et PEUT désormais émettre un contenu réel —
+///     précision apportée après coup à l'addendum Option A d'origine
+///     (HANDOFF-js-deps-capacites-frontend-v2.md, « MARIUS_MODULES agrège
+///     deux sources ») : Option A ne concernait que la partie DYNAMIQUE
+///     (`record.js_deps`, par définition vide sans `record` — ça reste
+///     vrai, `has_record = false` ci-dessous). La partie STATIQUE (scan des
+///     marqueurs `class` en dur dans le HTML du layout/template lui-même)
+///     est, elle, parfaitement calculable même sans `record` — si
+///     `base.marius`/`offline.marius` porte un marqueur statiquement,
+///     `emit_static_html` DOIT l'émettre. Ce n'était pas une exception au
+///     point 2 ci-dessus à l'origine, ça ne l'est toujours pas : le
+///     garde-fou `SchemaIndex` vide protège le DYNAMIQUE, jamais le
+///     STATIQUE.
 ///
 /// Mode Page exigé explicitement (`detect_extends` doit être vrai) : les
 /// pages de `STATIC_PAGES` connues à ce jour héritent toutes d'un layout
@@ -1211,6 +1356,7 @@ fn resolve_static_page(
     assets: &HashMap<String, AssetEntry>,
     schema: &str,
     table: &str,
+    capabilities: &[(String, CapabilityInfo)],
 ) -> Result<String, ()> {
     let template_path: PathBuf = Path::new(manifest_dir)
         .join("templates")
@@ -1333,12 +1479,18 @@ fn resolve_static_page(
     };
 
     // MARIUS_MODULES — même splice systématique que resolve_page_template
-    // (base.marius le porte en permanence), mais AUCUNE dépendance à
-    // ModulesLowering ici : l'ensemble des capacités js_deps d'une page
-    // sans `record` est par définition vide (point 4 de la doc ci-dessus,
-    // addendum Option A) — `resolve_and_measure` reçoit `0` en dur,
-    // `emit_static_html` émet zéro octet pour ce token, indépendamment de
-    // ce que d'autres pages du même build déclarent.
+    // (base.marius le porte en permanence). PRÉCISION (addendum
+    // « MARIUS_MODULES agrège deux sources », suite à Option A) : la partie
+    // DYNAMIQUE reste par définition vide ici (aucun `record`, `has_record
+    // = false` ci-dessous) — Option A n'a jamais concerné la partie
+    // STATIQUE, elle, parfaitement calculable même sans `record`. Si
+    // `base.marius`/`offline.marius` contient un marqueur en dur, il DOIT
+    // s'émettre ici aussi.
+    let static_classes = extract_static_class_tokens(&tokens);
+    let emissions = lower_modules_for_template(capabilities, &static_classes, false);
+    let static_html_modules = render_modules_as_static_html(&emissions);
+    let modules_static_bytes: usize = emissions.iter().map(|e| e.html.len()).sum();
+
     let mut tokens = match split_static_at_marker(tokens, MODULES_PLACEHOLDER) {
         Some((mut tokens, splice_index)) => {
             tokens.insert(splice_index, FlatPageToken::ModulesPlaceholder);
@@ -1381,7 +1533,7 @@ fn resolve_static_page(
         &schema_index,
         get_file_size,
         resolve_asset_len,
-        0, // capacités js_deps par définition vides — aucun record ici
+        modules_static_bytes,
     )
     .map_err(|errors| {
         println!(
@@ -1390,7 +1542,14 @@ fn resolve_static_page(
         );
     })?;
 
-    emit_static_html(&tokens, manifest_dir, schema, table, resolve_asset_url)
+    emit_static_html(
+        &tokens,
+        manifest_dir,
+        schema,
+        table,
+        resolve_asset_url,
+        &static_html_modules,
+    )
 }
 
 /// Tente de résoudre le template `.marius` d'une table via le pipeline
@@ -1435,7 +1594,7 @@ fn resolve_template(
     table: &str,
     fixed: &[marius_fragment_forge::FieldSpec],
     varlena: &[VarlenField],
-    modules_lowering: &ModulesLowering,
+    capabilities: &[(String, CapabilityInfo)],
 ) -> Result<Option<(String, TemplateMetrics)>, ()> {
     let template_path: PathBuf = Path::new(manifest_dir)
         .join("templates")
@@ -1489,7 +1648,7 @@ fn resolve_template(
             varlena,
             &src,
             child_extends,
-            modules_lowering,
+            capabilities,
         )?;
         return Ok(Some((body, metrics)));
     }
@@ -1532,11 +1691,10 @@ fn resolve_template(
         get_file_size,
         resolve_asset_len,
         // Fragment isolé, jamais de <head>, jamais de marqueur
-        // MODULES_PLACEHOLDER dans ce flux — 0 en dur, pas
-        // `modules_lowering.static_bytes` (qui n'a ici aucune raison
-        // d'être consulté ; ce paramètre de fonction n'existe que pour le
-        // forward vers `resolve_page_template` dans la branche `extends`
-        // ci-dessus).
+        // MODULES_PLACEHOLDER dans ce flux — 0 en dur, `capabilities` n'a
+        // ici aucune raison d'être consulté (ce paramètre de fonction
+        // n'existe que pour le forward vers `resolve_page_template` dans la
+        // branche `extends` ci-dessus).
         0,
     )
     .map_err(|errors| {
@@ -2072,10 +2230,7 @@ mod tests_phase_6_6_full_pipeline {
         .expect("écriture de la fixture enfant");
 
         let manifest_dir_str = manifest_dir.to_string_lossy().into_owned();
-        let modules_lowering = super::ModulesLowering {
-            snippet: String::new(),
-            static_bytes: 0,
-        };
+        let capabilities: Vec<(String, super::CapabilityInfo)> = Vec::new();
         let result = super::resolve_template(
             &manifest_dir_str,
             &std::collections::HashMap::new(),
@@ -2083,7 +2238,7 @@ mod tests_phase_6_6_full_pipeline {
             "post",
             &[],
             &[],
-            &modules_lowering,
+            &capabilities,
         );
 
         assert!(
@@ -2118,12 +2273,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     });
 
-    // Lecture unique du lowering js_deps — les capacités sont globales
-    // (theme.toml + scripts_registry.lock), jamais recalculées par
-    // composant. Avant la boucle STATIC_PAGES, pour la même raison que
+    // Validation unique de la table canonique des capacités — les capacités
+    // sont globales (theme.toml + scripts_registry.lock), jamais recalculées
+    // par composant. Avant la boucle STATIC_PAGES, pour la même raison que
     // load_asset_manifest ci-dessus : fait échouer le build sur ce point
-    // précis avant toute tentative de connexion Postgres.
-    let modules_lowering = build_modules_lowering(&manifest_dir, &assets).unwrap_or_else(|()| {
+    // précis avant toute tentative de connexion Postgres. Le lowering PAR
+    // TEMPLATE (scan statique + croisement avec record.js_deps) est fait
+    // plus loin, une fois par composant/page — jamais ici.
+    let capabilities = validate_capabilities(&manifest_dir, &assets).unwrap_or_else(|()| {
         std::process::exit(1);
     });
 
@@ -2137,8 +2294,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // avait un problème ici.
     let theme_build_dir = build_dir(&manifest_dir);
     for (schema, table) in STATIC_PAGES {
-        let html =
-            resolve_static_page(&manifest_dir, &assets, schema, table).unwrap_or_else(|()| {
+        let html = resolve_static_page(&manifest_dir, &assets, schema, table, &capabilities)
+            .unwrap_or_else(|()| {
                 // cargo:error déjà émis par resolve_static_page — arrêt
                 // immédiat, même discipline que pour les templates pilotés par
                 // fetch_component_list plus bas.
@@ -2162,7 +2319,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // marius-assets. L'URL publique (`/offline.html`, non hachée —
         // décision de session, page de routage, pas une sous-ressource)
         // reste un littéral écrit à la main là où elle est référencée
-        // (`OFFLINE_URL` dans `service-worker.js`), jamais résolue via ce
+        // (`OFFLINE_URL` dans `serviceWorker.js`), jamais résolue via ce
         // manifeste.
         println!(
             "cargo:warning=DB-Forge [{schema}.{table}] : page statique -> {}",
@@ -2235,7 +2392,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &comp.table,
             &field_specs,
             &varlena,
-            &modules_lowering,
+            &capabilities,
         )
         .unwrap_or_else(|()| {
             // cargo:error déjà émis par resolve_template — arrêt immédiat.

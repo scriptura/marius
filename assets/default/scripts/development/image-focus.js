@@ -143,7 +143,7 @@ export const decorateTargets = () => {
 /**
  * Initialisation globale (Méthode idempotente)
  */
-export const init = () => {
+export const initImageFocusSystem = () => {
 	bootstrapSystem();
 	decorateTargets();
 
