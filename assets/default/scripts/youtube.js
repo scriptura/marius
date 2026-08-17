@@ -22,8 +22,9 @@
  * INV-3  Zéro listener par instance. Un listener click global délégué
  *        sur document résout l'action via data-action + data-entity-id.
  *
- * INV-4  AbortController par entité. Un seul abort() annule le fetch
- *        en cours ET invalide le listener d'interaction.
+ * INV-4  AbortController par entité. Le signal est transmis au fetch
+ *        de l'entité afin de permettre son annulation si son cycle de vie
+ *        est interrompu par un mécanisme externe.
  *
  * INV-5  dataStore est la source de vérité. Le DOM ne contient aucune
  *        donnée : ni titre, ni URL, ni état de lecture.
@@ -70,14 +71,23 @@
  *
  * ─────────────────────────────────────────────────────────────────────────
  *
- * ARB-3  ABORT CONTROLLER : USAGE DOUBLE
+ * ARB-3  ABORT CONTROLLERS : FETCH ET LISTENER GLOBAL
  *
- *   Un seul AbortController par entité couvre deux usages distincts :
- *     a. fetch : signal passé en option à fetch(), annulé si dispose()
- *        est appelé avant la résolution.
- *     b. listeners : signal passé à addEventListener(), invalide le
- *        listener global délégué si l'entité est détruite.
- *   Un seul abort() suffit à nettoyer les deux. Pas de sur-allocation.
+ *   Deux AbortController distincts sont utilisés pour deux cycles de vie
+ *   différents :
+ *
+ *     a. Un AbortController par entité :
+ *        son signal est transmis au fetch de l'entité. Il est stocké dans
+ *        dataStore[id]._ac avec les données de l'entité.
+ *
+ *     b. Un AbortController global pour InputSystem :
+ *        son signal est transmis au listener click délégué sur document.
+ *        InputSystem.dispose() invalide ce listener global.
+ *
+ *   Les deux contrôleurs ne sont volontairement pas partagés :
+ *   l'annulation d'un fetch d'entité ne doit pas affecter le listener global,
+ *   et la destruction du listener global ne doit pas modifier les fetchs
+ *   des autres entités.
  *
  * ─────────────────────────────────────────────────────────────────────────
  *
@@ -157,9 +167,11 @@ const dispatch = (entityId, type) => _commandBuffer.push({ entityId, type });
 const _commands = {
 	PLAY(entityId) {
 		const data = dataStore[entityId];
+
 		// Guard : transition PLAYING uniquement depuis READY.
 		// Protège contre le double-clic et les commandes parasites.
 		if (data?.status !== STATE.READY) return;
+
 		data.status = STATE.PLAYING;
 		UIRenderSystem.renderIframe(entityId);
 	},
@@ -167,10 +179,12 @@ const _commands = {
 
 const _flushCommands = () => {
 	const len = _commandBuffer.length;
+
 	for (let i = 0; i < len; i++) {
 		const { entityId, type } = _commandBuffer[i];
 		_commands[type]?.(entityId);
 	}
+
 	_commandBuffer.splice(0, len);
 };
 
@@ -193,15 +207,19 @@ const FetchSystem = {
 				data.title = json.title;
 				data.thumbUrl = json.thumbnail_url;
 				data.status = STATE.READY;
+
 				UIRenderSystem.renderThumb(entityId);
 			})
 			.catch((err) => {
-				// AbortError = dispose() appelé pendant le fetch : pas d'erreur UI.
+				// AbortError = fetch annulé pendant son cycle de vie :
+				// aucune erreur UI ne doit être rendue.
 				if (err.name === "AbortError") return;
+
 				console.error(
 					`[YouTubeECS] Fetch échoué pour l'entité ${entityId} (id: ${data.id})`,
 					err,
 				);
+
 				data.status = STATE.ERROR;
 				UIRenderSystem.renderError(entityId);
 			});
@@ -266,7 +284,7 @@ const UIRenderSystem = {
 // ── 7. InputSystem ─────────────────────────────────────────────────────
 //  Un seul listener click sur document (INV-3).
 //  Résolution : e.target → [data-action] → [data-entity-id] → dispatch().
-//  Signal AbortController global : invalidé par InputSystem.dispose().
+//  Son AbortController est indépendant de ceux des entités (ARB-3).
 
 const InputSystem = {
 	_ac: null,
@@ -274,6 +292,7 @@ const InputSystem = {
 	init() {
 		const ac = new AbortController();
 		InputSystem._ac = ac;
+
 		document.addEventListener("click", InputSystem._route, {
 			signal: ac.signal,
 		});
@@ -282,8 +301,10 @@ const InputSystem = {
 	_route(e) {
 		const btn = e.target.closest("[data-action]");
 		if (!btn) return;
+
 		const wrap = btn.closest("[data-entity-id]");
 		if (!wrap) return;
+
 		dispatch(+wrap.dataset.entityId, btn.dataset.action);
 		_flushCommands();
 	},
@@ -293,41 +314,30 @@ const InputSystem = {
 	},
 };
 
-// ── 8. dispose ─────────────────────────────────────────────────────────
-//  Nettoyage complet d'une entité.
-//  abort() annule le fetch en cours ET invalide le listener (ARB-3).
-//  Retrait du DOM avant purge des stores (même ordre que mediaPlayer.js).
-/*
-const disposeEntity = (entityId) => {
-	dataStore[entityId]?._ac.abort();
-	domStore[entityId]?.thumbnail?.remove();
-	domStore[entityId]?.iframe?.remove();
-	delete dataStore[entityId];
-	delete domStore[entityId];
-};
-*/
-
-// ── 9. Compteur module-scope ───────────────────────────────────────────
+// ── 8. Compteur module-scope ───────────────────────────────────────────
 //  Survit à plusieurs appels bootstrap(). Garantit l'unicité des entityIds.
 
 let _nextEntityId = 0;
 
-// ── 10. bootstrap ──────────────────────────────────────────────────────
+// ── 9. bootstrap ──────────────────────────────────────────────────────
 //  Point d'entrée public. container permet d'isoler le scope de découverte.
 //  Guard _mediaIndex-équivalent : dataset.ytEntityId évite la double-init
 //  du même élément DOM lors d'appels bootstrap() successifs (ex: AJAX).
+//
+//  L'initialisation est explicitement pilotée par l'orchestrateur AOT.
+//  Le module ne déclenche aucun bootstrap automatique au chargement.
 
 export const bootstrap = (container = document) => {
 	const elements = container.querySelectorAll(".video-youtube");
 
 	for (const el of elements) {
-		if (el.dataset.ytEntityId !== undefined) continue; // guard idempotence
+		if (el.dataset.ytEntityId !== undefined) continue;
 
 		const videoId = el.dataset.id;
 		if (!videoId) continue;
 
 		const entityId = _nextEntityId++;
-		el.dataset.ytEntityId = entityId; // sceau d'init sur l'élément source
+		el.dataset.ytEntityId = entityId;
 
 		dataStore[entityId] = {
 			id: videoId,
@@ -337,6 +347,7 @@ export const bootstrap = (container = document) => {
 			status: STATE.PENDING,
 			_ac: new AbortController(),
 		};
+
 		domStore[entityId] = {
 			container: el,
 			thumbnail: null,
@@ -346,8 +357,8 @@ export const bootstrap = (container = document) => {
 		FetchSystem.fetch(entityId);
 	}
 
-	// InputSystem.init() est idempotent via AbortController :
-	// un second bootstrap() ne double pas le listener.
+	// InputSystem.init() est idempotent :
+	// un second bootstrap() ne double pas le listener global.
 	if (!InputSystem._ac) InputSystem.init();
 };
 

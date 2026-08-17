@@ -11,38 +11,37 @@ version = "1.0.0"
 [styles]
 # Liste plate des points d'entrée. 
 # Le compilateur va lire ces fichiers, résoudre leurs @import internes, et générer les artéfacts.
-entries = ["styles/development/main.mcss", "styles/development/print.mcss"]
-
-[scripts.components]
-# Dictionnaire (HashMap) : Cible -> Dossier Source.
-# Spécification §10.4.1 : un dossier = une cible de concaténation.
-# Le compilateur concatène le contenu du dossier et génère /scripts/<cible>.<hash>.js.
-main = "scripts/development/main.js"
+entries = ["styles/main.mcss", "styles/print.mcss"]
 
 [scripts.capabilities.disclosure]
-entry = "scripts/development/disclosure.js"
+entry = "scripts/disclosure.js"
 markers = ["tabs", "accordion"]
 activation = "initDisclosureSystem"
 
 [scripts.capabilities.map]
-entry = "scripts/development/map.js"
+entry = "scripts/map.js"
 markers = ["map"]
 activation = "initMapsSystem"
 
 [scripts.capabilities.line-mark]
-entry = "scripts/development/line-mark.js"
+entry = "scripts/line-mark.js"
 markers = ["add-line-marks"]
 activation = "boot"
 
 [scripts.capabilities.image-focus]
-entry = "scripts/development/image-focus.js"
+entry = "scripts/image-focus.js"
 markers = ["figure-image-focus"]
 activation = "initImageFocusSystem"
 
 [scripts.capabilities.youtube]
-entry = "scripts/development/youtube.js"
+entry = "scripts/youtube.js"
 markers = ["video-youtube"]
 activation = "bootstrap"
+
+[scripts.capabilities.range]
+entry = "scripts/range.js"
+markers = ["range", "range-multithumb"]
+activation = "initSliders"
 
 [sprites]
 # Dictionnaire (HashMap) : Nom du Sprite -> Dossier Source.
@@ -57,7 +56,7 @@ entry = "manifest.webmanifest"
 # Handoff §3 — point d'entrée unique, à la racine du thème, même
 # convention que [webmanifest].entry. À corriger si service-worker.js vit
 # ailleurs dans votre arborescence réelle.
-entry = "scripts/development/service-worker.js"
+entry = "scripts/service-worker.js"
 
 # ==========================================
 # Pipelines de copie (Zéro-Transformation)

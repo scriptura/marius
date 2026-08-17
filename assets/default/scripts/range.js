@@ -174,21 +174,17 @@ export const mountSlider = (container) => {
 };
 
 /**
- * Scanne le DOM et monte tous les sliders trouvés.
+ * Scanne le DOM, monte tous les sliders trouvés et attache les écouteurs d'événements globaux.
  * Idéal pour l'initialisation bootstrap ou les transitions de vue.
  */
-export const mountAllSliders = () => {
+export const initSliders = () => {
+	// Monte tous les sliders existants
 	document.querySelectorAll(".range, .range-multithumb").forEach(mountSlider);
-};
 
-/**
- * Attache les écouteurs d'événements globaux.
- * Découplé du chargement du module pour éviter les effets de bord inattendus.
- */
-export const setupSliderEvents = () => {
-	if (isEventSystemMounted) return;
-
-	document.addEventListener("input", handleInput);
-	document.addEventListener("change", handleInput);
-	isEventSystemMounted = true;
+	// Attache les écouteurs d'événements globaux (une seule fois)
+	if (!isEventSystemMounted) {
+		document.addEventListener("input", handleInput);
+		document.addEventListener("change", handleInput);
+		isEventSystemMounted = true;
+	}
 };

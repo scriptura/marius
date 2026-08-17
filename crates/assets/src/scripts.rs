@@ -849,8 +849,8 @@ mod tests {
         let sandbox = std::env::temp_dir().join("marius-assets-test-scripts-ok");
         let theme_dir = sandbox.join("theme");
         let build_root = sandbox.join("build");
-        let main_dir = theme_dir.join("scripts/development/main");
-        let more_dir = theme_dir.join("scripts/development/more");
+        let main_dir = theme_dir.join("scripts/main");
+        let more_dir = theme_dir.join("scripts/more");
         fs::create_dir_all(&main_dir).unwrap();
         fs::create_dir_all(&more_dir).unwrap();
         fs::create_dir_all(&build_root).unwrap();
@@ -879,14 +879,8 @@ mod tests {
         );
 
         let mut components = HashMap::new();
-        components.insert(
-            "main".to_string(),
-            "scripts/development/main/index.js".to_string(),
-        );
-        components.insert(
-            "more".to_string(),
-            "scripts/development/more/index.js".to_string(),
-        );
+        components.insert("main".to_string(), "scripts/main/index.js".to_string());
+        components.insert("more".to_string(), "scripts/more/index.js".to_string());
 
         let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
 
@@ -958,7 +952,7 @@ mod tests {
         let sandbox = std::env::temp_dir().join("marius-assets-test-scripts-missing");
         let theme_dir = sandbox.join("theme");
         let build_root = sandbox.join("build");
-        let dir = theme_dir.join("scripts/development/main");
+        let dir = theme_dir.join("scripts/main");
         fs::create_dir_all(&dir).unwrap();
         fs::create_dir_all(&build_root).unwrap();
 
@@ -966,10 +960,7 @@ mod tests {
 
         let registry = AssetUrlRegistry::new(); // vide : rien à trouver
         let mut components = HashMap::new();
-        components.insert(
-            "main".to_string(),
-            "scripts/development/main/index.js".to_string(),
-        );
+        components.insert("main".to_string(), "scripts/main/index.js".to_string());
         let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
 
         let result = run_scripts_pipeline(

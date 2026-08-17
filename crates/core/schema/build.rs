@@ -118,8 +118,17 @@ struct CapabilityInfo {
 /// `bit: Some(BIT)` — émission CONDITIONNELLE : marqueur absent
 /// statiquement, dépend de `record.js_deps` — n'existe jamais pour un
 /// appelant sans `record`.
+///
+/// Composants BRUTS (`activation`/`url`), jamais une balise `<script>`
+/// pré-assemblée — c'est `render_modules_as_rust`/
+/// `render_modules_as_static_html` qui décident du regroupement final
+/// (un seul `<script type="module">` par page, HANDOFF-js-deps-capacites-
+/// frontend-v2.md, addendum « regroupement des modules »). L'alias
+/// d'import (`_0`, `_1`, ...) est assigné à l'assemblage, par position
+/// dans la liste — jamais porté ici.
 struct ModuleEmission {
-    html: String,
+    activation: String,
+    url: String,
     bit: Option<i64>,
 }
 
@@ -129,16 +138,23 @@ struct ModuleEmission {
 /// (`render_modules_as_static_html`, pas de code Rust généré pour
 /// `STATIC_PAGES`).
 struct ModulesLowering {
-    /// Code Rust déjà assemblé pour CE template — une ligne par capacité
-    /// concernée : `buf.push_str(...)` inconditionnel (marqueur détecté
-    /// statiquement) ou `if record.js_deps & BIT != 0 { buf.push_str(...); }`
-    /// (marqueur absent statiquement, dépend du record). Chaîne vide si
-    /// aucune capacité ne concerne ce template.
+    /// Code Rust déjà assemblé pour CE template — AU PLUS UN
+    /// `<script type="module">` regroupant tous les imports (dans l'ordre
+    /// des capacités), puis tous les appels d'activation (même ordre).
+    /// Chaque import/appel individuel reste `buf.push_str(...)`
+    /// inconditionnel (marqueur détecté statiquement) ou
+    /// `if record.js_deps & BIT != 0 { buf.push_str(...); }` (marqueur
+    /// absent statiquement, dépend du record) ; la balise `<script>`
+    /// elle-même est soit garantie présente (au moins une capacité
+    /// statique), soit enveloppée dans un test global sur le OU binaire de
+    /// tous les bits concernés (aucune capacité statique — jamais de
+    /// `<script></script>` vide). Chaîne vide si aucune capacité ne
+    /// concerne ce template.
     snippet: String,
-    /// Somme des octets des snippets HTML RÉELLEMENT concernés par ce
-    /// template (inconditionnels + pire cas des tests dynamiques) — jamais
-    /// les capacités qui ne concernent pas du tout ce template (exclues en
-    /// amont par `lower_modules_for_template`, jamais comptées ici).
+    /// Pire cas d'octets pour CE template — deux balises d'enveloppe
+    /// (présentes une seule fois, jamais par capacité) + somme de tous les
+    /// imports/appels RÉELLEMENT concernés par ce template (exclus en
+    /// amont par `lower_modules_for_template`, jamais comptés ici).
     static_bytes: usize,
 }
 
@@ -569,19 +585,16 @@ fn lower_modules_for_template(
     for (_, cap) in capabilities {
         let static_hit = cap.markers.iter().any(|m| static_classes.contains(m));
 
-        // Un seul <script type="module"> par capacité active : import ESM
-        // nommé, aliasé (chaque `if`/bloc est un scope Rust distinct, `_n`
-        // n'entre jamais en conflit entre capacités), appelé immédiatement.
-        let html = format!(
-            r#"<script type="module">import{{{} as _n}}from{:?};_n();</script>"#,
-            cap.activation, cap.url
-        );
-
         if static_hit {
-            out.push(ModuleEmission { html, bit: None });
+            out.push(ModuleEmission {
+                activation: cap.activation.clone(),
+                url: cap.url.clone(),
+                bit: None,
+            });
         } else if has_record {
             out.push(ModuleEmission {
-                html,
+                activation: cap.activation.clone(),
+                url: cap.url.clone(),
                 bit: Some(cap.bit),
             });
         }
@@ -594,23 +607,116 @@ fn lower_modules_for_template(
 
 /// Assemble les émissions en CODE RUST — Mode Page (`resolve_page_template`),
 /// pour insertion verbatim par `generate_aot_snippet`/`generate_segmented_snippet`.
+///
+/// REGROUPEMENT (HANDOFF-js-deps-capacites-frontend-v2.md, addendum
+/// « regroupement des modules ») : un seul `<script type="module">` au
+/// maximum par page — tous les `import` d'abord, tous les appels
+/// d'activation ensuite (spec §3 : contrainte d'ordre à l'intérieur du
+/// bloc). Alias `_0`, `_1`, ... séquentiels, assignés par POSITION dans
+/// `emissions` (ordre déjà déterministe, hérité de `CapabilityInfo` —
+/// jamais un parcours de `HashMap`), locaux à ce bloc, jamais stables
+/// entre deux pages.
+///
+/// La présence même du `<script>` dépend de la composition de `emissions` :
+///   - au moins une émission `bit: None` (capacité statique) → le tag est
+///     GARANTI présent (constant folding — Forge sait, à la compilation,
+///     qu'au moins un import sera toujours émis pour ce template) : pas de
+///     test enveloppe, seuls les imports/appels individuellement
+///     conditionnels (`bit: Some`) restent testés un par un ;
+///   - aucune émission statique, uniquement des `bit: Some(_)` → la
+///     présence du tag dépend du runtime : enveloppé dans
+///     `if record.js_deps & MASK != 0 { ... }` où `MASK` est le OU binaire
+///     de tous les bits concernés — jamais un `<script></script>` vide si
+///     aucun bit de `MASK` n'est actif ;
+///   - `emissions` vide → rien émis, `snippet` reste `""`.
 fn render_modules_as_rust(emissions: &[ModuleEmission]) -> ModulesLowering {
     use std::fmt::Write as _;
 
-    let mut snippet = String::new();
-    let mut static_bytes = 0usize;
+    if emissions.is_empty() {
+        return ModulesLowering {
+            snippet: String::new(),
+            static_bytes: 0,
+        };
+    }
 
-    for e in emissions {
-        static_bytes += e.html.len();
+    const OPEN: &str = "<script type=\"module\">";
+    const CLOSE: &str = "</script>";
+
+    // Une pièce (import + appel) par émission, alias assigné par position —
+    // calculée une fois, réutilisée pour le corps ET pour le pire cas de
+    // capacité (jamais recalculée deux fois).
+    struct Piece {
+        import: String,
+        call: String,
+        bit: Option<i64>,
+    }
+
+    let mut pieces: Vec<Piece> = Vec::with_capacity(emissions.len());
+    let mut has_static = false;
+    let mut dynamic_mask: i64 = 0;
+
+    for (i, e) in emissions.iter().enumerate() {
+        let import = format!("import{{{} as _{i}}}from{:?};", e.activation, e.url);
+        let call = format!("_{i}();");
         match e.bit {
-            None => writeln!(snippet, "buf.push_str({:?});", e.html).unwrap(),
-            Some(bit) => writeln!(
-                snippet,
-                "if record.js_deps & {bit} != 0 {{ buf.push_str({:?}); }}",
-                e.html
-            )
-            .unwrap(),
+            None => has_static = true,
+            Some(bit) => dynamic_mask |= bit,
         }
+        pieces.push(Piece {
+            import,
+            call,
+            bit: e.bit,
+        });
+    }
+
+    // Pire cas de capacité : TOUTES les pièces émises simultanément (jamais
+    // une hypothèse d'exclusivité mutuelle entre bits) + les deux balises
+    // d'enveloppe, présentes une seule fois quel que soit le nombre de
+    // capacités.
+    let static_bytes = OPEN.len()
+        + CLOSE.len()
+        + pieces
+            .iter()
+            .map(|p| p.import.len() + p.call.len())
+            .sum::<usize>();
+
+    let mut snippet = String::new();
+
+    // Corps commun aux deux cas (tag garanti vs tag conditionnel) — évite
+    // de dupliquer la boucle d'assemblage des imports/appels.
+    let emit_body = |snippet: &mut String| {
+        writeln!(snippet, "buf.push_str({OPEN:?});").unwrap();
+        for p in &pieces {
+            match p.bit {
+                None => writeln!(snippet, "buf.push_str({:?});", p.import).unwrap(),
+                Some(bit) => writeln!(
+                    snippet,
+                    "if record.js_deps & {bit} != 0 {{ buf.push_str({:?}); }}",
+                    p.import
+                )
+                .unwrap(),
+            }
+        }
+        for p in &pieces {
+            match p.bit {
+                None => writeln!(snippet, "buf.push_str({:?});", p.call).unwrap(),
+                Some(bit) => writeln!(
+                    snippet,
+                    "if record.js_deps & {bit} != 0 {{ buf.push_str({:?}); }}",
+                    p.call
+                )
+                .unwrap(),
+            }
+        }
+        writeln!(snippet, "buf.push_str({CLOSE:?});").unwrap();
+    };
+
+    if has_static {
+        emit_body(&mut snippet);
+    } else {
+        writeln!(snippet, "if record.js_deps & {dynamic_mask} != 0 {{").unwrap();
+        emit_body(&mut snippet);
+        writeln!(snippet, "}}").unwrap();
     }
 
     ModulesLowering {
@@ -622,23 +728,283 @@ fn render_modules_as_rust(emissions: &[ModuleEmission]) -> ModulesLowering {
 /// Assemble les émissions en HTML LITTÉRAL — `STATIC_PAGES`
 /// (`resolve_static_page`), jamais de code Rust généré pour ce pipeline.
 ///
-/// `has_record = false` dans l'appel à `lower_modules_for_template` qui
-/// produit `emissions` garantit STRUCTURELLEMENT qu'aucune émission ici ne
-/// porte `bit: Some(_)` — le `assert!` ci-dessous défend cet invariant
-/// plutôt que de le supposer silencieusement : un `Some` rencontré ici
-/// serait un bug de câblage (mauvais `has_record` passé en amont), jamais
-/// un cas runtime légitime à absorber.
+/// Même regroupement que `render_modules_as_rust` (un seul `<script>`,
+/// imports puis appels, alias séquentiels par position), mais TOUJOURS
+/// inconditionnel ici : `has_record = false` dans l'appel à
+/// `lower_modules_for_template` qui produit `emissions` garantit
+/// STRUCTURELLEMENT qu'aucune émission ne porte `bit: Some(_)` — le
+/// `assert!` ci-dessous défend cet invariant plutôt que de le supposer
+/// silencieusement : un `Some` rencontré ici serait un bug de câblage
+/// (mauvais `has_record` passé en amont), jamais un cas runtime légitime.
 fn render_modules_as_static_html(emissions: &[ModuleEmission]) -> String {
-    let mut html = String::new();
+    if emissions.is_empty() {
+        return String::new();
+    }
+
     for e in emissions {
         assert!(
             e.bit.is_none(),
             "DB-Forge : bit conditionnel rencontré pour une page STATIC_PAGES — bug de \
              câblage (has_record aurait dû valoir false dans lower_modules_for_template)"
         );
-        html.push_str(&e.html);
     }
+
+    let mut html = String::from("<script type=\"module\">");
+    for (i, e) in emissions.iter().enumerate() {
+        html.push_str(&format!(
+            "import{{{} as _{i}}}from{:?};",
+            e.activation, e.url
+        ));
+    }
+    for (i, _) in emissions.iter().enumerate() {
+        html.push_str(&format!("_{i}();"));
+    }
+    html.push_str("</script>");
     html
+}
+
+#[cfg(test)]
+mod tests_module_grouping {
+    use super::*;
+
+    fn cap(
+        name: &str,
+        bit: i64,
+        activation: &str,
+        url: &str,
+        markers: &[&str],
+    ) -> (String, CapabilityInfo) {
+        (
+            name.to_string(),
+            CapabilityInfo {
+                bit,
+                activation: activation.to_string(),
+                url: url.to_string(),
+                markers: markers.iter().map(|s| s.to_string()).collect(),
+            },
+        )
+    }
+
+    // ── lower_modules_for_template + render_modules_as_rust (Mode Page) ────
+
+    #[test]
+    fn zero_capability_emits_no_script() {
+        let capabilities: Vec<(String, CapabilityInfo)> = vec![];
+        let static_classes = std::collections::HashSet::new();
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let lowering = render_modules_as_rust(&emissions);
+
+        assert!(emissions.is_empty());
+        assert_eq!(lowering.snippet, "");
+        assert_eq!(lowering.static_bytes, 0);
+    }
+
+    #[test]
+    fn single_dynamic_capability_wraps_single_script_conditionally() {
+        let capabilities = vec![cap(
+            "map",
+            2,
+            "initMapsSystem",
+            "/scripts/map.HASH.js",
+            &["map"],
+        )];
+        let static_classes = std::collections::HashSet::new(); // aucun marqueur statique
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        assert_eq!(emissions.len(), 1);
+        assert_eq!(emissions[0].bit, Some(2));
+
+        let lowering = render_modules_as_rust(&emissions);
+        assert_eq!(lowering.snippet.matches("<script").count(), 1);
+        assert_eq!(lowering.snippet.matches("</script>").count(), 1);
+        assert!(lowering.snippet.contains("if record.js_deps & 2 != 0 {"));
+        assert!(lowering.snippet.contains("as _0"));
+        assert!(lowering.snippet.contains("_0();"));
+    }
+
+    #[test]
+    fn single_static_capability_emits_unconditional_script() {
+        let capabilities = vec![cap(
+            "line-mark",
+            8,
+            "boot",
+            "/scripts/line-mark.HASH.js",
+            &["add-line-marks"],
+        )];
+        let mut static_classes = std::collections::HashSet::new();
+        static_classes.insert("add-line-marks".to_string());
+
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        assert_eq!(emissions.len(), 1);
+        assert_eq!(emissions[0].bit, None);
+
+        let lowering = render_modules_as_rust(&emissions);
+        assert_eq!(lowering.snippet.matches("<script").count(), 1);
+        // Émission inconditionnelle — jamais de test record.js_deps pour
+        // cette capacité, détectée statiquement.
+        assert!(!lowering.snippet.contains("record.js_deps"));
+        assert!(lowering.snippet.contains("as _0"));
+    }
+
+    #[test]
+    fn multiple_capabilities_produce_single_script_imports_then_calls() {
+        let capabilities = vec![
+            cap(
+                "line-mark",
+                8,
+                "boot",
+                "/scripts/line-mark.HASH.js",
+                &["add-line-marks"],
+            ),
+            cap("map", 2, "initMapsSystem", "/scripts/map.HASH.js", &["map"]),
+        ];
+        // Aucun marqueur statique — les deux restent dynamiques.
+        let static_classes = std::collections::HashSet::new();
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        assert_eq!(emissions.len(), 2);
+
+        let lowering = render_modules_as_rust(&emissions);
+        // Un seul script au total — jamais un par capacité.
+        assert_eq!(lowering.snippet.matches("<script").count(), 1);
+        assert_eq!(lowering.snippet.matches("</script>").count(), 1);
+
+        // Tous les imports doivent précéder tous les appels d'activation.
+        let last_import_pos = lowering.snippet.rfind("import{").unwrap();
+        let first_call_pos = lowering.snippet.find("_0();").unwrap();
+        assert!(
+            first_call_pos > last_import_pos,
+            "les imports doivent précéder les appels : {}",
+            lowering.snippet
+        );
+    }
+
+    #[test]
+    fn aliases_are_sequential_and_distinct() {
+        let capabilities = vec![
+            cap("a", 1, "initA", "/scripts/a.js", &["a-marker"]),
+            cap("b", 2, "initB", "/scripts/b.js", &["b-marker"]),
+            cap("c", 4, "initC", "/scripts/c.js", &["c-marker"]),
+        ];
+        let static_classes = std::collections::HashSet::new();
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let lowering = render_modules_as_rust(&emissions);
+
+        for i in 0..3 {
+            assert!(lowering.snippet.contains(&format!("as _{i}")));
+            assert!(lowering.snippet.contains(&format!("_{i}();")));
+        }
+    }
+
+    #[test]
+    fn order_is_deterministic_matches_capabilities_order() {
+        let capabilities = vec![
+            cap(
+                "alpha",
+                1,
+                "initAlpha",
+                "/scripts/alpha.js",
+                &["alpha-marker"],
+            ),
+            cap("beta", 2, "initBeta", "/scripts/beta.js", &["beta-marker"]),
+        ];
+        let static_classes = std::collections::HashSet::new();
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let lowering = render_modules_as_rust(&emissions);
+
+        let pos_alpha = lowering.snippet.find("initAlpha").unwrap();
+        let pos_beta = lowering.snippet.find("initBeta").unwrap();
+        assert!(
+            pos_alpha < pos_beta,
+            "l'ordre doit suivre celui de `capabilities` (déjà trié par nom en amont), \
+             jamais un ordre inversé ou dépendant d'un parcours de HashMap"
+        );
+    }
+
+    #[test]
+    fn mix_static_and_dynamic_capability_single_script_no_outer_guard() {
+        let capabilities = vec![
+            cap(
+                "line-mark",
+                8,
+                "boot",
+                "/scripts/line-mark.js",
+                &["add-line-marks"],
+            ),
+            cap("map", 2, "initMapsSystem", "/scripts/map.js", &["map"]),
+        ];
+        let mut static_classes = std::collections::HashSet::new();
+        static_classes.insert("add-line-marks".to_string()); // line-mark : détecté statiquement
+        // "map" reste dynamique (absent de static_classes).
+
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        assert_eq!(emissions[0].bit, None); // line-mark
+        assert_eq!(emissions[1].bit, Some(2)); // map
+
+        let lowering = render_modules_as_rust(&emissions);
+        // Une capacité statique garantit la présence du tag — pas
+        // d'enveloppe if record.js_deps autour du <script> lui-même.
+        assert_eq!(lowering.snippet.matches("<script").count(), 1);
+        assert!(
+            !lowering
+                .snippet
+                .trim_start()
+                .starts_with("if record.js_deps")
+        );
+        // "map" reste individuellement conditionnel à l'intérieur du bloc.
+        assert!(lowering.snippet.contains("if record.js_deps & 2 != 0 {"));
+        assert!(lowering.snippet.contains("as _0")); // line-mark, position 0
+        assert!(lowering.snippet.contains("as _1")); // map, position 1
+    }
+
+    // ── render_modules_as_static_html (STATIC_PAGES) ────────────────────────
+
+    #[test]
+    fn static_pages_zero_capability_emits_empty_string() {
+        assert_eq!(render_modules_as_static_html(&[]), "");
+    }
+
+    #[test]
+    fn static_pages_multiple_static_capabilities_single_script() {
+        let capabilities = vec![
+            cap(
+                "line-mark",
+                8,
+                "boot",
+                "/scripts/line-mark.js",
+                &["add-line-marks"],
+            ),
+            cap("map", 2, "initMapsSystem", "/scripts/map.js", &["map"]),
+        ];
+        let mut static_classes = std::collections::HashSet::new();
+        static_classes.insert("add-line-marks".to_string());
+        static_classes.insert("map".to_string());
+
+        // has_record = false : comportement STATIC_PAGES réel.
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, false);
+        assert_eq!(emissions.len(), 2);
+        assert!(emissions.iter().all(|e| e.bit.is_none()));
+
+        let html = render_modules_as_static_html(&emissions);
+        assert_eq!(html.matches("<script").count(), 1);
+        assert_eq!(html.matches("</script>").count(), 1);
+        assert!(html.contains("as _0"));
+        assert!(html.contains("as _1"));
+        assert!(!html.contains("record.js_deps")); // jamais de test dynamique ici
+    }
+
+    #[test]
+    #[should_panic(expected = "bit conditionnel rencontré")]
+    fn static_html_panics_on_conditional_emission_bug() {
+        // Défense en profondeur : un ModuleEmission bit: Some(_) ne devrait
+        // structurellement jamais atteindre cette fonction (has_record
+        // aurait dû valoir false dans lower_modules_for_template). Ce test
+        // vérifie que le garde-fou est actif, pas un cas normal.
+        let emissions = vec![ModuleEmission {
+            activation: "boot".to_string(),
+            url: "/scripts/x.js".to_string(),
+            bit: Some(1),
+        }];
+        render_modules_as_static_html(&emissions);
+    }
 }
 
 // =============================================================================
@@ -1489,7 +1855,10 @@ fn resolve_static_page(
     let static_classes = extract_static_class_tokens(&tokens);
     let emissions = lower_modules_for_template(capabilities, &static_classes, false);
     let static_html_modules = render_modules_as_static_html(&emissions);
-    let modules_static_bytes: usize = emissions.iter().map(|e| e.html.len()).sum();
+    // Longueur du HTML déjà construit ci-dessus — jamais recalculée
+    // séparément : un seul <script> regroupé désormais (pas une somme par
+    // capacité), la mesure exacte est déjà entre les mains.
+    let modules_static_bytes: usize = static_html_modules.len();
 
     let mut tokens = match split_static_at_marker(tokens, MODULES_PLACEHOLDER) {
         Some((mut tokens, splice_index)) => {

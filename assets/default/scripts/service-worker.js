@@ -96,7 +96,6 @@ const resourcesToCache = [
 	"/",
 	"/styles/main.css",
 	"/styles/print.css",
-	"/scripts/main.js",
 	"/fonts/notoSans-Regular.woff2",
 	"/fonts/notoSerif-Regular.woff2",
 	"/sprites/utils.svg",
