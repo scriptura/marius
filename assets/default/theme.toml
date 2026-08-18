@@ -23,6 +23,11 @@ entry = "scripts/map.js"
 markers = ["map"]
 activation = "initMapsSystem"
 
+[scripts.capabilities.media-player]
+entry = "scripts/media-player.js"
+markers = ["media"]
+activation = "bootstrap"
+
 [scripts.capabilities.line-mark]
 entry = "scripts/line-mark.js"
 markers = ["add-line-marks"]

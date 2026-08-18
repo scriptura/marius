@@ -1,6 +1,6 @@
 disclosure = 1
 map = 2
-# media-player = 4
+media-player = 4
 line-mark = 8
 image-focus = 16
 range = 32

@@ -51,7 +51,7 @@
   }
 }
 
-@container (35em > width) {
+@container ($to-xs) {
   [role='region'][aria-labelledby][tabindex]:has(.table-responsive) {
     all: unset;
   }
@@ -78,7 +78,7 @@
       box-shadow: none;
     }
 
-    & tr > :first-child {
+    & tr> :first-child {
       padding-block-start: 1em;
     }
 
@@ -90,7 +90,7 @@
       background-color: var(--colorG27) !important;
       box-shadow: var(--shadow5);
 
-      & > * {
+      &>* {
         padding: 0 1em;
       }
     }

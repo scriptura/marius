@@ -106,7 +106,7 @@ BEGIN
     v_deps := v_deps | 2;  -- map
   END IF;
 
-  IF 'media-player' = ANY(v_classes) THEN
+  IF 'media' = ANY(v_classes) THEN
     v_deps := v_deps | 4;  -- media-player
   END IF;
 
