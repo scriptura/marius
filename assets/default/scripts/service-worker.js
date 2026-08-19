@@ -99,7 +99,6 @@ const resourcesToCache = [
 	"/fonts/notoSans-Regular.woff2",
 	"/fonts/notoSerif-Regular.woff2",
 	"/sprites/utils.svg",
-	"/sprites/players.svg",
 	"/images/logo.svg",
 	OFFLINE_URL,
 ];

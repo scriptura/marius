@@ -52,7 +52,7 @@ activation = "initSliders"
 # Dictionnaire (HashMap) : Nom du Sprite -> Dossier Source.
 # Spécification §10.2 : SVG groupés dans un fichier `<cible>.<hash>.svg`.
 utils = "sprites/utils"
-players = "sprites/players"
+# players = "sprites/players"
 
 [webmanifest]
 entry = "manifest.webmanifest"
