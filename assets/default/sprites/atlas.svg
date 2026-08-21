@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="512" viewBox="0 0 1024 512">
+  <!-- Définitions partagées (DRY) -->
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="15" dy="15" stdDeviation="15" flood-color="#000000" flood-opacity="0.5" />
+    </filter>
+  </defs>
+
+  <!-- Icône 1 : Offset X=0 -->
+  <g transform="translate(0, 0)" filter="url(#shadow)">
+    <path fill="hsl(16, 100%, 66%)" d="M256 14C146 14 57 102 57 211c0 172 199 295 199 295s199-120 199-295c0-109-89-197-199-197zm0 281a94 94 0 1 1 0-187 94 94 0 0 1 0 187z"></path>
+    <path fill="hsl(9, 100%, 64%)" d="M256 14v94a94 94 0 0 1 0 187v211s199-120 199-295c0-109-89-197-199-197z"></path>
+  </g>
+
+  <!-- Icône 2 : Offset X=512 -->
+  <g transform="translate(512, 0)" filter="url(#shadow)">
+    <path fill="#00BFFF" d="M256 14C146 14 57 102 57 211c0 172 199 295 199 295s199-120 199-295c0-109-89-197-199-197zm0 281a94 94 0 1 1 0-187 94 94 0 0 1 0 187z"></path>
+    <path fill="#00A2D9" d="M256 14v94a94 94 0 0 1 0 187v211s199-120 199-295c0-109-89-197-199-197z"></path>
+  </g>
+</svg>

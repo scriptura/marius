@@ -18,10 +18,10 @@ entry = "scripts/disclosure.js"
 markers = ["tabs", "accordion"]
 activation = "initDisclosureSystem"
 
-# [scripts.capabilities.map]
-# entry = "scripts/map.js"
-# markers = ["map"]
-# activation = "initMapsSystem"
+[scripts.capabilities.map]
+entry = "scripts/map.js"
+markers = ["map"]
+activation = "bootstrap"
 
 [scripts.capabilities.media-player]
 entry = "scripts/media-player.js"
@@ -52,7 +52,7 @@ activation = "initSliders"
 # Dictionnaire (HashMap) : Cible -> Dossier Source.
 # Spécification §10.4.1 : un dossier = une cible de concaténation.
 # Le compilateur concatène le contenu du dossier et génère /scripts/<cible>.<hash>.js.
-map2 = "scripts/map2.js"
+# map2 = "scripts/map2.js"
 
 [sprites]
 # Dictionnaire (HashMap) : Nom du Sprite -> Dossier Source.
@@ -97,6 +97,7 @@ files = [
     "images/tests/test-w600.webp",
     "images/tests/test-w400.webp",
     "images/tests/test-w300.webp",
+    "sprites/atlas.svg",
     "libraries/deckgl/deckgl.js",
     # "libraries/htmx.min.js",
 ]

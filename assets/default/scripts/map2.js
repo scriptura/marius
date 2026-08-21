@@ -4,10 +4,9 @@
  */
 
 // Extraction depuis le namespace global instancié par le script statique UMD
-const { DeckGL, TileLayer, BitmapLayer, IconLayer } = window.deck;
+const { DeckGL, TileLayer, IconLayer } = window.deck;
 
 const TILE_DEFAULT = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
-const TILE_PROBE = Object.freeze({ z: "16", x: "33440", y: "23491" });
 const SUBDOMAINS = Object.freeze(["a", "b", "c"]);
 
 const SVG_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
@@ -62,6 +61,61 @@ const parseTileServer = (template) => {
 	return cleanTmpl;
 };
 
+// ─── Pipeline GPU : Shader de post-traitement des tuiles ─────────────
+
+class ThemedBitmapLayer extends deck.BitmapLayer {
+	static layerName = "ThemedBitmapLayer";
+	static componentName = "ThemedBitmapLayer";
+
+	getShaders() {
+		const shaders = super.getShaders();
+		shaders.inject = {
+			// Déclaration de la variable (uniform) envoyée par le CPU
+			"fs:#decl": "uniform float tileTheme;",
+
+			// Injection de l'algorithme à la fin du pipeline de couleur du fragment
+			"fs:DECKGL_FILTER_COLOR": `
+        if (tileTheme == 1.0) {
+          // Grayscale : Produit scalaire avec les coefficients de luminance standard
+          float luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+          color.rgb = vec3(luma);
+        } 
+        else if (tileTheme == 2.0) {
+          // Dark Mode : grayscale(1) invert(1) brightness(1.1) contrast(0.7)
+          float luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+          float inverted = 1.0 - luma;
+          float bright = inverted * 1.1;
+          
+          // Application mathématique du contraste CSS (basé sur un pivot à 0.5)
+          float finalLuma = (bright - 0.5) * 0.7 + 0.5;
+          color.rgb = vec3(finalLuma);
+        }
+		else if (tileTheme == 3.0) {
+          // Vintage (Sepia 50%) : Produit scalaire via la matrice W3C standard
+          vec3 sepia = vec3(
+            dot(color.rgb, vec3(0.393, 0.769, 0.189)),
+            dot(color.rgb, vec3(0.349, 0.686, 0.168)),
+            dot(color.rgb, vec3(0.272, 0.534, 0.131))
+          );
+          // mix(x, y, a) = x * (1 - a) + y * a (exécuté en 1 cycle d'horloge matériel)
+          color.rgb = mix(color.rgb, sepia, 0.5);
+        }
+      `,
+		};
+		return shaders;
+	}
+
+	// Interception de l'ordre de dessin pour transférer la prop vers la VRAM
+	draw(opts) {
+		const { tileTheme = 0.0 } = this.props;
+		super.draw(
+			Object.assign({}, opts, {
+				uniforms: Object.assign({}, opts.uniforms, { tileTheme }),
+			}),
+		);
+	}
+}
+
 // ─── Instanciation WebGL (Lazy) ──────────────────────────────────────────────
 
 const initMap = async (config) => {
@@ -76,6 +130,11 @@ const initMap = async (config) => {
 		minY = Infinity,
 		maxX = -Infinity,
 		maxY = -Infinity;
+	// Détection des thèmes (fallback à 0.0 = couleur d'origine)
+	let themeValue = 0.0;
+	if (el.classList.contains("map-grayscale")) themeValue = 1.0;
+	else if (el.classList.contains("map-dark")) themeValue = 2.0;
+	else if (el.classList.contains("map-vintage")) themeValue = 3.0;
 
 	for (let i = 0; i < dataLength; i++) {
 		const item = rawData[i];
@@ -197,7 +256,8 @@ const initMap = async (config) => {
 				tileSize: 256,
 				renderSubLayers: (props) => {
 					const { boundingBox } = props.tile;
-					return new BitmapLayer(props, {
+					// Utilisation du shader personnalisé au lieu du BitmapLayer standard
+					return new ThemedBitmapLayer(props, {
 						data: null,
 						image: props.data,
 						bounds: [
@@ -206,6 +266,7 @@ const initMap = async (config) => {
 							boundingBox[1][0],
 							boundingBox[1][1],
 						],
+						tileTheme: themeValue, // Injection de la variable d'état
 					});
 				},
 			}),
