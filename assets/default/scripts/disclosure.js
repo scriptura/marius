@@ -1,6 +1,6 @@
 /**
  * @module DisclosureSystem
- * @version 1.2.0
+ * @version 1.2.1
  * @author Olivier C
  * * --- RAISON D'ÊTRE & VISION ARCHITECTURALE ---
  * Ce moteur traite les Onglets (.tabs) et les Accordéons (.accordion) comme une seule
@@ -92,6 +92,18 @@
  * - Pourquoi différé : Cette logique est transversale à plusieurs composants et
  * doit être conçue comme une couche d'orchestration globale, partagée avec
  * d'autres scripts, plutôt que greffée localement ici.
+ * * 13. GESTION DES COURSES CRITIQUES (RACE CONDITIONS) ET ALLOCATION MÉOIRE :
+ * - Arbitrage : Délégation de l'interruption des transitions à l'API native AbortController.
+ * Maintien des pointeurs d'annulation dans un registre de données externe (WeakMap)
+ * plutôt qu'en mutation directe sur l'entité DOM (expando properties). Vérification
+ * de l'invariant d'intention (aria-hidden) lors de l'exécution du callback.
+ * - Pourquoi : Lors de mutations d'état frénétiques, l'asynchronie des animations CSS
+ * provoque des exécutions de callbacks contradictoires. L'approche naïve (attacher
+ * dynamiquement la fonction de nettoyage sur le nœud DOM) détruit la "Hidden Class"
+ * du moteur JS, forçant des désoptimisations processeur. L'usage d'un WeakMap sépare
+ * strictement la logique d'état de la structure DOM. Il garantit une empreinte
+ * mémoire neutre : le Garbage Collector peut détruire l'entité sans fuite mémoire,
+ * et l'allocation par cycle de transition reste minimale.
  */
 
 const SUPPORTS_UNTIL_FOUND = "onbeforematch" in window;
@@ -137,36 +149,62 @@ const persistState = () => {
 	}
 };
 
+// --- DATA LAYOUT (State Caching) ---
+// Isoler le contrôle des transitions hors du DOM.
+const transitionControllers = new WeakMap();
+
 // --- Animation Engine (The Painter) ---
 const animatePanel = (panel, isOpening) => {
-	if (!panel.classList.contains("accordion-panel")) return;
+	if (!panel.classList.contains("accordion-panel")) return; //[cite: 1]
+
+	// 1. CLEANUP : Interruption O(1) de toute transition en cours sur ce panel
+	if (transitionControllers.has(panel)) {
+		transitionControllers.get(panel).abort();
+	}
+
+	// 2. STATE INJECTION : Nouveau contrôleur pour le cycle actuel
+	const controller = new AbortController();
+	transitionControllers.set(panel, controller);
+	const signal = controller.signal;
 
 	if (isOpening) {
-		panel.style.maxHeight = "0px";
-		panel.offsetHeight; // Force reflow
-		panel.style.maxHeight = `${panel.scrollHeight}px`;
+		panel.style.maxHeight = "0px"; //[cite: 1]
+		panel.offsetHeight; // Force reflow (Layout Thrashing contrôlé)[cite: 1]
+		panel.style.maxHeight = `${panel.scrollHeight}px`; //[cite: 1]
 
-		const onEnd = () => {
-			panel.removeAttribute("style");
-			panel.removeEventListener("transitionend", onEnd);
-		};
-		panel.addEventListener("transitionend", onEnd);
+		panel.addEventListener(
+			"transitionend",
+			() => {
+				panel.removeAttribute("style"); //[cite: 1]
+				transitionControllers.delete(panel);
+			},
+			{ signal },
+		);
 	} else {
-		panel.style.maxHeight = `${panel.scrollHeight}px`;
+		panel.style.maxHeight = `${panel.scrollHeight}px`; //[cite: 1]
 
 		requestAnimationFrame(() => {
-			panel.removeAttribute("style");
-			panel.setAttribute("aria-hidden", "true");
+			//[cite: 1]
+			panel.removeAttribute("style"); //[cite: 1]
+			panel.setAttribute("aria-hidden", "true"); //[cite: 1]
 		});
 
-		const onEnd = () => {
-			if (SUPPORTS_UNTIL_FOUND) {
-				panel.removeAttribute("aria-hidden");
-				panel.hidden = "until-found";
-			}
-			panel.removeEventListener("transitionend", onEnd);
-		};
-		panel.addEventListener("transitionend", onEnd);
+		panel.addEventListener(
+			"transitionend",
+			() => {
+				// 3. INVARIANT : Lecture de la source de vérité avant mutation
+				if (panel.getAttribute("aria-hidden") === "true") {
+					//[cite: 1]
+					if (SUPPORTS_UNTIL_FOUND) {
+						//[cite: 1]
+						panel.removeAttribute("aria-hidden"); //[cite: 1]
+						panel.hidden = "until-found"; //[cite: 1]
+					}
+				}
+				transitionControllers.delete(panel);
+			},
+			{ signal },
+		);
 	}
 };
 

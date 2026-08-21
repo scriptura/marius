@@ -4,7 +4,6 @@
 
 ```
 $ sudo lshw -short
-[sudo] Mot de passe de nunn : 
 Chemin matériel    Périphérique  Classe         Description
 ==============================================================
                                     system         EQ (Default string)

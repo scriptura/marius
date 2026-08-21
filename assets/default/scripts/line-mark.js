@@ -44,7 +44,9 @@ const injectMarkers = () => {
 	const els = document.querySelectorAll(SELECTOR);
 	const len = els.length;
 
-	if (len === 0) return;
+	// Guard O(1) : Invariant métier.
+	// L'injection n'a pas de sens structurel pour <= 1 élément.
+	if (len <= 1) return;
 
 	// Boucle indexée : zéro allocation d'itérateur
 	for (let i = 0; i < len; i++) {

@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-08-16 23:42:55
+**Généré le:** 2026-08-20 23:36:27
 
 ## Racine du Workspace
 
@@ -213,6 +213,7 @@
 │   ├── runtime-lifecycle-guide.md
 │   └── scenario-ajout-champ-varlena.md
 ├── handoffs
+│   ├── ADDENDUM-modules-placeholder-static-pages.md
 │   ├── HANDOFF-js-deps-capacites-frontend-v2.md
 │   ├── SUIVI-js-deps-points-en-attente.md
 │   └── handoff-cartographie-hyper(ADR-011).md
@@ -286,6 +287,6 @@
 │   └── note-post-phase-5.3-generate-main.md
 └── memento.md
 
-20 directories, 84 files
+20 directories, 85 files
 ```
 

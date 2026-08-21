@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Marius n'est pas né d'une volonté de construire un CMS plus rapide, ni même d'une volonté de construire un CMS tout court. Le CMS n'est que le terrain d'expérimentation choisi. La question qui motive réellement le projet est plus fondamentale : Pourquoi les systèmes logiciels modernes sont-ils devenus aussi lourds alors que les machines n'ont jamais été aussi puissantes ? Ou formulé autrement : Pourquoi faut-il aujourd'hui autant de couches, autant de dépendances, autant de mémoire et autant de ressources pour produire des capacités qui, souvent, existaient déjà il y a plusieurs décennies ?
+Marius n'est pas né d'une volonté de construire un CMS plus rapide, ni même d'une volonté de construire un CMS tout court. Le CMS n'est que le terrain d'expérimentation choisi, à nos yeux suffisamment exhaustif pour une démonstration. La question qui motive réellement le projet est plus fondamentale : Pourquoi les systèmes logiciels modernes sont-ils devenus aussi lourds alors que les machines n'ont jamais été aussi puissantes ? Ou formulé autrement : Pourquoi faut-il aujourd'hui autant de couches, autant de dépendances, autant de mémoire et autant de ressources pour produire des capacités qui, souvent, existaient déjà il y a plusieurs décennies ?
 
 Cette interrogation constitue le point de départ de Marius. Le projet est avant tout une exploration, une tentative de comprendre ce qui, dans le logiciel contemporain, relève de la nécessité réelle, et ce qui relève de l'accumulation historique. Cette démarche s'inscrit dans l'esprit du hacking au sens originel du terme, tel qu'il était pratiqué au MIT : non pas casser les systèmes, mais découvrir une formulation plus élégante, plus compacte et plus cohérente d'un problème donné.
 

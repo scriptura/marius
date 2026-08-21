@@ -6,7 +6,6 @@ Analyse comparative Axum v0.7 → v0.8
 
 ```
 $ sudo lshw -short
-[sudo] Mot de passe de nunn : 
 Chemin matériel    Périphérique  Classe         Description
 ==============================================================
                                     system         EQ (Default string)
