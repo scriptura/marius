@@ -27,13 +27,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use lightningcss::bundler::{Bundler, ResolveResult, SourceProvider};
+use lightningcss::rules::CssRule;
 use lightningcss::stylesheet::{MinifyOptions, ParserOptions, PrinterOptions};
 use lightningcss::values::url::Url;
 use lightningcss::visit_types;
 use lightningcss::visitor::{Visit, VisitTypes, Visitor};
 
-use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
-use crate::resolve::resolve_asset_reference;
+use crate::manifest::{
+    AssetEntry, AssetUrlRegistry, CanonicalAssetId, hash_content, join_slash, mime_for_extension,
+};
+use crate::resolve::{ReferenceOrigin, resolve_asset_reference};
 
 /// Erreur de résolution lors de l'évaluation d'une directive `url()` CSS (Spec §10.1, Roadmap §1.8).
 ///
@@ -61,30 +64,125 @@ impl fmt::Display for CssUrlResolutionError {
 
 impl std::error::Error for CssUrlResolutionError {}
 
+/// Extrait `source_index` de n'importe quelle variante `CssRule` portant
+/// un `loc` — vérifié exhaustivement contre `lightningcss = "=1.0.0-alpha.71"`
+/// (expérience réelle, SPEC-canonical-asset-identity.md §7) : toutes les
+/// variantes en portent un sauf `Ignored` (placeholder vide) et `Custom`
+/// (générique, dépend d'un type fourni par l'appelant, non utilisé ici).
+/// `match` volontairement non-`_` sur le reste : l'ajout d'une future
+/// variante par une mise à jour de `lightningcss` fait échouer la
+/// compilation plutôt que de silencieusement perdre la provenance pour ce
+/// nouveau cas.
+fn extract_source_index(rule: &CssRule) -> Option<u32> {
+    match rule {
+        CssRule::Media(r) => Some(r.loc.source_index),
+        CssRule::Import(r) => Some(r.loc.source_index),
+        CssRule::Style(r) => Some(r.loc.source_index),
+        CssRule::Keyframes(r) => Some(r.loc.source_index),
+        CssRule::FontFace(r) => Some(r.loc.source_index),
+        CssRule::FontPaletteValues(r) => Some(r.loc.source_index),
+        CssRule::FontFeatureValues(r) => Some(r.loc.source_index),
+        CssRule::Page(r) => Some(r.loc.source_index),
+        CssRule::Supports(r) => Some(r.loc.source_index),
+        CssRule::CounterStyle(r) => Some(r.loc.source_index),
+        CssRule::Namespace(r) => Some(r.loc.source_index),
+        CssRule::MozDocument(r) => Some(r.loc.source_index),
+        CssRule::Nesting(r) => Some(r.loc.source_index),
+        CssRule::NestedDeclarations(r) => Some(r.loc.source_index),
+        CssRule::Viewport(r) => Some(r.loc.source_index),
+        CssRule::CustomMedia(r) => Some(r.loc.source_index),
+        CssRule::LayerStatement(r) => Some(r.loc.source_index),
+        CssRule::LayerBlock(r) => Some(r.loc.source_index),
+        CssRule::Property(r) => Some(r.loc.source_index),
+        CssRule::Container(r) => Some(r.loc.source_index),
+        CssRule::Scope(r) => Some(r.loc.source_index),
+        CssRule::StartingStyle(r) => Some(r.loc.source_index),
+        CssRule::ViewTransition(r) => Some(r.loc.source_index),
+        CssRule::Unknown(r) => Some(r.loc.source_index),
+        CssRule::Ignored | CssRule::Custom(_) => None,
+    }
+}
+
 /// Visiteur AST — résout TOUT `url()` du document contre
 /// `AssetUrlRegistry` (Phase 5 : Roadmap §1.8 tranchée — `background-image`,
 /// `mask`, `cursor`, etc., pas seulement `@font-face`). La validation dure
 /// (échec si absent du registre) s'applique désormais uniformément, pas
 /// seulement aux polices.
+///
+/// SPEC-canonical-asset-identity.md §7 — provenance correcte, y compris à
+/// travers `@import` imbriqués et règles imbriquées (`@media`, etc.) :
+/// vérifié expérimentalement contre le comportement réel de
+/// `lightningcss::Bundler` (jamais supposé). `Bundler` ne rebase JAMAIS un
+/// `url()` relatif à l'inlining d'un `@import` — le littéral reste
+/// strictement celui écrit dans le fichier source réel. La provenance
+/// correcte est récupérée via `Url.loc` — non, ce champ ne porte que
+/// `line`/`column` — mais via le `loc.source_index` de la RÈGLE
+/// englobante, capturé à l'entrée de `visit_rule`, avant de descendre
+/// dans ses déclarations (ordre de traversée en profondeur garanti par
+/// `Visit`).
 struct CssUrlVisitor<'a> {
     registry: &'a AssetUrlRegistry,
+    /// `theme_dir` — nécessaire pour transformer un chemin de
+    /// `stylesheet.sources[i]` (espace du système de fichiers, tel que
+    /// transmis à `Bundler`/`SourceProvider`) en `CanonicalAssetId`
+    /// (relatif à la racine du thème). Les deux espaces coïncident
+    /// aujourd'hui par construction (`entry_path = theme_dir.join(...)`,
+    /// `MvarProvider::resolve` dérive tout le reste par
+    /// `with_file_name()`), mais rien ne garantit cette forme sans
+    /// vérification explicite ici — d'où le `strip_prefix` plutôt qu'une
+    /// supposition silencieuse.
+    theme_dir: &'a Path,
+    /// `stylesheet.sources` — index → chemin réel du fichier source,
+    /// peuplé par `Bundler` lui-même (un par fichier du graphe
+    /// `@import`, entrée comprise).
+    sources: &'a [String],
+    /// État de traversée — dernière règle porteuse d'un `loc` rencontrée.
+    /// Ne redescend jamais à `None` en sortant d'une règle : l'ordre de
+    /// traversée en profondeur garantit qu'à chaque `visit_url`, cet état
+    /// reflète toujours la bonne règle (aucun `url()` ne peut être visité
+    /// avant qu'au moins une règle englobante n'ait déjà été visitée —
+    /// la grammaire CSS ne permet aucune déclaration hors de toute règle).
+    current_source_index: Option<u32>,
 }
 
 impl<'i> Visitor<'i> for CssUrlVisitor<'_> {
     type Error = CssUrlResolutionError;
 
     fn visit_types(&self) -> VisitTypes {
-        visit_types!(URLS)
+        visit_types!(URLS | RULES)
+    }
+
+    fn visit_rule(&mut self, rule: &mut CssRule<'i>) -> Result<(), Self::Error> {
+        if let Some(idx) = extract_source_index(rule) {
+            self.current_source_index = Some(idx);
+        }
+        rule.visit_children(self)
     }
 
     fn visit_url(&mut self, url: &mut Url<'i>) -> Result<(), Self::Error> {
-        match resolve_asset_reference(url.url.as_ref(), self.registry) {
+        let idx = self.current_source_index.expect(
+            "current_source_index doit déjà être posé : aucune déclaration CSS \
+             (donc aucun url()) n'existe hors de toute règle, la grammaire CSS \
+             l'interdit structurellement — si ce panic se déclenche, c'est que \
+             cette garantie a été violée ailleurs, pas un cas à absorber ici",
+        );
+        let source_path = &self.sources[idx as usize];
+        let rel = Path::new(source_path)
+            .strip_prefix(self.theme_dir)
+            .unwrap_or(Path::new(source_path));
+        let origin_id = CanonicalAssetId::from_theme_relative_path(rel);
+
+        match resolve_asset_reference(
+            url.url.as_ref(),
+            ReferenceOrigin::RelativeToFile(&origin_id),
+            self.registry,
+        ) {
             Ok(Some(resolved)) => {
                 url.url = resolved.into();
                 Ok(())
             }
             Ok(None) => Ok(()),
-            Err(filename) => Err(CssUrlResolutionError(filename)),
+            Err(message) => Err(CssUrlResolutionError(message)),
         }
     }
 }
@@ -1097,6 +1195,7 @@ fn extract_charset(text: &str) -> (Option<String>, String) {
 /// prudence documentaire, faute de pouvoir compiler dans cet
 /// environnement — l'ambiguïté est levée, plus un avertissement.
 fn transform_css(
+    theme_dir: &Path,
     entry_path: &Path,
     asset_url_registry: &AssetUrlRegistry,
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -1140,8 +1239,20 @@ fn transform_css(
         )
     })?;
 
+    // Clone nécessaire : `sources` doit être détaché de `stylesheet` AVANT
+    // la construction du visiteur, sinon `visitor` porte un emprunt
+    // immuable À L'INTÉRIEUR de `stylesheet` (son champ `sources`), ce qui
+    // interdit ensuite `stylesheet.visit(&mut visitor)` (emprunt mutable
+    // de `stylesheet` en conflit direct avec l'emprunt immuable déjà
+    // détenu par `visitor`). Un `Vec<String>` cloné une fois par build,
+    // jamais sur le chemin chaud — coût négligeable.
+    let sources_owned: Vec<String> = stylesheet.sources.clone();
+
     let mut visitor = CssUrlVisitor {
         registry: asset_url_registry,
+        theme_dir,
+        sources: &sources_owned,
+        current_source_index: None,
     };
     stylesheet
         .visit(&mut visitor)
@@ -1191,7 +1302,7 @@ pub(crate) fn run_styles_pipeline(
             return Err(format!("styles : fichier introuvable : {}", source_path.display()).into());
         }
 
-        let transformed = transform_css(&source_path, asset_url_registry)?;
+        let transformed = transform_css(theme_dir, &source_path, asset_url_registry)?;
         let bytes = transformed.as_bytes();
         let (full_hash, short_hash) = hash_content(bytes);
 

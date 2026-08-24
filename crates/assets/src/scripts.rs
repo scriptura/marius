@@ -29,8 +29,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::js_minify::minify_javascript;
-use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
-use crate::resolve::resolve_asset_reference;
+use crate::manifest::{
+    AssetEntry, AssetUrlRegistry, CanonicalAssetId, hash_content, join_slash, mime_for_extension,
+};
+use crate::resolve::{ReferenceOrigin, resolve_asset_reference};
 
 /// Position `(octet_depart, longueur)` d'un chemin d'import littéral dans son texte source.
 ///
@@ -414,13 +416,23 @@ fn build_module_arena(
                     reserve_module_index(&dep_path, &mut arena, &mut index_by_path, &mut worklist);
                 ImportTarget::Module(dep_idx)
             } else {
-                match resolve_asset_reference(specifier, asset_url_registry) {
+                // Import non-relatif — SPEC-canonical-asset-identity.md §2 :
+                // convention déjà en usage dans ce pipeline (`/libs/leaflet.js`,
+                // cf. tests) = relative à la racine du thème, jamais au
+                // fichier contenant l'import. Jamais `RelativeToFile` ici :
+                // un specifier non-relatif désigne délibérément une
+                // ressource externe au graphe de CE module, pas un sibling.
+                match resolve_asset_reference(
+                    specifier,
+                    ReferenceOrigin::RelativeToThemeRoot,
+                    asset_url_registry,
+                ) {
                     Ok(Some(resolved)) => ImportTarget::ExternalAsset(resolved),
                     Ok(None) => ImportTarget::ExternalAsset(specifier.to_string()),
-                    Err(filename) => {
+                    Err(message) => {
                         return Err(JsPipelineError::AssetNotFound {
                             specifier: specifier.to_string(),
-                            filename,
+                            filename: message,
                             in_file: path.clone(),
                         });
                     }
@@ -618,25 +630,24 @@ pub(crate) fn run_scripts_pipeline(
         );
     }
 
-    // Bug découvert en session : modules DÉPENDANCE (importés
-    // transitivement via ESM natif, ex. `navigation.js` importé par
-    // `main`/`index.js`) — hachés et écrits sur disque par
-    // `patch_and_hash_modules` (Passe 3, l'arène ENTIÈRE, dépendances
-    // comprises), mais jusqu'ici jamais inscrits au manifeste puisque la
-    // boucle ci-dessus ne parcourt QUE les points d'entrée déclarés dans
-    // `theme.toml`. Un fichier physiquement présent mais absent de tout
-    // registre logique est invisible à `{% asset %}` (Forge) ET à la
-    // table de routage statique du Shell (`asset_routes.rs`, elle-même
-    // dérivée de ce manifeste) — 404 côté navigateur malgré un build
-    // apparemment réussi.
+    // Modules DÉPENDANCE (importés transitivement via ESM natif, ex.
+    // `navigation.js` importé par `main`/`index.js`) — hachés et écrits sur
+    // disque par `patch_and_hash_modules` (Passe 3, l'arène ENTIÈRE,
+    // dépendances comprises), mais jusqu'ici jamais inscrits au manifeste
+    // puisque la boucle ci-dessus ne parcourt QUE les points d'entrée
+    // déclarés dans `theme.toml`. Un fichier physiquement présent mais
+    // absent de tout registre logique est invisible à `{% asset %}`
+    // (Forge) ET à la table de routage statique du Shell (`asset_routes.rs`,
+    // elle-même dérivée de ce manifeste) — 404 côté navigateur malgré un
+    // build apparemment réussi.
     //
-    // Clé : stem du fichier source (ex. "navigation.js") — ces modules
-    // n'ont pas de nom de cible logique, seulement leur propre identité de
-    // fichier. Limite connue, non résolue ici : deux dépendances de même
-    // stem dans des dossiers différents (ex. `foo/utils.js` et
-    // `bar/utils.js`) collisionneraient silencieusement sur cette même
-    // clé — non pertinent pour l'arborescence actuelle du thème, mais à
-    // garder en tête si le graphe de modules se complexifie.
+    // Clé : CanonicalAssetId (chemin complet relatif à la racine du thème),
+    // SPEC-canonical-asset-identity.md §4 — remplace l'ancienne clé par
+    // `file_stem()` seul (`format!("{stem}.js")`), dont ce commentaire
+    // documentait lui-même la collision (`foo/utils.js` vs `bar/utils.js`)
+    // comme une limite connue et non résolue. Ce n'est plus le cas : deux
+    // dépendances de même nom sous des répertoires distincts coexistent
+    // désormais sans écrasement, comme partout ailleurs dans ce crate.
     let entry_idx_set: HashSet<usize> = entry_indices.iter().copied().collect();
     for (idx, slot) in resolved.iter().enumerate() {
         if entry_idx_set.contains(&idx) {
@@ -646,14 +657,14 @@ pub(crate) fn run_scripts_pipeline(
             continue; // jamais atteint par la Passe 2/3 — nœud mort, hors graphe réel
         };
 
-        let stem = arena[idx]
+        let rel = arena[idx]
             .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| format!("module-{idx}"));
+            .strip_prefix(theme_dir)
+            .unwrap_or(&arena[idx].path);
+        let canonical_key = CanonicalAssetId::from_theme_relative_path(rel).into_string();
 
         manifest.insert(
-            format!("{stem}.js"),
+            canonical_key,
             AssetEntry {
                 url: patched.url.clone(),
                 path: join_slash(build_root_rel, &patched.output_rel),
@@ -874,7 +885,7 @@ mod tests {
 
         let mut registry = AssetUrlRegistry::new();
         registry.insert(
-            "leaflet.js".to_string(),
+            CanonicalAssetId::from_theme_relative_path(Path::new("libs/leaflet.js")),
             "/libs/leaflet.9f8e7.js".to_string(),
         );
 
@@ -895,21 +906,30 @@ mod tests {
         .unwrap();
 
         // Les cibles logiques ET les modules dépendance entrent au
-        // manifeste — correctif de cette session : un module atteint
-        // seulement par import ESM transitif (navigation.js, jamais
-        // déclaré comme cible dans theme.toml) doit rester résolvable par
-        // sa propre clé (stem), sous peine d'être introuvable par tout
-        // consommateur de manifest.toml malgré sa présence réelle sur
-        // disque (bug constaté en usage réel : 404 côté navigateur).
+        // manifeste — correctif de session : un module atteint seulement
+        // par import ESM transitif (navigation.js, jamais déclaré comme
+        // cible dans theme.toml) doit rester résolvable, sous peine d'être
+        // introuvable par tout consommateur de manifest.toml malgré sa
+        // présence réelle sur disque (bug constaté en usage réel : 404
+        // côté navigateur).
+        //
+        // Clé de navigation.js : chemin canonique complet
+        // (SPEC-canonical-asset-identity.md §4), plus "navigation.js" seul
+        // — l'ancienne clé par `file_stem()` collisionnerait entre deux
+        // dépendances homonymes sous des répertoires distincts, ce que ce
+        // test ne peut pas exercer isolément (un seul fichier nommé
+        // "navigation.js" ici) mais que `verbatim.rs`
+        // (`no_silent_overwrite_between_same_basename_in_different_directories`)
+        // couvre explicitement pour le même invariant.
         assert!(manifest.contains_key("main.js"));
         assert!(manifest.contains_key("more.js"));
-        assert!(manifest.contains_key("navigation.js"));
+        assert!(manifest.contains_key("scripts/main/navigation.js"));
         assert!(
-            manifest["navigation.js"]
+            manifest["scripts/main/navigation.js"]
                 .url
                 .starts_with("/scripts/navigation.")
         );
-        assert!(manifest["navigation.js"].url.ends_with(".js"));
+        assert!(manifest["scripts/main/navigation.js"].url.ends_with(".js"));
 
         let main_url = &manifest["main.js"].url;
         let main_filename = Path::new(main_url).file_name().unwrap();
@@ -930,7 +950,7 @@ mod tests {
         // Cohérence : l'URL substituée dans main_written doit être EXACTEMENT
         // celle du manifeste — pas seulement un préfixe qui matcherait par
         // coïncidence.
-        assert!(main_written.contains(manifest["navigation.js"].url.as_str()));
+        assert!(main_written.contains(manifest["scripts/main/navigation.js"].url.as_str()));
 
         let more_url = &manifest["more.js"].url;
         let more_filename = Path::new(more_url).file_name().unwrap();
@@ -973,6 +993,69 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(manifest.is_empty());
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    /// SPEC-canonical-asset-identity.md §11 — critère d'acceptation
+    /// central, appliqué ici au correctif spécifique de cette session :
+    /// deux modules-dépendance de même nom, atteints par import relatif
+    /// depuis deux cibles logiques distinctes, sous des répertoires
+    /// différents. Aurait échoué sous l'ancienne clé par `file_stem()`
+    /// (écrasement silencieux, un seul des deux "utils.js" aurait survécu
+    /// au manifeste).
+    #[test]
+    fn dependency_modules_with_same_basename_under_different_targets_do_not_collide() {
+        let sandbox = std::env::temp_dir().join("marius-assets-test-scripts-no-collision");
+        let theme_dir = sandbox.join("theme");
+        let build_root = sandbox.join("build");
+        let foo_dir = theme_dir.join("scripts/foo");
+        let bar_dir = theme_dir.join("scripts/bar");
+        fs::create_dir_all(&foo_dir).unwrap();
+        fs::create_dir_all(&bar_dir).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        fs::write(foo_dir.join("utils.js"), "export const tag = 'foo';").unwrap();
+        fs::write(
+            foo_dir.join("index.js"),
+            "import { tag } from './utils.js';\nconsole.log(tag);",
+        )
+        .unwrap();
+        fs::write(bar_dir.join("utils.js"), "export const tag = 'bar';").unwrap();
+        fs::write(
+            bar_dir.join("index.js"),
+            "import { tag } from './utils.js';\nconsole.log(tag);",
+        )
+        .unwrap();
+
+        let registry = AssetUrlRegistry::new();
+        let mut components = HashMap::new();
+        components.insert("foo".to_string(), "scripts/foo/index.js".to_string());
+        components.insert("bar".to_string(), "scripts/bar/index.js".to_string());
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+
+        run_scripts_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &components,
+            &registry,
+            &mut manifest,
+        )
+        .unwrap();
+
+        assert!(manifest.contains_key("scripts/foo/utils.js"));
+        assert!(manifest.contains_key("scripts/bar/utils.js"));
+        assert_ne!(
+            manifest["scripts/foo/utils.js"].url, manifest["scripts/bar/utils.js"].url,
+            "les deux modules homonymes doivent produire des URLs hachées distinctes \
+             (contenus différents, hash différent) — aucune écrasée par l'autre"
+        );
+        assert_eq!(
+            manifest.len(),
+            4,
+            "foo.js + bar.js (cibles) + scripts/foo/utils.js + scripts/bar/utils.js (dépendances)"
+        );
 
         let _ = fs::remove_dir_all(&sandbox);
     }

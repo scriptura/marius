@@ -55,9 +55,33 @@ pub(crate) struct ThemeConfig {
     /// Configuration du Service Worker PWA (`[service_worker]`).
     ///
     /// Section optionnelle. Si absente, le Service Worker est supposé se trouver
-    /// à la racine du thème (`service-worker.js`).
+    /// à la racine du thème (`serviceWorker.js`).
     #[serde(default)]
     pub(crate) service_worker: Option<ServiceWorkerConfig>,
+
+    /// Bibliothèques frontend tierces vendoriées (`[libraries.*]`) —
+    /// SPEC-canonical-asset-identity.md §6.
+    ///
+    /// Autorisation de découverte récursive, jamais un second pipeline
+    /// d'assets : chaque `root` déclaré est walké au build, chaque fichier
+    /// trouvé rejoint la même liste que `[static.verbatim].files` avant
+    /// d'entrer dans `run_verbatim_pipeline` — traitement strictement
+    /// identique une fois découvert, aucune bifurcation. Clé de la
+    /// `HashMap` = nom logique de la bibliothèque, jamais utilisé comme
+    /// namespace d'identité (§9 : un asset de bibliothèque reçoit son
+    /// `CanonicalAssetId` = son chemin réel sous le thème, pas un préfixe
+    /// dérivé de cette clé).
+    #[serde(default)]
+    pub(crate) libraries: HashMap<String, LibraryConfig>,
+}
+
+/// Une entrée de `[libraries.<nom>]`.
+#[derive(Deserialize)]
+pub(crate) struct LibraryConfig {
+    /// Répertoire racine de la bibliothèque, relatif au thème — tout son
+    /// sous-arbre est autorisé à entrer dans le build (JS, CSS, images,
+    /// fonts, `.map`, sans distinction — SPEC §6).
+    pub(crate) root: String,
 }
 
 #[derive(Deserialize)]

@@ -36,7 +36,7 @@ use serde_json::Value;
 
 use crate::config::WebManifestConfig;
 use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
-use crate::resolve::resolve_asset_reference;
+use crate::resolve::{ReferenceOrigin, resolve_asset_reference};
 
 /// Erreur survenant lors de la lecture, la mutation ou la sérialisation du manifeste W3C.
 ///
@@ -85,7 +85,11 @@ pub(crate) fn run_webmanifest_pipeline(
                 continue;
             };
 
-            match resolve_asset_reference(src, asset_url_registry) {
+            match resolve_asset_reference(
+                src,
+                ReferenceOrigin::RelativeToThemeRoot,
+                asset_url_registry,
+            ) {
                 Ok(Some(resolved)) => {
                     icon["src"] = Value::String(resolved);
                 }
@@ -150,6 +154,7 @@ pub(crate) fn run_webmanifest_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::CanonicalAssetId;
 
     // ── run_webmanifest_pipeline (Phase 6) ───────────────────────────────────
     //
@@ -185,11 +190,11 @@ mod tests {
 
         let mut registry = AssetUrlRegistry::new();
         registry.insert(
-            "logoAny.svg".to_string(),
+            CanonicalAssetId::from_theme_relative_path(Path::new("favicons/logoAny.svg")),
             "/favicons/logoAny.12452.svg".to_string(),
         );
         registry.insert(
-            "logo192.png".to_string(),
+            CanonicalAssetId::from_theme_relative_path(Path::new("favicons/logo192.png")),
             "/favicons/logo192.53aea.png".to_string(),
         );
 

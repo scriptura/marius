@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use crate::config::ServiceWorkerConfig;
 use crate::js_minify::minify_javascript;
 use crate::manifest::{AssetEntry, AssetUrlRegistry, hash_content, join_slash, mime_for_extension};
-use crate::resolve::resolve_asset_reference;
+use crate::resolve::{ReferenceOrigin, resolve_asset_reference};
 use crate::scripts::{
     JsPipelineError, find_unescaped_quote, skip_block_comment, skip_line_comment,
 };
@@ -134,7 +134,7 @@ fn resolve_service_worker_literal(
     if literal == "/" || literal.ends_with(".html") {
         return Ok(literal.to_string());
     }
-    match resolve_asset_reference(literal, registry) {
+    match resolve_asset_reference(literal, ReferenceOrigin::RelativeToThemeRoot, registry) {
         Ok(Some(resolved)) => Ok(resolved),
         // Structurellement improbable ici (Niveau 1 exige déjà un `/` en
         // tête, alors que `is_external_url` reconnaît `#`/`//`/`data:`/
@@ -301,6 +301,7 @@ pub(crate) fn run_service_worker_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::CanonicalAssetId;
 
     // ── resolve_service_worker_literal / scan_and_resolve_service_worker
     // ── (Handoff §3, [service_worker]) ───────────────────────────────────
@@ -342,7 +343,10 @@ mod tests {
     #[test]
     fn resolve_service_worker_literal_resolves_known_asset() {
         let mut registry = AssetUrlRegistry::new();
-        registry.insert("main.css".to_string(), "/styles/main.a1b2c.css".to_string());
+        registry.insert(
+            CanonicalAssetId::from_theme_relative_path(Path::new("styles/main.css")),
+            "/styles/main.a1b2c.css".to_string(),
+        );
         let ctx = Path::new("sw.js");
         assert_eq!(
             resolve_service_worker_literal("/styles/main.css", &registry, ctx).unwrap(),
@@ -412,7 +416,7 @@ mod tests {
     fn scan_and_resolve_service_worker_rewrites_asset_path_in_place() {
         let mut registry = AssetUrlRegistry::new();
         registry.insert(
-            "utils.svg".to_string(),
+            CanonicalAssetId::from_theme_relative_path(Path::new("sprites/utils.svg")),
             "/sprites/utils.4c4e9.svg".to_string(),
         );
         let ctx = Path::new("sw.js");
@@ -464,7 +468,10 @@ mod tests {
         .unwrap();
 
         let mut registry = AssetUrlRegistry::new();
-        registry.insert("main.css".to_string(), "/styles/main.a1b2c.css".to_string());
+        registry.insert(
+            CanonicalAssetId::from_theme_relative_path(Path::new("styles/main.css")),
+            "/styles/main.a1b2c.css".to_string(),
+        );
         let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
         let config = ServiceWorkerConfig {
             entry: "service-worker.js".to_string(),

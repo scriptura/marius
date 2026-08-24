@@ -20,9 +20,10 @@
 //! | Module | Section `theme.toml` | Responsabilité |
 //! | :--- | :--- | :--- |
 //! | `config.rs` | Racine | Désérialisation du fichier de configuration `theme.toml`. |
-//! | `manifest.rs` | Partagé | Gestion du manifeste (E/S), `AssetUrlRegistry`, hachage, MIME et utilitaires de chemin. |
-//! | `resolve.rs` | Partagé | Résolution d'URL partagée (CSS, JS, SW, Webmanifest). |
-//! | `verbatim.rs` | `[static.verbatim]` | Copie et transfert brut des actifs statiques. |
+//! | `manifest.rs` | Partagé | Gestion du manifeste (E/S), `AssetUrlRegistry`, `CanonicalAssetId`, hachage, MIME et utilitaires de chemin. |
+//! | `resolve.rs` | Partagé | Canonicalisation/résolution partagée (CSS, JS, SW, Webmanifest). |
+//! | `libraries.rs` | `[libraries]` | Découverte récursive des bibliothèques tierces vendoriées. |
+//! | `verbatim.rs` | `[static.verbatim]` | Copie et transfert brut des actifs statiques (+ fichiers découverts par `[libraries.*]`). |
 //! | `webmanifest.rs` | `[webmanifest]` | Pipeline de génération du Web App Manifest. |
 //! | `sprites.rs` | `[sprites]` | Assemblage AOT des sprites. |
 //! | `styles.rs` | `[styles]` | Transformation CSS (résolution de `$variables`, boucles `@for`, `url()` et LightningCSS). |
@@ -42,6 +43,7 @@ use std::path::PathBuf;
 
 mod config;
 mod js_minify;
+mod libraries;
 mod manifest;
 mod resolve;
 mod scripts;
@@ -52,7 +54,8 @@ mod verbatim;
 mod webmanifest;
 
 use config::ThemeConfig;
-use manifest::{AssetEntry, AssetManifest, AssetUrlRegistry, join_slash};
+use libraries::discover_library_files;
+use manifest::{AssetEntry, AssetManifest, AssetUrlRegistry, CanonicalAssetId, join_slash};
 use scripts::run_scripts_pipeline;
 use service_worker::run_service_worker_pipeline;
 use sprites::run_sprites_pipeline;
@@ -118,13 +121,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
 
+    // [libraries.*] (SPEC-canonical-asset-identity.md §6) — découverte
+    // récursive AVANT le pipeline verbatim, jamais un second pipeline :
+    // chaque fichier découvert rejoint la MÊME liste que
+    // [static.verbatim].files, traité ensuite de façon strictement
+    // identique par run_verbatim_pipeline, sans aucune bifurcation ni
+    // type d'identité propre (SPEC §9). Ordre stable (tri par nom de
+    // bibliothèque) pour la reproductibilité du build, même discipline
+    // que [sprites]/[scripts] plus bas.
+    let mut library_names: Vec<&String> = theme.libraries.keys().collect();
+    library_names.sort();
+
+    let mut all_verbatim_files = theme.static_.verbatim.files.clone();
+    for name in library_names {
+        let lib = &theme.libraries[name];
+        let discovered = discover_library_files(&theme_dir, &lib.root)
+            .map_err(|e| format!("libraries.{name} (root = {:?}) : {e}", lib.root))?;
+        if discovered.is_empty() {
+            println!(
+                "cargo:warning=[marius-assets] libraries.{name} : root {:?} ne contient aucun fichier",
+                lib.root
+            );
+        }
+        all_verbatim_files.extend(discovered);
+    }
+
     // Ordonnancement obligatoire (spec §10.1) : verbatim (résout le
     // registre d'URLs) AVANT styles (le consomme) — jamais l'inverse.
     let asset_url_registry = run_verbatim_pipeline(
         &theme_dir,
         &build_root,
         &build_root_rel,
-        &theme.static_.verbatim.files,
+        &all_verbatim_files,
         &mut manifest,
     )?;
 
@@ -232,10 +260,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // pour réutiliser `resolve_asset_reference` (qui exige
         // `&AssetUrlRegistry`) sans le modifier — `AssetUrlRegistry` et
         // `manifest` sont deux structures distinctes du code réel (l'une
-        // ne contient QUE le verbatim, l'autre TOUTES les clés).
+        // ne contient QUE le verbatim, l'autre TOUTES les clés). Clé :
+        // `CanonicalAssetId` — même identité que partout ailleurs dans ce
+        // crate depuis SPEC-canonical-asset-identity.md (les clés de
+        // `manifest` sont déjà des chemins canoniques en `String`, il
+        // suffit de les reconstruire en `CanonicalAssetId`, jamais de les
+        // retronquer).
         let manifest_url_registry: AssetUrlRegistry = manifest
             .iter()
-            .map(|(k, v)| (k.clone(), v.url.clone()))
+            .map(|(k, v)| {
+                (
+                    CanonicalAssetId::from_theme_relative_path(std::path::Path::new(k)),
+                    v.url.clone(),
+                )
+            })
             .collect();
 
         run_service_worker_pipeline(

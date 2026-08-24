@@ -10,6 +10,64 @@ use std::path::Path;
 
 use serde::Serialize;
 
+/// Identité canonique d'un asset — SPEC-canonical-asset-identity.md §1.
+///
+/// Chemin relatif à la racine du thème, slashes forcés, sans segment `.`
+/// ni `..` résiduel, jamais de slash de tête. Remplace `file_name()` comme
+/// mécanisme d'identité/résolution (§4) : deux fichiers physiques
+/// distincts ne peuvent jamais produire le même `CanonicalAssetId`.
+///
+/// Type distinct (`newtype`) plutôt qu'un `String` nu — empêche qu'une
+/// référence brute, non canonicalisée, soit passée par erreur là où une
+/// identité déjà résolue est attendue (confusion de niveau que le compilateur
+/// rejette maintenant, jamais un contrat purement documentaire).
+///
+/// Ne porte aucune notion de provenance (thème/bibliothèque, §9) : un
+/// asset de bibliothèque et un asset du thème partagent exactement ce
+/// type, leur seule différence est la manière dont ils ont été autorisés
+/// à entrer dans le build (`[static.verbatim].files` énumère,
+/// `[libraries.*].root` découvre) — jamais une propriété de l'identité
+/// elle-même.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct CanonicalAssetId(String);
+
+impl CanonicalAssetId {
+    /// Construit un `CanonicalAssetId` à partir d'un chemin DÉJÀ canonique
+    /// — segments réels du système de fichiers, relatifs à la racine du
+    /// thème. N'effectue AUCUNE résolution de specifier utilisateur (pas
+    /// de jonction avec une origine, pas de normalisation `.`/`..` au-delà
+    /// de ce que `path_to_slash` fait déjà sur un chemin propre) : c'est
+    /// `canonicalize_reference` (resolve.rs) qui porte cette responsabilité
+    /// pour une référence BRUTE. Ce constructeur sert les appelants qui
+    /// connaissent déjà un chemin réel (verbatim, découverte de
+    /// bibliothèque, module JS de l'arène).
+    pub(crate) fn from_theme_relative_path(p: &Path) -> Self {
+        Self(path_to_slash(p))
+    }
+
+    /// Construit directement depuis une chaîne déjà canonique — utilisé
+    /// par `canonicalize_reference` une fois la normalisation effectuée.
+    /// `pub(crate)` comme le reste : jamais construit hors de ce crate
+    /// sans passer par l'une des deux voies de canonicalisation connues.
+    pub(crate) fn from_canonical_string(s: String) -> Self {
+        Self(s)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for CanonicalAssetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Manifeste d'assets sérialisé en `manifest.toml`.
 ///
 /// ## Contrat de Sérialisation (Phase de Build)
@@ -47,16 +105,22 @@ pub(crate) struct AssetEntry {
 ///
 /// ## Ordonnancement & Rôle
 ///
-/// Construit par le pipeline `[static.verbatim]` **avant** l'exécution du pipeline `[styles]`.
-/// Sert de source de vérité pour valider et réécrire toutes les directives `url()`
-/// du CSS (polices, images de fond). Si une ressource est absente, le build CSS échoue.
+/// Construit par le pipeline `[static.verbatim]` (et, depuis
+/// SPEC-canonical-asset-identity.md, par la découverte `[libraries.*]` —
+/// même pipeline, mêmes invariants, aucune bifurcation de traitement)
+/// **avant** l'exécution des pipelines `[styles]`/`[scripts]`. Sert de
+/// source de vérité pour résoudre toute référence canonicalisée
+/// (`CanonicalAssetId`) vers son URL publique hachée.
 ///
-/// ## Limite Architecturale Connue (Collisions)
+/// ## Invariant d'identité (SPEC-canonical-asset-identity.md §5)
 ///
-/// La clé de résolution est le **nom de fichier seul** (héritage de la conception originelle
-/// des polices), pas le chemin relatif complet. Deux fichiers homonymes dans des sous-dossiers
-/// distincts provoqueront un écrasement silencieux (la dernière écriture gagne).
-pub(crate) type AssetUrlRegistry = HashMap<String, String>;
+/// La clé est un `CanonicalAssetId` — chemin canonique complet relatif à
+/// la racine du thème, **jamais** un nom de fichier seul. Deux fichiers de
+/// même nom sous des répertoires distincts (deux bibliothèques, ou une
+/// bibliothèque et le thème) coexistent sans collision : c'est précisément
+/// la limite de l'ancien modèle (`file_name()` seul) que cette identité
+/// élimine, pas un héritage à documenter comme acceptable.
+pub(crate) type AssetUrlRegistry = HashMap<CanonicalAssetId, String>;
 
 /// Résolution MIME statique ($O(1)$).
 ///
