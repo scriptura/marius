@@ -140,8 +140,8 @@ const MARKER_DROP_DURATION = 1000;
 
 const SVG_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="${ICON_WIDTH}" height="${ICON_HEIGHT}" viewBox="0 0 ${ICON_WIDTH} ${ICON_HEIGHT}">
   <defs>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="15" dy="15" stdDeviation="15" flood-color="#000000" flood-opacity="0.5" />
+	  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="30" dy="30" stdDeviation="25" flood-color="#000000" flood-opacity="0.4" />
     </filter>
   </defs>
   <g filter="url(#shadow)">
