@@ -18,21 +18,6 @@
   */
 }
 
-/*
-@note La logique de ces filtres CSS a été déplacée directement vers le Fragment Shader (GPU) des tuiles.
-.map-grayscale .leaflet-layer {
-  filter: grayscale(1);
-}
-
-.map-dark .leaflet-layer {
-  filter: grayscale(1) invert(1) brightness(1.1) contrast(0.7);
-}
-
-.map-vintage .leaflet-layer {
-  filter: sepia(0.5);
-}
-*/
-
 .map-vintage {
 
   &::before,

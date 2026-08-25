@@ -1312,7 +1312,20 @@ pub(crate) fn run_styles_pipeline(
             .ok_or_else(|| format!("styles : nom de fichier invalide : {rel_path}"))?
             .to_string_lossy();
 
-        let logical_key = format!("{stem}.css");
+        // Clé canonique complète (SPEC-canonical-asset-identity.md §5) —
+        // préserve le répertoire d'origine (ex. "styles/"), normalise
+        // l'extension vers ".css" (la source peut être ".scss"/".mcss" :
+        // c'est la forme SERVIE, celle que tout appelant externe écrit
+        // réellement — cf. service_worker.rs, littéral "/styles/main.css"
+        // — pas la forme brute du fichier source). Correctif réel,
+        // découvert en usage : l'ancienne clé plate ("{stem}.css" seul,
+        // sans répertoire) désynchronisait cette entrée du reste du
+        // registre, cassant toute résolution externe vers elle
+        // (AssetNotFound côté service_worker.rs en pratique).
+        let parent = rel.parent().unwrap_or_else(|| Path::new(""));
+        let canonical_path = parent.join(format!("{stem}.css"));
+        let logical_key = CanonicalAssetId::from_theme_relative_path(&canonical_path).into_string();
+
         let hashed_filename = format!("{stem}.{short_hash}.css");
         let output_rel = join_slash("styles", &hashed_filename);
         let output_abs = build_root.join(&output_rel);
