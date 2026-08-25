@@ -197,58 +197,15 @@ const parseTileServer = (template) => {
 	return cleanTmpl;
 };
 
-// ─── Easing CSS `ease` ──────────────────────────────────────────────────────
-//
-// Cubic-bezier(0.25, 0.1, 0.25, 1)
-//
-// Cette fonction résout x(t) afin d'obtenir la progression y correspondant
-// exactement au comportement d'un easing CSS `ease`.
+// ─── Easings physiques (O(1), zéro allocation) ────────────────────────────────
 
-const cssEase = (t) => {
-	if (t <= 0) {
-		return 0;
-	}
+// Montée (bounce-up) : Ease-Out Quad
+// Vitesse max à t=0 (décollage), vitesse nulle à t=1 (apogée)
+const easeOutQuad = (t) => t * (2 - t);
 
-	if (t >= 1) {
-		return 1;
-	}
-
-	const x1 = 0.25;
-	const y1 = 0.1;
-	const x2 = 0.25;
-	const y2 = 1;
-
-	const cx = 3 * x1;
-	const bx = 3 * (x2 - x1) - cx;
-	const ax = 1 - cx - bx;
-
-	const cy = 3 * y1;
-	const by = 3 * (y2 - y1) - cy;
-	const ay = 1 - cy - by;
-
-	let u = t;
-
-	for (let i = 0; i < 5; i++) {
-		const x = ((ax * u + bx) * u + cx) * u;
-		const dx = (3 * ax * u + 2 * bx) * u + cx;
-
-		if (Math.abs(dx) < 1e-6) {
-			break;
-		}
-
-		u -= (x - t) / dx;
-
-		if (u < 0) {
-			u = 0;
-		}
-
-		if (u > 1) {
-			u = 1;
-		}
-	}
-
-	return ((ay * u + by) * u + cy) * u;
-};
+// Descente (bounce-down) : Ease-In Quad
+// Vitesse nulle à t=0 (apogée), accélération max à t=1 (impact sol)
+const easeInQuad = (t) => t * t;
 
 // ─── Easing Drop ─────────────────────────────────────────────────────────────
 //
@@ -507,24 +464,6 @@ const initMap = async (config) => {
 	 */
 	let dropPhase = 0;
 
-	/*
-	 * État explicite du bounce.
-	 *
-	 * "up"   : 0 -> -16
-	 * "down" : -16 -> 0
-	 * "leave": position courante -> 0
-	 * null   : aucun bounce actif
-	 */
-	let bouncePhase = null;
-
-	/*
-	 * Cible actuellement représentée par la couche visuelle.
-	 *
-	 * Cette valeur n'est pas utilisée pour calculer l'animation frame par frame.
-	 * Elle sert uniquement à décrire l'état logique demandé à Deck.gl.
-	 */
-	let bounceTarget = 0;
-
 	// ─── Calcul du décalage initial ──────────────────────────────────────────
 
 	const rect = el.getBoundingClientRect();
@@ -634,110 +573,32 @@ const initMap = async (config) => {
 							duration:
 								transition === "drop"
 									? MARKER_DROP_DURATION
-									: transition === "leave"
-										? MARKER_BOUNCE_HALF_DURATION
-										: MARKER_BOUNCE_HALF_DURATION,
+									: MARKER_BOUNCE_HALF_DURATION,
 
-							easing: transition === "drop" ? dropEase : cssEase,
+							// Routage explicite de la dynamique selon la phase
+							easing:
+								transition === "drop"
+									? dropEase
+									: transition === "bounce-up"
+										? easeOutQuad
+										: transition === "bounce-down"
+											? easeInQuad
+											: easeOutQuad, // "leave" (retour doux vers 0)
 
-							onStart: () => {
-								if (transition === "bounce-up") {
-									console.log(
-										"[BOUNCE TRANSITION]",
-										performance.now().toFixed(3),
-										"phase:",
-										"up",
-										"target:",
-										targetOffset,
-										"generation:",
-										generation,
-									);
-								} else if (transition === "bounce-down") {
-									console.log(
-										"[BOUNCE TRANSITION]",
-										performance.now().toFixed(3),
-										"phase:",
-										"down",
-										"target:",
-										targetOffset,
-										"generation:",
-										generation,
-									);
-								} else if (transition === "leave") {
-									console.log(
-										"[BOUNCE TRANSITION]",
-										performance.now().toFixed(3),
-										"phase:",
-										"leave",
-										"target:",
-										targetOffset,
-										"generation:",
-										generation,
-									);
-								}
-							},
+							onStart: () => {},
 
 							onEnd: () => {
 								if (transition === "drop") {
-									if (generation !== animationGeneration) {
-										return;
-									}
-
+									if (generation !== animationGeneration) return;
 									dropPhase = 2;
-
-									console.log(
-										"[DROP END]",
-										performance.now().toFixed(3),
-										"generation:",
-										generation,
-									);
-
 									return;
 								}
 
-								/*
-								 * Une transition de bounce peut avoir été
-								 * remplacée entre-temps.
-								 *
-								 * Dans ce cas, elle ne possède plus aucun
-								 * droit de programmer la suite du cycle.
-								 */
-								if (generation !== animationGeneration) {
-									return;
-								}
+								if (generation !== animationGeneration) return;
 
-								/*
-								 * Le marker n'est plus survolé.
-								 *
-								 * La transition de leave est terminale.
-								 */
-								if (transition === "leave") {
-									bouncePhase = null;
-									bounceTarget = 0;
+								if (transition === "leave") return;
 
-									return;
-								}
-
-								/*
-								 * Fin de montée :
-								 *
-								 *   -16 -> 0
-								 */
 								if (transition === "bounce-up") {
-									bouncePhase = "down";
-									bounceTarget = 0;
-
-									console.log(
-										"[BOUNCE NEXT]",
-										performance.now().toFixed(3),
-										"from:",
-										MARKER_BOUNCE_OFFSET,
-										"to:",
-										0,
-										"generation:",
-										generation,
-									);
-
 									deckgl.setProps({
 										layers: [
 											tileLayer,
@@ -745,32 +606,10 @@ const initMap = async (config) => {
 											createVisualLayer(0, generation, "bounce-down"),
 										],
 									});
-
 									return;
 								}
 
-								/*
-								 * Fin de descente :
-								 *
-								 *   0 -> -16
-								 *
-								 * Le cycle recommence immédiatement.
-								 */
 								if (transition === "bounce-down") {
-									bouncePhase = "up";
-									bounceTarget = MARKER_BOUNCE_OFFSET;
-
-									console.log(
-										"[BOUNCE NEXT]",
-										performance.now().toFixed(3),
-										"from:",
-										0,
-										"to:",
-										MARKER_BOUNCE_OFFSET,
-										"generation:",
-										generation,
-									);
-
 									deckgl.setProps({
 										layers: [
 											tileLayer,
@@ -785,23 +624,7 @@ const initMap = async (config) => {
 								}
 							},
 
-							onInterrupt: () => {
-								if (
-									transition === "bounce-up" ||
-									transition === "bounce-down"
-								) {
-									console.log(
-										"[BOUNCE INTERRUPT]",
-										performance.now().toFixed(3),
-										"phase:",
-										bouncePhase,
-										"target:",
-										targetOffset,
-										"generation:",
-										generation,
-									);
-								}
-							},
+							onInterrupt: () => {},
 						},
 					}
 				: undefined,
@@ -834,60 +657,16 @@ const initMap = async (config) => {
 		getPosition: (d) => d.position,
 
 		onHover: ({ index }) => {
-			/*
-			 * Le picking ne connaît pas l'animation.
-			 *
-			 * Il ne fait que signaler une transition d'état logique :
-			 *
-			 *   -1 -> index : entrée
-			 *   index -> -1 : sortie
-			 *
-			 * Les événements répétés avec la même valeur sont ignorés.
-			 */
-			if (index === hoveredIndex) {
-				return;
-			}
-
-			if (dropPhase !== 2) {
-				return;
-			}
-
-			const previousIndex = hoveredIndex;
+			if (index === hoveredIndex) return;
+			if (dropPhase !== 2) return;
 
 			hoveredIndex = index;
-
-			console.log(
-				"[PICK]",
-				performance.now().toFixed(3),
-				"from:",
-				previousIndex,
-				"to:",
-				index,
-			);
-
 			animationGeneration++;
 
 			const generation = animationGeneration;
 
-			// ─── Entrée sur le marker ────────────────────────────────────────
-
+			// Entrée sur le marker
 			if (index >= 0) {
-				bouncePhase = "up";
-				bounceTarget = MARKER_BOUNCE_OFFSET;
-
-				console.log(
-					"[BOUNCE START]",
-					performance.now().toFixed(3),
-					"from:",
-					previousIndex,
-					"to:",
-					index,
-					"generation:",
-					generation,
-					"target:",
-					MARKER_BOUNCE_OFFSET,
-				);
-
 				deckgl.setProps({
 					layers: [
 						tileLayer,
@@ -895,26 +674,10 @@ const initMap = async (config) => {
 						createVisualLayer(MARKER_BOUNCE_OFFSET, generation, "bounce-up"),
 					],
 				});
-
 				return;
 			}
 
-			// ─── Sortie du marker ───────────────────────────────────────────
-
-			bouncePhase = "leave";
-			bounceTarget = 0;
-
-			console.log(
-				"[BOUNCE LEAVE]",
-				performance.now().toFixed(3),
-				"from:",
-				previousIndex,
-				"to:",
-				index,
-				"generation:",
-				generation,
-			);
-
+			// Sortie du marker
 			deckgl.setProps({
 				layers: [
 					tileLayer,
@@ -978,13 +741,6 @@ const initMap = async (config) => {
 	 * précédente à interpoler.
 	 */
 	dropPhase = 1;
-
-	console.log(
-		"[DROP START]",
-		performance.now().toFixed(3),
-		"generation:",
-		animationGeneration,
-	);
 
 	deckgl.setProps({
 		layers: [
