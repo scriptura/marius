@@ -140,13 +140,13 @@ const MARKER_DROP_DURATION = 1000;
 
 const SVG_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="${ICON_WIDTH}" height="${ICON_HEIGHT}" viewBox="0 0 ${ICON_WIDTH} ${ICON_HEIGHT}">
   <defs>
-	  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="30" dy="30" stdDeviation="25" flood-color="#000000" flood-opacity="0.4" />
+	<filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="30" dy="30" stdDeviation="45" flood-color="#000000" flood-opacity="0.5" />
     </filter>
   </defs>
   <g filter="url(#shadow)">
-    <path fill="#FF8052" d="M256 14C146 14 57 102 57 211c0 172 199 295 199 295s199-120 199-295c0-109-89-197-199-197zm0 281a94 94 0 1 1 0-187 94 94 0 0 1 0 187z"></path>
-    <path fill="#D96D45" d="M256 14v94a94 94 0 0 1 0 187v211s199-120 199-295c0-109-89-197-199-197z"></path>
+    <path fill="#ff8052" d="M256 34c-99 0-179 79-179 177 0 154 179 265 179 265s179-108 179-265c0-98-80-177-179-177m0 88a85 85 0 0 1 85 85 85 85 0 0 1-85 85 85 85 0 0 1-85-85 85 85 0 0 1 85-85"/>
+    <path fill="#d96d45" d="M256 34v88a85 85 0 0 1 85 85 85 85 0 0 1-85 85v183s179-108 179-265c0-98-80-177-179-177"/>
   </g>
 </svg>`;
 
@@ -516,6 +516,14 @@ const initMap = async (config) => {
 	 * null   : aucun bounce actif
 	 */
 	let bouncePhase = null;
+
+	/*
+	 * Cible actuellement représentée par la couche visuelle.
+	 *
+	 * Cette valeur n'est pas utilisée pour calculer l'animation frame par frame.
+	 * Elle sert uniquement à décrire l'état logique demandé à Deck.gl.
+	 */
+	let bounceTarget = 0;
 
 	// ─── Calcul du décalage initial ──────────────────────────────────────────
 
