@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-08-20 23:36:27
+**Généré le:** 2026-08-24 13:52:14
 
 ## Racine du Workspace
 
@@ -209,14 +209,17 @@
 │   ├── fragment-forge-guide.md
 │   ├── js-deps-capacites-frontend-guide.md
 │   ├── meta-tooling-guide.md
-│   ├── postgres-cmd.md
 │   ├── runtime-lifecycle-guide.md
-│   └── scenario-ajout-champ-varlena.md
+│   ├── scenario-ajout-champ-varlena.md
+│   └── terminal-memo-cmd.md
 ├── handoffs
 │   ├── ADDENDUM-modules-placeholder-static-pages.md
 │   ├── HANDOFF-js-deps-capacites-frontend-v2.md
 │   ├── SUIVI-js-deps-points-en-attente.md
-│   └── handoff-cartographie-hyper(ADR-011).md
+│   ├── enquete.md
+│   ├── handoff-cartographie-hyper(ADR-011).md
+│   ├── note-post-phase-5.3-generate-main.md
+│   └── risks.md
 ├── manifestos
 │   ├── DESIGN-projection-composition.md
 │   ├── article-0.md
@@ -241,7 +244,6 @@
 │   ├── horizontal-scaling-strategies-for-marius.md
 │   ├── pack_html_format-as-the-canonical-protocol-for-packfiles.md
 │   ├── r-and-d-technical-summary-marius-engine-architecture-phase-2.md
-│   ├── risks.md
 │   ├── shared-memory-memorandum.md
 │   ├── shared-memory-posix.md
 │   ├── template-language-evolution.md
@@ -264,29 +266,28 @@
 │   │   ├── ADR-010-chunking-of-large-varlena-objects.md
 │   │   ├── ADR-011-projections-ordonnancees.md
 │   │   └── ADR-rust-versus-zig.md
-│   ├── specifications
-│   │   ├── dependances-mode-page
-│   │   │   ├── core-system-blueprint.md
-│   │   │   ├── doc1-parser-mode-page.md
-│   │   │   ├── doc2-linker-lowering.md
-│   │   │   ├── doc3-orchestration-build-rs.md
-│   │   │   ├── graphe-dependances-mode-page.md
-│   │   │   └── mode-page-implementation-roadmap.md
-│   │   ├── db-forge-roadmap.md
-│   │   ├── db-forge-specification.md
-│   │   ├── marius-assets-roadmap.md
-│   │   ├── marius-assets-specification.md
-│   │   ├── marius-compilateur-projections-html-roadmap.md
-│   │   ├── marius-compilateur-projections-html-specification.md
-│   │   ├── marius-merge-rcu-specification-roadmap.md
-│   │   ├── marius-render-shell-roadmap.md
-│   │   ├── marius-render-shell-specification.md
-│   │   ├── orchestration-main-roadmap.md
-│   │   ├── orchestration-main-specification.md
-│   │   └── provisioning-projection-specification.md
-│   └── note-post-phase-5.3-generate-main.md
+│   └── specifications
+│       ├── dependances-mode-page
+│       │   ├── core-system-blueprint.md
+│       │   ├── doc1-parser-mode-page.md
+│       │   ├── doc2-linker-lowering.md
+│       │   ├── doc3-orchestration-build-rs.md
+│       │   ├── graphe-dependances-mode-page.md
+│       │   └── mode-page-implementation-roadmap.md
+│       ├── db-forge-roadmap.md
+│       ├── db-forge-specification.md
+│       ├── marius-assets-roadmap.md
+│       ├── marius-assets-specification.md
+│       ├── marius-compilateur-projections-html-roadmap.md
+│       ├── marius-compilateur-projections-html-specification.md
+│       ├── marius-merge-rcu-specification-roadmap.md
+│       ├── marius-render-shell-roadmap.md
+│       ├── marius-render-shell-specification.md
+│       ├── orchestration-main-roadmap.md
+│       ├── orchestration-main-specification.md
+│       └── provisioning-projection-specification.md
 └── memento.md
 
-20 directories, 85 files
+20 directories, 86 files
 ```
 

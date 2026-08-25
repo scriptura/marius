@@ -5,9 +5,6 @@
 
 {% block main_content %}<article class="article" id="{{ record.document_id }}">
 
-    {% script %}
-    <script src="{% asset deckgl.js %}" defer></script>{% endscript %}
-
     <header role="banner">
         <h1 class="main-heading">{{ record.headline }}</h1>
         <!-- record.alternative_headline -->
@@ -24,6 +21,9 @@
         </ul>
     </header>
     <div class="wrapper add-line-marks links add-drop-cap decorative-hr text-justify">
+
+        {% script %}
+        <script src="{% asset deckgl.js %}" defer></script>{% endscript %}
 
         <div class="grid gap gap-bottom">
             <div class="map" data-name="La Chaise-Dieu"

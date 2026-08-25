@@ -1,71 +1,295 @@
 /**
- * @file map2.js
- * @description Rendu cartographique GPU via Deck.gl UMD
+ * @file map.js
+ * @version 2.0.0
+ * @description
+ * Rendu cartographique GPU via Deck.gl UMD.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ARCHITECTURE DES MARKERS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Le rendu visuel et le picking sont volontairement désolidarisés.
+ *
+ * PICK LAYER
+ * ----------
+ * ScatterplotLayer
+ * - pickable: true
+ * - position logique fixe
+ * - hitbox fixe
+ * - rendu visuel transparent
+ * - aucune animation
+ *
+ * VISUAL LAYER
+ * ------------
+ * IconLayer
+ * - pickable: false
+ * - même position logique
+ * - déplacement vertical animé
+ *
+ * Cette séparation empêche le déplacement du marker visuel de déplacer
+ * également sa hitbox.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ANIMATION
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * DROP INITIAL
+ * ------------
+ * Déclenché une seule fois lorsque la map entre dans le viewport.
+ *
+ *   - position initiale : au-dessus de la map
+ *   - arrivée : position géographique définitive
+ *   - durée : 1000 ms
+ *   - rebond léger après impact
+ *
+ * HOVER BOUNCE
+ * ------------
+ * Le comportement reproduit la sémantique de :
+ *
+ *   animation: anim-bounce 0.35s ease infinite alternate;
+ *
+ * Une demi-animation dure donc 350 ms :
+ *
+ *   repos ──350ms──> -16px
+ *   -16px ──350ms──> repos
+ *
+ * Le cycle complet dure 700 ms.
+ *
+ * Chaque demi-mouvement est une véritable transition Deck.gl monotone
+ * utilisant le même easing que CSS `ease`.
+ *
+ * À la fin d'une demi-transition, la suivante est créée immédiatement.
+ * Il n'y a donc pas de temps mort entre montée et descente.
+ *
+ * Lors d'un mouseout, la transition courante est interrompue et une
+ * transition unique ramène le marker vers 0 px.
+ *
+ * Il n'y a volontairement :
+ *
+ *   - aucun requestAnimationFrame()
+ *   - aucune modification de gpuData
+ *   - aucune reconstruction de TileLayer
+ *   - aucune boucle CPU par frame
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * HITBOX
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Le rendu et le picking utilisent deux géométries différentes.
+ *
+ * MARKER_SIZE
+ * - taille du marker visuel dans IconLayer
+ *
+ * MARKER_HIT_DIAMETER
+ * - diamètre de la zone de picking dans ScatterplotLayer
+ *
+ * MARKER_HIT_RADIUS
+ * - rayon correspondant au diamètre de picking
+ *
+ * L'IconLayer est ancrée par son bord inférieur via anchorY.
+ * Le ScatterplotLayer est naturellement centré sur getPosition.
+ *
+ * Le picking est donc remonté de MARKER_SIZE / 2 pixels afin que son centre
+ * corresponde au centre visuel du marker au repos.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * TUILES
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * La TileLayer possède une identité stable et n'est jamais reconstruite
+ * pendant les animations des markers.
  */
 
-// Extraction depuis le namespace global instancié par le script statique UMD
-const { DeckGL, TileLayer, IconLayer } = window.deck;
+// Extraction depuis le namespace global instancié par le script statique UMD.
+const { DeckGL, TileLayer, IconLayer, ScatterplotLayer } = window.deck;
+
+// ─── Configuration statique ──────────────────────────────────────────────────
 
 const TILE_DEFAULT = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+
 const SUBDOMAINS = Object.freeze(["a", "b", "c"]);
-// Définition de l'atlas spatial (UV Mapping statique)
-const ICON_MAPPING = {
-	"marker-orange": {
-		x: 0,
-		y: 0,
-		width: 512,
-		height: 512,
-		anchorY: 512,
-		anchorX: 256,
-	},
-	"marker-blue": {
-		x: 512,
-		y: 0,
-		width: 512,
-		height: 512,
-		anchorY: 512,
-		anchorX: 256,
-	},
-};
+
+// ─── Géométrie des markers ───────────────────────────────────────────────────
+
+const MARKER_SIZE = 40;
+
+const MARKER_HIT_DIAMETER = 40;
+const MARKER_HIT_RADIUS = MARKER_HIT_DIAMETER / 2;
+
+// ─── Dimensions natives de l'asset SVG ───────────────────────────────────────
+
+const ICON_WIDTH = 512;
+const ICON_HEIGHT = 512;
+const ICON_ANCHOR_Y = ICON_HEIGHT;
+
+// ─── Animation des markers ───────────────────────────────────────────────────
+//
+// La référence CSS historique était :
+//
+//   animation: anim-bounce 0.35s ease infinite alternate;
+//
+// 350 ms correspond donc à UNE demi-oscillation.
+// Le cycle complet montée + descente dure 700 ms.
+
+const MARKER_BOUNCE_OFFSET = -16;
+const MARKER_BOUNCE_HALF_DURATION = 350;
+
+const MARKER_DROP_DURATION = 1000;
+
+// ─── Asset SVG ────────────────────────────────────────────────────────────────
+
+const SVG_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="${ICON_WIDTH}" height="${ICON_HEIGHT}" viewBox="0 0 ${ICON_WIDTH} ${ICON_HEIGHT}">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="15" dy="15" stdDeviation="15" flood-color="#000000" flood-opacity="0.5" />
+    </filter>
+  </defs>
+  <g filter="url(#shadow)">
+    <path fill="#FF8052" d="M256 14C146 14 57 102 57 211c0 172 199 295 199 295s199-120 199-295c0-109-89-197-199-197zm0 281a94 94 0 1 1 0-187 94 94 0 0 1 0 187z"></path>
+    <path fill="#D96D45" d="M256 14v94a94 94 0 0 1 0 187v211s199-120 199-295c0-109-89-197-199-197z"></path>
+  </g>
+</svg>`;
+
+const SVG_URI = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(SVG_ICON)}`;
 
 // ─── Extraction DOM (Single-Pass) ────────────────────────────────────────────
 
 const collectMapConfigs = () => {
 	const elements = document.querySelectorAll(".map");
 	const configs = new Array(elements.length);
+
 	for (let i = 0; i < elements.length; i++) {
 		const el = elements[i];
+
 		configs[i] = {
 			el,
-			// ... autres propriétés
+			tileServer: el.dataset.tileserver || null,
+			minZoom: Number(el.dataset.minzoom) || 2,
+			maxZoom: Number(el.dataset.maxzoom) || 19,
+			zoom: el.dataset.zoom ? Number(el.dataset.zoom) : null,
+			attribution: el.dataset.attribution || "",
 			placesRaw: el.dataset.places || "[]",
-			// Récupération du chemin injecté par Rust (fallback sur la racine par défaut)
-			atlasUrl: el.dataset.atlas || "/assets/default/sprites/atlas.svg",
 		};
 	}
+
 	return configs;
 };
 
-// ─── Résolution statique (Zero-Network Latency) ──────────────────────────────
+// ─── Résolution statique ─────────────────────────────────────────────────────
 
 const parseTileServer = (template) => {
-	if (!template) return TILE_DEFAULT;
+	if (!template) {
+		return TILE_DEFAULT;
+	}
 
 	const cleanTmpl = template.replace(/&amp;/g, "&");
 
-	// Si un sous-domaine est requis, on génère le tableau d'URLs pour le GPU
 	if (cleanTmpl.includes("{s}")) {
 		const urls = new Array(SUBDOMAINS.length);
+
 		for (let i = 0; i < SUBDOMAINS.length; i++) {
 			urls[i] = cleanTmpl.replace("{s}", SUBDOMAINS[i]);
 		}
+
 		return urls;
 	}
 
 	return cleanTmpl;
 };
 
-// ─── Pipeline GPU : Shader de post-traitement des tuiles ─────────────
+// ─── Easing CSS `ease` ──────────────────────────────────────────────────────
+//
+// Cubic-bezier(0.25, 0.1, 0.25, 1)
+//
+// Cette fonction résout x(t) afin d'obtenir la progression y correspondant
+// exactement au comportement d'un easing CSS `ease`.
+
+const cssEase = (t) => {
+	if (t <= 0) {
+		return 0;
+	}
+
+	if (t >= 1) {
+		return 1;
+	}
+
+	const x1 = 0.25;
+	const y1 = 0.1;
+	const x2 = 0.25;
+	const y2 = 1;
+
+	const cx = 3 * x1;
+	const bx = 3 * (x2 - x1) - cx;
+	const ax = 1 - cx - bx;
+
+	const cy = 3 * y1;
+	const by = 3 * (y2 - y1) - cy;
+	const ay = 1 - cy - by;
+
+	let u = t;
+
+	for (let i = 0; i < 5; i++) {
+		const x = ((ax * u + bx) * u + cx) * u;
+		const dx = (3 * ax * u + 2 * bx) * u + cx;
+
+		if (Math.abs(dx) < 1e-6) {
+			break;
+		}
+
+		u -= (x - t) / dx;
+
+		if (u < 0) {
+			u = 0;
+		}
+
+		if (u > 1) {
+			u = 1;
+		}
+	}
+
+	return ((ay * u + by) * u + cy) * u;
+};
+
+// ─── Easing Drop ─────────────────────────────────────────────────────────────
+//
+// Reproduction du mouvement :
+//
+//   0%   : -100%
+//   50%  :   0%
+//   75%  : -40px
+//   100% :   0
+//
+// L'easing retourne une progression normalisée [0, 1].
+
+const dropEase = (t) => {
+	if (t <= 0) {
+		return 0;
+	}
+
+	if (t >= 1) {
+		return 1;
+	}
+
+	if (t < 0.5) {
+		const p = t / 0.5;
+
+		return p * p * (3 - 2 * p);
+	}
+
+	if (t < 0.75) {
+		const p = (t - 0.5) / 0.25;
+		const eased = p * p * (3 - 2 * p);
+
+		return 1 - 0.12 * eased;
+	}
+
+	const p = (t - 0.75) / 0.25;
+	const eased = p * p * (3 - 2 * p);
+
+	return 0.88 + 0.12 * eased;
+};
+
+// ─── Pipeline GPU : Shader de post-traitement des tuiles ─────────────────────
 
 class ThemedBitmapLayer extends deck.BitmapLayer {
 	static layerName = "ThemedBitmapLayer";
@@ -73,48 +297,63 @@ class ThemedBitmapLayer extends deck.BitmapLayer {
 
 	getShaders() {
 		const shaders = super.getShaders();
+
 		shaders.inject = {
-			// Déclaration de la variable (uniform) envoyée par le CPU
 			"fs:#decl": "uniform float tileTheme;",
 
-			// Injection de l'algorithme à la fin du pipeline de couleur du fragment
 			"fs:DECKGL_FILTER_COLOR": `
-        if (tileTheme == 1.0) {
-          // Grayscale : Produit scalaire avec les coefficients de luminance standard
-          float luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-          color.rgb = vec3(luma);
-        } 
-        else if (tileTheme == 2.0) {
-          // Dark Mode : grayscale(1) invert(1) brightness(1.1) contrast(0.7)
-          float luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-          float inverted = 1.0 - luma;
-          float bright = inverted * 1.1;
-          
-          // Application mathématique du contraste CSS (basé sur un pivot à 0.5)
-          float finalLuma = (bright - 0.5) * 0.7 + 0.5;
-          color.rgb = vec3(finalLuma);
-        }
-		else if (tileTheme == 3.0) {
-          // Vintage (Sepia 50%) : Produit scalaire via la matrice W3C standard
-          vec3 sepia = vec3(
-            dot(color.rgb, vec3(0.393, 0.769, 0.189)),
-            dot(color.rgb, vec3(0.349, 0.686, 0.168)),
-            dot(color.rgb, vec3(0.272, 0.534, 0.131))
-          );
-          // mix(x, y, a) = x * (1 - a) + y * a (exécuté en 1 cycle d'horloge matériel)
-          color.rgb = mix(color.rgb, sepia, 0.5);
-        }
-      `,
+				if (tileTheme == 1.0) {
+					float luma = dot(
+						color.rgb,
+						vec3(0.299, 0.587, 0.114)
+					);
+
+					color.rgb = vec3(luma);
+				}
+				else if (tileTheme == 2.0) {
+					float luma = dot(
+						color.rgb,
+						vec3(0.299, 0.587, 0.114)
+					);
+
+					float inverted = 1.0 - luma;
+					float bright = inverted * 1.1;
+					float finalLuma = (bright - 0.5) * 0.7 + 0.5;
+
+					color.rgb = vec3(finalLuma);
+				}
+				else if (tileTheme == 3.0) {
+					vec3 sepia = vec3(
+						dot(
+							color.rgb,
+							vec3(0.393, 0.769, 0.189)
+						),
+						dot(
+							color.rgb,
+							vec3(0.349, 0.686, 0.131)
+						),
+						dot(
+							color.rgb,
+							vec3(0.272, 0.534, 0.131)
+						)
+					);
+
+					color.rgb = mix(color.rgb, sepia, 0.5);
+				}
+			`,
 		};
+
 		return shaders;
 	}
 
-	// Interception de l'ordre de dessin pour transférer la prop vers la VRAM
 	draw(opts) {
 		const { tileTheme = 0.0 } = this.props;
+
 		super.draw(
 			Object.assign({}, opts, {
-				uniforms: Object.assign({}, opts.uniforms, { tileTheme }),
+				uniforms: Object.assign({}, opts.uniforms, {
+					tileTheme,
+				}),
 			}),
 		);
 	}
@@ -126,47 +365,66 @@ const initMap = async (config) => {
 	const { el, tileServer, minZoom, maxZoom, zoom, attribution, placesRaw } =
 		config;
 
-	// Phase 1 : Layout mémoire CPU
+	// ─── Phase 1 : Layout mémoire CPU ────────────────────────────────────────
+
 	const rawData = JSON.parse(placesRaw);
 	const dataLength = rawData.length;
 	const gpuData = new Array(dataLength);
-	let minX = Infinity,
-		minY = Infinity,
-		maxX = -Infinity,
-		maxY = -Infinity;
-	// Détection des thèmes (fallback à 0.0 = couleur d'origine)
+
+	let minX = Infinity;
+	let minY = Infinity;
+	let maxX = -Infinity;
+	let maxY = -Infinity;
+
 	let themeValue = 0.0;
-	if (el.classList.contains("map-grayscale")) themeValue = 1.0;
-	else if (el.classList.contains("map-dark")) themeValue = 2.0;
-	else if (el.classList.contains("map-vintage")) themeValue = 3.0;
+
+	if (el.classList.contains("map-grayscale")) {
+		themeValue = 1.0;
+	} else if (el.classList.contains("map-dark")) {
+		themeValue = 2.0;
+	} else if (el.classList.contains("map-vintage")) {
+		themeValue = 3.0;
+	}
 
 	for (let i = 0; i < dataLength; i++) {
 		const item = rawData[i];
 		const popup = item[0];
 		const lat = item[1][0];
-		const lng = item[1][1]; // Inversion spatiale AOT : Lat/Lng -> Lng/Lat
+		const lng = item[1][1];
 
-		// Ajout de la propriété iconId (pointeur vers l'atlas)
-		gpuData[i] = { position: [lng, lat], popup, iconId: "marker-orange" };
+		gpuData[i] = {
+			position: [lng, lat],
+			popup,
+		};
 
-		if (lng < minX) minX = lng;
-		if (lat < minY) minY = lat;
-		if (lng > maxX) maxX = lng;
-		if (lat > maxY) maxY = lat;
+		if (lng < minX) {
+			minX = lng;
+		}
+
+		if (lat < minY) {
+			minY = lat;
+		}
+
+		if (lng > maxX) {
+			maxX = lng;
+		}
+
+		if (lat > maxY) {
+			maxY = lat;
+		}
 	}
 
-	// Phase 2 : Calcul de la matrice de vue globale
-	// Compensateur de projection : ajuste la valeur Leaflet pour le moteur Deck.gl
+	// ─── Phase 2 : Calcul de la matrice de vue globale ───────────────────────
+
 	const ZOOM_OFFSET = -1;
 	const targetZoom = zoom !== null ? zoom + ZOOM_OFFSET : null;
 
-	// 1. Calcul du clamping de la caméra (application stricte du compensateur)
 	const camMinZoom =
 		minZoom !== null && minZoom !== undefined ? minZoom + ZOOM_OFFSET : 0;
+
 	const camMaxZoom =
 		maxZoom !== null && maxZoom !== undefined ? maxZoom + ZOOM_OFFSET : 20;
 
-	// 2. Injection des limites (minZoom/maxZoom) dans l'état de la caméra
 	let initialViewState = {
 		longitude: 2.2137,
 		latitude: 46.2276,
@@ -177,7 +435,6 @@ const initMap = async (config) => {
 
 	if (dataLength > 0) {
 		if (minX === maxX && minY === maxY) {
-			// 1 point détecté
 			initialViewState = {
 				longitude: minX,
 				latitude: minY,
@@ -186,30 +443,27 @@ const initMap = async (config) => {
 				maxZoom: camMaxZoom,
 			};
 		} else {
-			// N points : Résolution de la matrice de vue via le WebMercatorViewport
-
-			// 1. Lecture des dimensions physiques du conteneur (fallback à 400px si non monté)
 			const rect = el.getBoundingClientRect();
+
 			const width = rect.width || 800;
 			const height = rect.height || 400;
 
-			// 2. Instanciation éphémère du calculateur de projection
-			const viewport = new deck.WebMercatorViewport({ width, height });
+			const viewport = new deck.WebMercatorViewport({
+				width,
+				height,
+			});
 
-			// 3. Calcul mathématique strict (lon, lat, zoom)
 			const fitted = viewport.fitBounds(
 				[
 					[minX, minY],
 					[maxX, maxY],
 				],
-				{ padding: 40 }, // Marge de sécurité de 40px pour l'ombre des icônes
+				{ padding: 40 },
 			);
 
 			initialViewState = {
 				longitude: fitted.longitude,
 				latitude: fitted.latitude,
-				// Verrouillage du zoom généré pour ne pas dépasser la résolution des tuiles (camMaxZoom)
-				// Note: fitted.zoom est déjà à l'échelle Deck.gl, le ZOOM_OFFSET n'y est pas nécessaire.
 				zoom: Math.min(fitted.zoom, camMaxZoom),
 				minZoom: camMinZoom,
 				maxZoom: camMaxZoom,
@@ -217,29 +471,479 @@ const initMap = async (config) => {
 		}
 	}
 
-	// Phase 3 : UI déportée
+	// ─── Phase 3 : UI déportée ──────────────────────────────────────────────
+
 	if (attribution) {
 		const attrNode = document.createElement("div");
-		// Isolation absolue requise car .map est positionné en absolute par la librairie
+
 		attrNode.style.cssText =
-			"position: absolute; bottom: 0; right: 0; z-index: 1; background: rgba(255,255,255,0.9); padding: 2px 5px; font-size: 11px; font-family: sans-serif; pointer-events: auto;";
+			"position: absolute; bottom: 0; right: 0; z-index: 1;" +
+			"background: rgba(255,255,255,0.9); padding: 2px 5px;" +
+			"font-size: 11px; font-family: sans-serif;";
+
 		attrNode.innerHTML = attribution;
+
 		el.appendChild(attrNode);
 	}
 
 	const resolvedServer = parseTileServer(tileServer);
 
-	// Phase 4 : Injection GPU
-	new DeckGL({
-		container: el,
-		initialViewState,
-		controller: true,
-		getTooltip: ({ object }) => {
-			if (!object) return null;
+	// ─── État d'interaction ─────────────────────────────────────────────────
 
-			// DeckGL gère le positionnement absolu du nœud DOM projeté depuis les coordonnées de la souris
+	let hoveredIndex = -1;
+
+	/*
+	 * Génération logique du hover.
+	 *
+	 * Elle permet d'invalider toute transition de bounce devenue obsolète
+	 * lorsqu'un nouveau changement d'état intervient.
+	 */
+	let animationGeneration = 0;
+
+	/*
+	 * 0 = markers hors champ
+	 * 1 = chute initiale
+	 * 2 = comportement normal
+	 */
+	let dropPhase = 0;
+
+	/*
+	 * État explicite du bounce.
+	 *
+	 * "up"   : 0 -> -16
+	 * "down" : -16 -> 0
+	 * "leave": position courante -> 0
+	 * null   : aucun bounce actif
+	 */
+	let bouncePhase = null;
+
+	// ─── Calcul du décalage initial ──────────────────────────────────────────
+
+	const rect = el.getBoundingClientRect();
+
+	const dropOffset = -(rect.height + MARKER_SIZE);
+
+	// ─── Identifiants stables ────────────────────────────────────────────────
+
+	const mapId = el.id || "default";
+
+	const tileLayerId = `raster-tiles-${mapId}`;
+	const pickLayerId = `marker-pick-${mapId}`;
+	const visualLayerId = `marker-visual-${mapId}`;
+
+	// ─── TileLayer ────────────────────────────────────────────────────────────
+
+	const tileLayer = new TileLayer({
+		id: tileLayerId,
+
+		data: resolvedServer,
+
+		minZoom,
+		maxZoom,
+
+		tileSize: 256,
+
+		renderSubLayers: (props) => {
+			const { boundingBox } = props.tile;
+
+			return new ThemedBitmapLayer(props, {
+				data: null,
+
+				image: props.data,
+
+				bounds: [
+					boundingBox[0][0],
+					boundingBox[0][1],
+					boundingBox[1][0],
+					boundingBox[1][1],
+				],
+
+				tileTheme: themeValue,
+			});
+		},
+	});
+
+	// ─── Référence DeckGL ────────────────────────────────────────────────────
+
+	let deckgl;
+
+	// ─── Contrôle du cycle de bounce ─────────────────────────────────────────
+
+	/*
+	 * Cette fonction constitue le point central de l'animation.
+	 *
+	 * Une transition est toujours monotone :
+	 *
+	 *   0 -> -16
+	 *   -16 -> 0
+	 *
+	 * Le chaînage est effectué uniquement dans onEnd().
+	 *
+	 * Cela reproduit la sémantique de CSS `alternate` sans demander à
+	 * Deck.gl d'interpoler une fonction non monotone.
+	 */
+	const createVisualLayer = (targetOffset, generation, transition = null) =>
+		new IconLayer({
+			id: visualLayerId,
+
+			data: gpuData,
+
+			pickable: false,
+
+			getPosition: (d) => d.position,
+
+			getIcon: () => ({
+				url: SVG_URI,
+				width: ICON_WIDTH,
+				height: ICON_HEIGHT,
+				anchorY: ICON_ANCHOR_Y,
+			}),
+
+			getSize: MARKER_SIZE,
+
+			getPixelOffset: (_, { index }) => {
+				// Pendant la phase initiale, tous les markers sont hors champ.
+				if (dropPhase === 0) {
+					return [0, dropOffset];
+				}
+
+				// Pendant le drop, Deck.gl anime vers la position nominale.
+				if (dropPhase === 1) {
+					return [0, 0];
+				}
+
+				// Comportement nominal.
+				if (index === hoveredIndex) {
+					return [0, targetOffset];
+				}
+
+				return [0, 0];
+			},
+
+			transitions: transition
+				? {
+						getPixelOffset: {
+							duration:
+								transition === "drop"
+									? MARKER_DROP_DURATION
+									: transition === "leave"
+										? MARKER_BOUNCE_HALF_DURATION
+										: MARKER_BOUNCE_HALF_DURATION,
+
+							easing: transition === "drop" ? dropEase : cssEase,
+
+							onStart: () => {
+								if (transition === "bounce-up") {
+									console.log(
+										"[BOUNCE TRANSITION]",
+										performance.now().toFixed(3),
+										"phase:",
+										"up",
+										"target:",
+										targetOffset,
+										"generation:",
+										generation,
+									);
+								} else if (transition === "bounce-down") {
+									console.log(
+										"[BOUNCE TRANSITION]",
+										performance.now().toFixed(3),
+										"phase:",
+										"down",
+										"target:",
+										targetOffset,
+										"generation:",
+										generation,
+									);
+								} else if (transition === "leave") {
+									console.log(
+										"[BOUNCE TRANSITION]",
+										performance.now().toFixed(3),
+										"phase:",
+										"leave",
+										"target:",
+										targetOffset,
+										"generation:",
+										generation,
+									);
+								}
+							},
+
+							onEnd: () => {
+								if (transition === "drop") {
+									if (generation !== animationGeneration) {
+										return;
+									}
+
+									dropPhase = 2;
+
+									console.log(
+										"[DROP END]",
+										performance.now().toFixed(3),
+										"generation:",
+										generation,
+									);
+
+									return;
+								}
+
+								/*
+								 * Une transition de bounce peut avoir été
+								 * remplacée entre-temps.
+								 *
+								 * Dans ce cas, elle ne possède plus aucun
+								 * droit de programmer la suite du cycle.
+								 */
+								if (generation !== animationGeneration) {
+									return;
+								}
+
+								/*
+								 * Le marker n'est plus survolé.
+								 *
+								 * La transition de leave est terminale.
+								 */
+								if (transition === "leave") {
+									bouncePhase = null;
+									bounceTarget = 0;
+
+									return;
+								}
+
+								/*
+								 * Fin de montée :
+								 *
+								 *   -16 -> 0
+								 */
+								if (transition === "bounce-up") {
+									bouncePhase = "down";
+									bounceTarget = 0;
+
+									console.log(
+										"[BOUNCE NEXT]",
+										performance.now().toFixed(3),
+										"from:",
+										MARKER_BOUNCE_OFFSET,
+										"to:",
+										0,
+										"generation:",
+										generation,
+									);
+
+									deckgl.setProps({
+										layers: [
+											tileLayer,
+											pickLayer,
+											createVisualLayer(0, generation, "bounce-down"),
+										],
+									});
+
+									return;
+								}
+
+								/*
+								 * Fin de descente :
+								 *
+								 *   0 -> -16
+								 *
+								 * Le cycle recommence immédiatement.
+								 */
+								if (transition === "bounce-down") {
+									bouncePhase = "up";
+									bounceTarget = MARKER_BOUNCE_OFFSET;
+
+									console.log(
+										"[BOUNCE NEXT]",
+										performance.now().toFixed(3),
+										"from:",
+										0,
+										"to:",
+										MARKER_BOUNCE_OFFSET,
+										"generation:",
+										generation,
+									);
+
+									deckgl.setProps({
+										layers: [
+											tileLayer,
+											pickLayer,
+											createVisualLayer(
+												MARKER_BOUNCE_OFFSET,
+												generation,
+												"bounce-up",
+											),
+										],
+									});
+								}
+							},
+
+							onInterrupt: () => {
+								if (
+									transition === "bounce-up" ||
+									transition === "bounce-down"
+								) {
+									console.log(
+										"[BOUNCE INTERRUPT]",
+										performance.now().toFixed(3),
+										"phase:",
+										bouncePhase,
+										"target:",
+										targetOffset,
+										"generation:",
+										generation,
+									);
+								}
+							},
+						},
+					}
+				: undefined,
+
+			updateTriggers: {
+				getPixelOffset: [hoveredIndex, targetOffset, dropPhase],
+			},
+		});
+
+	// ─── Couche de picking ───────────────────────────────────────────────────
+
+	const pickLayer = new ScatterplotLayer({
+		id: pickLayerId,
+
+		data: gpuData,
+
+		pickable: true,
+
+		stroked: false,
+		filled: true,
+
+		radiusUnits: "pixels",
+
+		getRadius: MARKER_HIT_RADIUS,
+
+		getPixelOffset: () => [0, MARKER_SIZE / 2],
+
+		getFillColor: [255, 255, 255, 0],
+
+		getPosition: (d) => d.position,
+
+		onHover: ({ index }) => {
+			/*
+			 * Le picking ne connaît pas l'animation.
+			 *
+			 * Il ne fait que signaler une transition d'état logique :
+			 *
+			 *   -1 -> index : entrée
+			 *   index -> -1 : sortie
+			 *
+			 * Les événements répétés avec la même valeur sont ignorés.
+			 */
+			if (index === hoveredIndex) {
+				return;
+			}
+
+			if (dropPhase !== 2) {
+				return;
+			}
+
+			const previousIndex = hoveredIndex;
+
+			hoveredIndex = index;
+
+			console.log(
+				"[PICK]",
+				performance.now().toFixed(3),
+				"from:",
+				previousIndex,
+				"to:",
+				index,
+			);
+
+			animationGeneration++;
+
+			const generation = animationGeneration;
+
+			// ─── Entrée sur le marker ────────────────────────────────────────
+
+			if (index >= 0) {
+				bouncePhase = "up";
+				bounceTarget = MARKER_BOUNCE_OFFSET;
+
+				console.log(
+					"[BOUNCE START]",
+					performance.now().toFixed(3),
+					"from:",
+					previousIndex,
+					"to:",
+					index,
+					"generation:",
+					generation,
+					"target:",
+					MARKER_BOUNCE_OFFSET,
+				);
+
+				deckgl.setProps({
+					layers: [
+						tileLayer,
+						pickLayer,
+						createVisualLayer(MARKER_BOUNCE_OFFSET, generation, "bounce-up"),
+					],
+				});
+
+				return;
+			}
+
+			// ─── Sortie du marker ───────────────────────────────────────────
+
+			bouncePhase = "leave";
+			bounceTarget = 0;
+
+			console.log(
+				"[BOUNCE LEAVE]",
+				performance.now().toFixed(3),
+				"from:",
+				previousIndex,
+				"to:",
+				index,
+				"generation:",
+				generation,
+			);
+
+			deckgl.setProps({
+				layers: [
+					tileLayer,
+					pickLayer,
+					createVisualLayer(0, generation, "leave"),
+				],
+			});
+		},
+	});
+
+	// ─── Phase 4 : Injection GPU ─────────────────────────────────────────────
+
+	/*
+	 * Première couche :
+	 *
+	 * dropPhase = 0
+	 * getPixelOffset() = dropOffset
+	 *
+	 * Les markers sont donc réellement créés hors champ.
+	 */
+	const visualLayer = createVisualLayer(0, animationGeneration, null);
+
+	deckgl = new DeckGL({
+		container: el,
+
+		initialViewState,
+
+		controller: true,
+
+		getTooltip: ({ object }) => {
+			if (!object) {
+				return null;
+			}
+
 			return {
 				html: `<strong>${object.popup}</strong>`,
+
 				style: {
 					backgroundColor: "#ffffff",
 					color: "#333333",
@@ -248,44 +952,37 @@ const initMap = async (config) => {
 					boxShadow: "0 2px 4px rgba(0,0,0,0.3)",
 					fontFamily: "sans-serif",
 					fontSize: "1em",
-					pointerEvents: "none", // Empêche l'infobulle de bloquer les événements de survol sous-jacents
+					pointerEvents: "none",
 				},
 			};
 		},
+
+		layers: [tileLayer, pickLayer, visualLayer],
+	});
+
+	// ─── Déclenchement du drop ───────────────────────────────────────────────
+
+	/*
+	 * La couche initiale possède déjà la position hors champ.
+	 *
+	 * Nous passons ensuite explicitement à dropPhase = 1 et reconstruisons
+	 * uniquement la couche visuelle afin que Deck.gl possède bien une valeur
+	 * précédente à interpoler.
+	 */
+	dropPhase = 1;
+
+	console.log(
+		"[DROP START]",
+		performance.now().toFixed(3),
+		"generation:",
+		animationGeneration,
+	);
+
+	deckgl.setProps({
 		layers: [
-			new TileLayer({
-				id: `raster-tiles-${el.id || Math.random().toString(16).slice(2)}`,
-				data: resolvedServer,
-				minZoom,
-				maxZoom,
-				tileSize: 256,
-				renderSubLayers: (props) => {
-					const { boundingBox } = props.tile;
-					// Utilisation du shader personnalisé au lieu du BitmapLayer standard
-					return new ThemedBitmapLayer(props, {
-						data: null,
-						image: props.data,
-						bounds: [
-							boundingBox[0][0],
-							boundingBox[0][1],
-							boundingBox[1][0],
-							boundingBox[1][1],
-						],
-						tileTheme: themeValue, // Injection de la variable d'état
-					});
-				},
-			}),
-			new IconLayer({
-				id: `vector-markers-${el.id || Math.random().toString(16).slice(2)}`,
-				data: gpuData,
-				pickable: true,
-				// Pointeur dynamique géré par le backend
-				iconAtlas: config.atlasUrl,
-				iconMapping: ICON_MAPPING,
-				getIcon: (d) => d.iconId,
-				getPosition: (d) => d.position,
-				getSize: 40,
-			}),
+			tileLayer,
+			pickLayer,
+			createVisualLayer(0, animationGeneration, "drop"),
 		],
 	});
 };
@@ -299,11 +996,17 @@ const observeMaps = (configs) => {
 		(entries) => {
 			for (let i = 0; i < entries.length; i++) {
 				const entry = entries[i];
-				if (!entry.isIntersecting || entry.intersectionRatio < 0.1) continue;
+
+				if (!entry.isIntersecting || entry.intersectionRatio < 0.1) {
+					continue;
+				}
 
 				const el = entry.target;
 				const config = pending.get(el);
-				if (!config) continue;
+
+				if (!config) {
+					continue;
+				}
 
 				initMap(config);
 
@@ -311,31 +1014,34 @@ const observeMaps = (configs) => {
 				observer.unobserve(el);
 			}
 		},
-		{ threshold: 0.1 },
-	); // Seuil abaissé à 0.1 pour anticiper le chargement réseau des tuiles
+		{
+			threshold: 0.1,
+		},
+	);
 
 	for (let i = 0; i < configs.length; i++) {
 		observer.observe(configs[i].el);
 	}
 };
 
+// ─── Bootstrap ───────────────────────────────────────────────────────────────
+
 const bootstrap = () => {
-	// Attente de l'évaluation complète du script UMD global
 	if (typeof window.deck === "undefined") {
 		console.warn("Pipeline AOT: deck.gl global namespace is missing.");
+
 		return;
 	}
+
 	const configs = collectMapConfigs();
-	if (configs.length) observeMaps(configs);
+
+	if (configs.length) {
+		observeMaps(configs);
+	}
 };
 
-// ─── Export ESM / Auto-Boot ──────────────────────────────────────────────────
-
-export { bootstrap, initMap };
-
-// Exécution automatique si le script est inclus directement dans le DOM
-if (typeof document !== "undefined") {
-	document.readyState === "loading"
-		? document.addEventListener("DOMContentLoaded", bootstrap)
-		: bootstrap();
+if (document.readyState === "loading") {
+	document.addEventListener("DOMContentLoaded", bootstrap);
+} else {
+	bootstrap();
 }
