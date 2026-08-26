@@ -368,7 +368,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(specifier, "/scripts/index.js");
-                assert_eq!(filename, "index.js");
+                assert_eq!(filename, "scripts/index.js");
             }
             other => panic!("attendu AssetNotFound, obtenu {other:?}"),
         }

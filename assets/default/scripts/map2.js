@@ -38,9 +38,26 @@
  * Déclenché une seule fois lorsque la map entre dans le viewport.
  *
  *   - position initiale : au-dessus de la map
- *   - arrivée : position géographique définitive
- *   - durée : 1000 ms
+ *   - offset initial : -(hauteur map + hauteur marker)
+ *   - attente : N ms
+ *   - chute : transition monotone vers 0
  *   - rebond léger après impact
+ *
+ * Le drop utilise exactement le même modèle structurel que le bounce :
+ *
+ *   état source explicite
+ *       ↓
+ *   transition Deck.gl
+ *       ↓
+ *   état cible explicite
+ *
+ * L'offset hors champ est donc porté directement par la première
+ * IconLayer et non déduit d'un état global mutable dans getPixelOffset().
+ *
+ * Le rebond d'entrée est composé de deux transitions monotones :
+ *
+ *   0 → -40
+ *   -40 → 0
  *
  * HOVER BOUNCE
  * ------------
@@ -48,15 +65,10 @@
  *
  *   animation: anim-bounce 0.35s ease infinite alternate;
  *
- * Une demi-animation dure donc 350 ms :
+ *   repos ──N ms──> -N px
+ *   -N px ──N ms──> repos
  *
- *   repos ──350ms──> -16px
- *   -16px ──350ms──> repos
- *
- * Le cycle complet dure 700 ms.
- *
- * Chaque demi-mouvement est une véritable transition Deck.gl monotone
- * utilisant le même easing que CSS `ease`.
+ * Chaque demi-mouvement est une véritable transition Deck.gl monotone.
  *
  * À la fin d'une demi-transition, la suivante est créée immédiatement.
  * Il n'y a donc pas de temps mort entre montée et descente.
@@ -128,13 +140,18 @@ const ICON_ANCHOR_Y = ICON_HEIGHT;
 //
 //   animation: anim-bounce 0.35s ease infinite alternate;
 //
-// 350 ms correspond donc à UNE demi-oscillation.
+// 350 ms correspond à UNE demi-oscillation.
 // Le cycle complet montée + descente dure 700 ms.
 
 const MARKER_BOUNCE_OFFSET = -16;
 const MARKER_BOUNCE_HALF_DURATION = 350;
 
-const MARKER_DROP_DURATION = 1000;
+// ─── Drop initial ────────────────────────────────────────────────────────────
+
+const MARKER_DROP_DURATION = 600;
+
+const MARKER_DROP_BOUNCE_OFFSET = -30;
+const MARKER_DROP_BOUNCE_HALF_DURATION = 150;
 
 // ─── Asset SVG ────────────────────────────────────────────────────────────────
 
@@ -206,45 +223,6 @@ const easeOutQuad = (t) => t * (2 - t);
 // Descente (bounce-down) : Ease-In Quad
 // Vitesse nulle à t=0 (apogée), accélération max à t=1 (impact sol)
 const easeInQuad = (t) => t * t;
-
-// ─── Easing Drop ─────────────────────────────────────────────────────────────
-//
-// Reproduction du mouvement :
-//
-//   0%   : -100%
-//   50%  :   0%
-//   75%  : -40px
-//   100% :   0
-//
-// L'easing retourne une progression normalisée [0, 1].
-
-const dropEase = (t) => {
-	if (t <= 0) {
-		return 0;
-	}
-
-	if (t >= 1) {
-		return 1;
-	}
-
-	if (t < 0.5) {
-		const p = t / 0.5;
-
-		return p * p * (3 - 2 * p);
-	}
-
-	if (t < 0.75) {
-		const p = (t - 0.5) / 0.25;
-		const eased = p * p * (3 - 2 * p);
-
-		return 1 - 0.12 * eased;
-	}
-
-	const p = (t - 0.75) / 0.25;
-	const eased = p * p * (3 - 2 * p);
-
-	return 0.88 + 0.12 * eased;
-};
 
 // ─── Pipeline GPU : Shader de post-traitement des tuiles ─────────────────────
 
@@ -458,9 +436,17 @@ const initMap = async (config) => {
 	let animationGeneration = 0;
 
 	/*
-	 * 0 = markers hors champ
-	 * 1 = chute initiale
+	 * État global du système.
+	 *
+	 * 0 = attente initiale / markers hors champ
+	 * 1 = drop initial + rebond d'entrée
 	 * 2 = comportement normal
+	 *
+	 * IMPORTANT :
+	 * dropPhase n'est PAS utilisé par getPixelOffset().
+	 *
+	 * La position visuelle est portée directement par targetOffset dans
+	 * chaque instance d'IconLayer.
 	 */
 	let dropPhase = 0;
 
@@ -514,123 +500,168 @@ const initMap = async (config) => {
 
 	let deckgl;
 
-	// ─── Contrôle du cycle de bounce ─────────────────────────────────────────
+	// ─── Contrôle du cycle d'animation ────────────────────────────────────────
 
 	/*
-	 * Cette fonction constitue le point central de l'animation.
+	 * visualMode :
 	 *
-	 * Une transition est toujours monotone :
+	 *   "drop"
+	 *       Tous les markers utilisent targetOffset.
 	 *
-	 *   0 -> -16
-	 *   -16 -> 0
+	 *   "normal"
+	 *       Seul le marker hoveredIndex utilise targetOffset.
 	 *
-	 * Le chaînage est effectué uniquement dans onEnd().
+	 * C'est volontairement une propriété de l'instance de layer et non une
+	 * lecture d'un état global mutable.
 	 *
-	 * Cela reproduit la sémantique de CSS `alternate` sans demander à
-	 * Deck.gl d'interpoler une fonction non monotone.
+	 * Le point essentiel pour le drop est donc :
+	 *
+	 *   ancienne couche :
+	 *       targetOffset = dropOffset
+	 *
+	 *   nouvelle couche :
+	 *       targetOffset = 0
+	 *
+	 * Deck.gl dispose ainsi de deux valeurs explicites entre lesquelles
+	 * interpoler.
 	 */
-	const createVisualLayer = (targetOffset, generation, transition = null) =>
+	const createVisualLayer = (
+		targetOffset,
+		generation,
+		transition = "init",
+		visualMode = "normal",
+	) =>
 		new IconLayer({
 			id: visualLayerId,
-
 			data: gpuData,
-
 			pickable: false,
-
 			getPosition: (d) => d.position,
-
 			getIcon: () => ({
 				url: SVG_URI,
 				width: ICON_WIDTH,
 				height: ICON_HEIGHT,
 				anchorY: ICON_ANCHOR_Y,
 			}),
-
 			getSize: MARKER_SIZE,
-
 			getPixelOffset: (_, { index }) => {
-				// Pendant la phase initiale, tous les markers sont hors champ.
-				if (dropPhase === 0) {
-					return [0, dropOffset];
-				}
-
-				// Pendant le drop, Deck.gl anime vers la position nominale.
-				if (dropPhase === 1) {
-					return [0, 0];
-				}
-
-				// Comportement nominal.
-				if (index === hoveredIndex) {
-					return [0, targetOffset];
-				}
-
+				if (visualMode === "drop") return [0, targetOffset];
+				if (index === hoveredIndex) return [0, targetOffset];
 				return [0, 0];
 			},
 
-			transitions: transition
-				? {
-						getPixelOffset: {
-							duration:
-								transition === "drop"
+			// L'objet transitions est statique, garantissant l'allocation du buffer GPU
+			transitions: {
+				getPixelOffset: {
+					duration:
+						transition === "init"
+							? 0
+							: transition === "teleport"
+								? 1 // Tick de 1ms pour forcer la mutation
+								: transition === "drop"
 									? MARKER_DROP_DURATION
-									: MARKER_BOUNCE_HALF_DURATION,
+									: transition === "drop-bounce-up" ||
+											transition === "drop-bounce-down"
+										? MARKER_DROP_BOUNCE_HALF_DURATION
+										: MARKER_BOUNCE_HALF_DURATION,
 
-							// Routage explicite de la dynamique selon la phase
-							easing:
-								transition === "drop"
-									? dropEase
-									: transition === "bounce-up"
-										? easeOutQuad
-										: transition === "bounce-down"
-											? easeInQuad
-											: easeOutQuad, // "leave" (retour doux vers 0)
+					easing:
+						transition === "drop" ||
+						transition === "drop-bounce-down" ||
+						transition === "bounce-down"
+							? easeInQuad
+							: easeOutQuad,
 
-							onStart: () => {},
+					onEnd: () => {
+						if (generation !== animationGeneration) return;
 
-							onEnd: () => {
-								if (transition === "drop") {
-									if (generation !== animationGeneration) return;
-									dropPhase = 2;
-									return;
-								}
+						// Phase 1 : Fin du micro-tick de téléportation, l'état source est verrouillé. On lâche.
+						if (transition === "teleport") {
+							deckgl.setProps({
+								layers: [
+									tileLayer,
+									pickLayer,
+									createVisualLayer(0, generation, "drop", "drop"),
+								],
+							});
+							return;
+						}
 
-								if (generation !== animationGeneration) return;
+						// Phase 2 : Impact au sol, déclenchement du rebond.
+						if (transition === "drop") {
+							deckgl.setProps({
+								layers: [
+									tileLayer,
+									pickLayer,
+									createVisualLayer(
+										MARKER_DROP_BOUNCE_OFFSET,
+										generation,
+										"drop-bounce-up",
+										"drop",
+									),
+								],
+							});
+							return;
+						}
 
-								if (transition === "leave") return;
+						// Phase 3 : Apogée du rebond, on redescend.
+						if (transition === "drop-bounce-up") {
+							deckgl.setProps({
+								layers: [
+									tileLayer,
+									pickLayer,
+									createVisualLayer(0, generation, "drop-bounce-down", "drop"),
+								],
+							});
+							return;
+						}
 
-								if (transition === "bounce-up") {
-									deckgl.setProps({
-										layers: [
-											tileLayer,
-											pickLayer,
-											createVisualLayer(0, generation, "bounce-down"),
-										],
-									});
-									return;
-								}
+						// Phase 4 : Fin de l'animation d'entrée, bascule en mode interactif.
+						if (transition === "drop-bounce-down") {
+							dropPhase = 2;
+							deckgl.setProps({
+								layers: [
+									tileLayer,
+									pickLayer,
+									createVisualLayer(0, generation, null, "normal"),
+								],
+							});
+							return;
+						}
 
-								if (transition === "bounce-down") {
-									deckgl.setProps({
-										layers: [
-											tileLayer,
-											pickLayer,
-											createVisualLayer(
-												MARKER_BOUNCE_OFFSET,
-												generation,
-												"bounce-up",
-											),
-										],
-									});
-								}
-							},
+						// ... [Logique hover normale inchangée] ...
+						if (transition === "leave") return;
 
-							onInterrupt: () => {},
-						},
-					}
-				: undefined,
+						if (transition === "bounce-up") {
+							deckgl.setProps({
+								layers: [
+									tileLayer,
+									pickLayer,
+									createVisualLayer(0, generation, "bounce-down", "normal"),
+								],
+							});
+							return;
+						}
 
+						if (transition === "bounce-down") {
+							deckgl.setProps({
+								layers: [
+									tileLayer,
+									pickLayer,
+									createVisualLayer(
+										MARKER_BOUNCE_OFFSET,
+										generation,
+										"bounce-up",
+										"normal",
+									),
+								],
+							});
+						}
+					},
+					onInterrupt: () => {},
+				},
+			},
 			updateTriggers: {
-				getPixelOffset: [hoveredIndex, targetOffset, dropPhase],
+				getPixelOffset: [hoveredIndex, targetOffset, visualMode],
 			},
 		});
 
@@ -650,6 +681,9 @@ const initMap = async (config) => {
 
 		getRadius: MARKER_HIT_RADIUS,
 
+		/*
+		 * La hitbox reste définitivement fixe.
+		 */
 		getPixelOffset: () => [0, MARKER_SIZE / 2],
 
 		getFillColor: [255, 255, 255, 0],
@@ -671,9 +705,15 @@ const initMap = async (config) => {
 					layers: [
 						tileLayer,
 						pickLayer,
-						createVisualLayer(MARKER_BOUNCE_OFFSET, generation, "bounce-up"),
+						createVisualLayer(
+							MARKER_BOUNCE_OFFSET,
+							generation,
+							"bounce-up",
+							"normal",
+						),
 					],
 				});
+
 				return;
 			}
 
@@ -682,7 +722,7 @@ const initMap = async (config) => {
 				layers: [
 					tileLayer,
 					pickLayer,
-					createVisualLayer(0, generation, "leave"),
+					createVisualLayer(0, generation, "leave", "normal"),
 				],
 			});
 		},
@@ -690,15 +730,13 @@ const initMap = async (config) => {
 
 	// ─── Phase 4 : Injection GPU ─────────────────────────────────────────────
 
-	/*
-	 * Première couche :
-	 *
-	 * dropPhase = 0
-	 * getPixelOffset() = dropOffset
-	 *
-	 * Les markers sont donc réellement créés hors champ.
-	 */
-	const visualLayer = createVisualLayer(0, animationGeneration, null);
+	// Couche géométrique initiale, positionnée strictement hors-champ.
+	const visualLayer = createVisualLayer(
+		dropOffset,
+		animationGeneration,
+		"init",
+		"drop",
+	);
 
 	deckgl = new DeckGL({
 		container: el,
@@ -729,26 +767,57 @@ const initMap = async (config) => {
 		},
 
 		layers: [tileLayer, pickLayer, visualLayer],
+
+		onLoad: () => {
+			// Le contexte GPU est opérationnel. On déclenche la téléportation de 1ms
+			// pour forcer Deck.gl à indexer le point de départ en mémoire,
+			// ce qui provoquera la chute via le onEnd.
+			deckgl.setProps({
+				layers: [
+					tileLayer,
+					pickLayer,
+					createVisualLayer(
+						dropOffset,
+						animationGeneration,
+						"teleport",
+						"drop",
+					),
+				],
+			});
+		},
 	});
 
 	// ─── Déclenchement du drop ───────────────────────────────────────────────
 
 	/*
-	 * La couche initiale possède déjà la position hors champ.
+	 * ATTENTE INITIALE
 	 *
-	 * Nous passons ensuite explicitement à dropPhase = 1 et reconstruisons
-	 * uniquement la couche visuelle afin que Deck.gl possède bien une valeur
-	 * précédente à interpoler.
+	 * La couche initiale est déjà rendue à dropOffset.
+	 *
+	 * Rien n'est animé pendant 1500 ms.
 	 */
-	dropPhase = 1;
+	window.setTimeout(() => {
+		dropPhase = 1;
 
-	deckgl.setProps({
-		layers: [
-			tileLayer,
-			pickLayer,
-			createVisualLayer(0, animationGeneration, "drop"),
-		],
-	});
+		/*
+		 * Nouvelle IconLayer :
+		 *
+		 *   ancienne targetOffset = dropOffset
+		 *   nouvelle targetOffset = 0
+		 *
+		 * Les deux valeurs sont donc explicites dans les propriétés du
+		 * getPixelOffset.
+		 *
+		 * Deck.gl peut interpoler directement la transition.
+		 */
+		deckgl.setProps({
+			layers: [
+				tileLayer,
+				pickLayer,
+				createVisualLayer(0, animationGeneration, "drop", "drop"),
+			],
+		});
+	}, MARKER_DROP_WAIT);
 };
 
 // ─── Pipeline de boot (Intersection Observer) ────────────────────────────────

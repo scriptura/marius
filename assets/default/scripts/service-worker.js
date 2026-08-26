@@ -98,7 +98,7 @@ const resourcesToCache = [
 	"/styles/print.css",
 	"/fonts/notoSans-Regular.woff2",
 	"/fonts/notoSerif-Regular.woff2",
-	"/sprites/utils.svg",
+	//"/sprites/utils.svg",
 	"/images/logo.svg",
 	OFFLINE_URL,
 ];
