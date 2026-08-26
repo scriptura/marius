@@ -5,111 +5,167 @@
  * Rendu cartographique GPU via Deck.gl UMD.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * ARCHITECTURE DES MARKERS
+ * ARCHITECTURE
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * Le rendu visuel et le picking sont volontairement désolidarisés.
+ * Le pipeline sépare strictement les données, le picking et le rendu visuel.
+ *
+ * DATA
+ * ----
+ * `gpuData` constitue le jeu de données commun aux couches de markers.
+ * Il est construit une seule fois lors de l'initialisation de la map et
+ * n'est jamais modifié par les animations.
  *
  * PICK LAYER
  * ----------
  * ScatterplotLayer
- * - pickable: true
- * - position logique fixe
- * - hitbox fixe
- * - rendu visuel transparent
- * - aucune animation
+ *
+ * - seule couche pickable des markers ;
+ * - position géographique fixe ;
+ * - hitbox fixe ;
+ * - aucun déplacement visuel ;
+ * - aucune transition.
  *
  * VISUAL LAYER
  * ------------
  * IconLayer
- * - pickable: false
- * - même position logique
- * - déplacement vertical animé
  *
- * Cette séparation empêche le déplacement du marker visuel de déplacer
- * également sa hitbox.
+ * - seule couche responsable du rendu des markers ;
+ * - même position géographique que la couche de picking ;
+ * - déplacement vertical via `getPixelOffset` ;
+ * - transitions gérées exclusivement par Deck.gl.
+ *
+ * Cette séparation est une décision d'architecture : une animation visuelle
+ * ne doit jamais modifier la géométrie servant au picking.
+ *
+ * TILE LAYER
+ * ----------
+ * TileLayer
+ *
+ * La couche cartographique possède une identité stable et n'est pas
+ * reconstruite lors des transitions des markers.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * ANIMATION
  * ─────────────────────────────────────────────────────────────────────────────
  *
+ * Les animations sont entièrement déléguées au système de transitions
+ * de Deck.gl.
+ *
+ * Aucune boucle d'animation applicative n'est utilisée.
+ *
+ * En particulier :
+ *
+ * - pas de `requestAnimationFrame()` ;
+ * - pas de calcul de progression par frame côté application ;
+ * - pas de synchronisation manuelle avec le rendu GPU ;
+ * - pas de modification de `gpuData` pendant une animation.
+ *
+ * Les transitions sont construites comme des mouvements monotones entre deux
+ * états successifs. Lorsqu'une trajectoire comporte plusieurs mouvements,
+ * ceux-ci sont chaînés par `onEnd()`.
+ *
+ * Ce choix évite de demander à une transition unique d'exprimer une trajectoire
+ * non monotone et permet de conserver une valeur source et une valeur cible
+ * explicites pour chaque mouvement.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
  * DROP INITIAL
- * ------------
- * Déclenché une seule fois lorsque la map entre dans le viewport.
+ * ─────────────────────────────────────────────────────────────────────────────
  *
- *   - position initiale : au-dessus de la map
- *   - offset initial : -(hauteur map + hauteur marker)
- *   - attente : N ms
- *   - chute : transition monotone vers 0
- *   - rebond léger après impact
+ * Le drop est une animation d'entrée one-shot.
  *
- * Le drop utilise exactement le même modèle structurel que le bounce :
+ * Les markers visuels sont d'abord initialisés hors de la zone visible de la
+ * map. Leur offset initial est calculé à partir de la géométrie réelle de la
+ * map afin que le marker soit entièrement situé au-dessus de celle-ci.
  *
- *   état source explicite
- *       ↓
- *   transition Deck.gl
- *       ↓
- *   état cible explicite
+ * Une transition technique très courte, déclenchée une fois que le contexte
+ * Deck.gl est opérationnel, sert à établir explicitement l'état source dans
+ * le mécanisme de transition.
  *
- * L'offset hors champ est donc porté directement par la première
- * IconLayer et non déduit d'un état global mutable dans getPixelOffset().
+ * Cette transition technique n'est pas une étape visuelle du mouvement :
+ * elle sert uniquement à amorcer correctement la transition suivante.
  *
- * Le rebond d'entrée est composé de deux transitions monotones :
+ * La chute fonctionnelle est ensuite déclenchée vers l'offset nominal.
+ * À son terme, un rebond d'entrée est exécuté comme deux transitions
+ * monotones successives.
  *
- *   0 → -40
- *   -40 → 0
+ * Une fois cette séquence terminée, le système passe définitivement en mode
+ * interactif normal.
  *
+ * Le picking reste disponible mais n'est activé pour les changements d'état
+ * de hover qu'après la fin complète de l'animation d'entrée.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
  * HOVER BOUNCE
- * ------------
- * Le comportement reproduit la sémantique de :
+ * ─────────────────────────────────────────────────────────────────────────────
  *
- *   animation: anim-bounce 0.35s ease infinite alternate;
+ * Le bounce de survol est indépendant du drop initial.
  *
- *   repos ──N ms──> -N px
- *   -N px ──N ms──> repos
+ * Chaque demi-mouvement est une transition monotone :
  *
- * Chaque demi-mouvement est une véritable transition Deck.gl monotone.
+ *   repos → apogée
+ *   apogée → repos
  *
- * À la fin d'une demi-transition, la suivante est créée immédiatement.
- * Il n'y a donc pas de temps mort entre montée et descente.
+ * Les transitions sont chaînées uniquement à leur terminaison.
  *
- * Lors d'un mouseout, la transition courante est interrompue et une
- * transition unique ramène le marker vers 0 px.
+ * Lorsqu'un marker cesse d'être survolé, la transition courante est invalidée
+ * et une transition de retour vers la position nominale est engagée.
  *
- * Il n'y a volontairement :
+ * Les événements de picking répétés alors que l'index survolé ne change pas
+ * sont ignorés. Seuls les changements effectifs d'état de hover déclenchent
+ * une nouvelle animation.
  *
- *   - aucun requestAnimationFrame()
- *   - aucune modification de gpuData
- *   - aucune reconstruction de TileLayer
- *   - aucune boucle CPU par frame
+ * ─────────────────────────────────────────────────────────────────────────────
+ * GÉNÉRATIONS D'ANIMATION
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * `animationGeneration` constitue l'autorité logique permettant d'invalider
+ * les callbacks de transitions devenus obsolètes.
+ *
+ * Une transition Deck.gl peut continuer à produire un callback alors qu'un
+ * nouvel état d'animation est déjà actif. Un callback ne peut donc pas être
+ * considéré comme l'autorité sur l'état courant du système.
+ *
+ * Chaque transition capture la génération active lors de sa création.
+ * Son `onEnd()` n'agit que si cette génération est toujours courante.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * INVARIANTS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * - `gpuData` est immuable après sa construction ;
+ * - le déplacement visuel concerne exclusivement `IconLayer` ;
+ * - la hitbox `ScatterplotLayer` reste indépendante du déplacement visuel ;
+ * - `TileLayer` conserve son identité pendant toutes les animations ;
+ * - aucune animation n'est pilotée par une boucle CPU par frame ;
+ * - les trajectoires complexes sont décomposées en transitions monotones ;
+ * - les callbacks obsolètes sont invalidés par génération ;
+ * - l'animation d'entrée est exécutée une seule fois par instance de map ;
+ * - le système de hover ne prend le relais qu'après la phase d'entrée.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * HITBOX
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * Le rendu et le picking utilisent deux géométries différentes.
+ * La couche de picking utilise une géométrie indépendante de l'icône.
  *
- * MARKER_SIZE
- * - taille du marker visuel dans IconLayer
+ * L'IconLayer utilise son propre système d'ancrage pour positionner le visuel,
+ * tandis que le ScatterplotLayer utilise son centre géométrique pour le
+ * picking.
  *
- * MARKER_HIT_DIAMETER
- * - diamètre de la zone de picking dans ScatterplotLayer
- *
- * MARKER_HIT_RADIUS
- * - rayon correspondant au diamètre de picking
- *
- * L'IconLayer est ancrée par son bord inférieur via anchorY.
- * Le ScatterplotLayer est naturellement centré sur getPosition.
- *
- * Le picking est donc remonté de MARKER_SIZE / 2 pixels afin que son centre
- * corresponde au centre visuel du marker au repos.
+ * Le décalage appliqué à la couche de picking compense cette différence afin
+ * que la zone interactive corresponde à la position du marker au repos.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * TUILES
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * La TileLayer possède une identité stable et n'est jamais reconstruite
- * pendant les animations des markers.
+ * Les transformations visuelles appliquées aux tuiles sont réalisées dans
+ * le shader de la couche bitmap spécialisée.
+ *
+ * La transformation est donc effectuée dans le pipeline GPU sans créer une
+ * seconde représentation CPU des tuiles.
  */
 
 // Extraction depuis le namespace global instancié par le script statique UMD.
@@ -135,13 +191,6 @@ const ICON_HEIGHT = 512;
 const ICON_ANCHOR_Y = ICON_HEIGHT;
 
 // ─── Animation des markers ───────────────────────────────────────────────────
-//
-// La référence CSS historique était :
-//
-//   animation: anim-bounce 0.35s ease infinite alternate;
-//
-// 350 ms correspond à UNE demi-oscillation.
-// Le cycle complet montée + descente dure 700 ms.
 
 const MARKER_BOUNCE_OFFSET = -16;
 const MARKER_BOUNCE_HALF_DURATION = 350;
@@ -214,14 +263,12 @@ const parseTileServer = (template) => {
 	return cleanTmpl;
 };
 
-// ─── Easings physiques (O(1), zéro allocation) ────────────────────────────────
+// ─── Easings physiques ───────────────────────────────────────────────────────
 
-// Montée (bounce-up) : Ease-Out Quad
-// Vitesse max à t=0 (décollage), vitesse nulle à t=1 (apogée)
+// Mouvement vers l'apogée : départ rapide, ralentissement progressif.
 const easeOutQuad = (t) => t * (2 - t);
 
-// Descente (bounce-down) : Ease-In Quad
-// Vitesse nulle à t=0 (apogée), accélération max à t=1 (impact sol)
+// Mouvement vers la position nominale : départ lent, accélération progressive.
 const easeInQuad = (t) => t * t;
 
 // ─── Pipeline GPU : Shader de post-traitement des tuiles ─────────────────────
@@ -428,25 +475,19 @@ const initMap = async (config) => {
 	let hoveredIndex = -1;
 
 	/*
-	 * Génération logique du hover.
+	 * Chaque transition capture la génération courante.
 	 *
-	 * Elle permet d'invalider toute transition de bounce devenue obsolète
-	 * lorsqu'un nouveau changement d'état intervient.
+	 * Si l'état d'interaction change avant la terminaison d'une transition,
+	 * la génération suivante invalide le callback de la transition précédente.
 	 */
 	let animationGeneration = 0;
 
 	/*
-	 * État global du système.
+	 * État global du cycle d'entrée.
 	 *
-	 * 0 = attente initiale / markers hors champ
-	 * 1 = drop initial + rebond d'entrée
-	 * 2 = comportement normal
-	 *
-	 * IMPORTANT :
-	 * dropPhase n'est PAS utilisé par getPixelOffset().
-	 *
-	 * La position visuelle est portée directement par targetOffset dans
-	 * chaque instance d'IconLayer.
+	 * L'état est également utilisé pour empêcher le système de picking de
+	 * déclencher le comportement de hover avant que l'animation d'entrée
+	 * soit terminée.
 	 */
 	let dropPhase = 0;
 
@@ -500,30 +541,21 @@ const initMap = async (config) => {
 
 	let deckgl;
 
-	// ─── Contrôle du cycle d'animation ────────────────────────────────────────
+	// ─── Construction des couches visuelles et transitions ───────────────────
 
 	/*
-	 * visualMode :
+	 * `visualMode` distingue les deux responsabilités de la même IconLayer :
 	 *
-	 *   "drop"
-	 *       Tous les markers utilisent targetOffset.
+	 * - en mode d'entrée, tous les markers utilisent le même offset ;
+	 * - en mode normal, seul le marker survolé utilise l'offset d'animation.
 	 *
-	 *   "normal"
-	 *       Seul le marker hoveredIndex utilise targetOffset.
+	 * Le mode est capturé par chaque instance de couche. La position visuelle
+	 * d'une instance ne dépend donc pas d'une lecture opportuniste d'un état
+	 * global modifié pendant l'exécution de la transition.
 	 *
-	 * C'est volontairement une propriété de l'instance de layer et non une
-	 * lecture d'un état global mutable.
-	 *
-	 * Le point essentiel pour le drop est donc :
-	 *
-	 *   ancienne couche :
-	 *       targetOffset = dropOffset
-	 *
-	 *   nouvelle couche :
-	 *       targetOffset = 0
-	 *
-	 * Deck.gl dispose ainsi de deux valeurs explicites entre lesquelles
-	 * interpoler.
+	 * Le système de transitions reste unique : les différentes animations
+	 * choisissent simplement leur durée et leur easing à partir de leur
+	 * identifiant de transition.
 	 */
 	const createVisualLayer = (
 		targetOffset,
@@ -549,14 +581,18 @@ const initMap = async (config) => {
 				return [0, 0];
 			},
 
-			// L'objet transitions est statique, garantissant l'allocation du buffer GPU
+			/*
+			 * Une seule configuration de transition est attachée à la
+			 * propriété animée. Le type de mouvement détermine uniquement
+			 * ses paramètres temporels et son easing.
+			 */
 			transitions: {
 				getPixelOffset: {
 					duration:
 						transition === "init"
 							? 0
 							: transition === "teleport"
-								? 1 // Tick de 1ms pour forcer la mutation
+								? 1
 								: transition === "drop"
 									? MARKER_DROP_DURATION
 									: transition === "drop-bounce-up" ||
@@ -574,7 +610,13 @@ const initMap = async (config) => {
 					onEnd: () => {
 						if (generation !== animationGeneration) return;
 
-						// Phase 1 : Fin du micro-tick de téléportation, l'état source est verrouillé. On lâche.
+						/*
+						 * Le micro-mouvement d'amorçage établit la valeur
+						 * courante nécessaire à la transition d'entrée.
+						 *
+						 * Il ne constitue pas une étape fonctionnelle du
+						 * mouvement du marker.
+						 */
 						if (transition === "teleport") {
 							deckgl.setProps({
 								layers: [
@@ -586,7 +628,7 @@ const initMap = async (config) => {
 							return;
 						}
 
-						// Phase 2 : Impact au sol, déclenchement du rebond.
+						// Fin de la chute : le rebond d'entrée commence.
 						if (transition === "drop") {
 							deckgl.setProps({
 								layers: [
@@ -603,7 +645,7 @@ const initMap = async (config) => {
 							return;
 						}
 
-						// Phase 3 : Apogée du rebond, on redescend.
+						// Fin de la montée du rebond d'entrée : retour vers la position nominale.
 						if (transition === "drop-bounce-up") {
 							deckgl.setProps({
 								layers: [
@@ -615,9 +657,14 @@ const initMap = async (config) => {
 							return;
 						}
 
-						// Phase 4 : Fin de l'animation d'entrée, bascule en mode interactif.
+						/*
+						 * Fin complète de l'entrée :
+						 * la couche visuelle repasse en mode normal et le
+						 * système de hover peut désormais prendre le relais.
+						 */
 						if (transition === "drop-bounce-down") {
 							dropPhase = 2;
+
 							deckgl.setProps({
 								layers: [
 									tileLayer,
@@ -625,12 +672,19 @@ const initMap = async (config) => {
 									createVisualLayer(0, generation, null, "normal"),
 								],
 							});
+
 							return;
 						}
 
-						// ... [Logique hover normale inchangée] ...
+						// Fin du retour vers la position nominale après un mouseout.
 						if (transition === "leave") return;
 
+						/*
+						 * Les deux transitions de hover sont volontairement
+						 * chaînées par leur terminaison.
+						 *
+						 * Chaque transition ne décrit qu'un seul mouvement.
+						 */
 						if (transition === "bounce-up") {
 							deckgl.setProps({
 								layers: [
@@ -639,6 +693,7 @@ const initMap = async (config) => {
 									createVisualLayer(0, generation, "bounce-down", "normal"),
 								],
 							});
+
 							return;
 						}
 
@@ -657,9 +712,11 @@ const initMap = async (config) => {
 							});
 						}
 					},
+
 					onInterrupt: () => {},
 				},
 			},
+
 			updateTriggers: {
 				getPixelOffset: [hoveredIndex, targetOffset, visualMode],
 			},
@@ -682,7 +739,9 @@ const initMap = async (config) => {
 		getRadius: MARKER_HIT_RADIUS,
 
 		/*
-		 * La hitbox reste définitivement fixe.
+		 * Cette couche ne participe jamais aux animations visuelles.
+		 * Son offset reste constant afin que le déplacement de l'IconLayer
+		 * n'affecte pas la zone interactive.
 		 */
 		getPixelOffset: () => [0, MARKER_SIZE / 2],
 
@@ -691,7 +750,17 @@ const initMap = async (config) => {
 		getPosition: (d) => d.position,
 
 		onHover: ({ index }) => {
+			/*
+			 * Les événements de picking peuvent être nombreux alors que
+			 * l'état de hover reste identique. Aucun nouveau cycle n'est
+			 * donc créé tant que l'index ne change pas.
+			 */
 			if (index === hoveredIndex) return;
+
+			/*
+			 * Pendant l'animation d'entrée, le picking reste muet du point
+			 * de vue du système d'animation.
+			 */
 			if (dropPhase !== 2) return;
 
 			hoveredIndex = index;
@@ -699,7 +768,7 @@ const initMap = async (config) => {
 
 			const generation = animationGeneration;
 
-			// Entrée sur le marker
+			// Entrée sur un marker.
 			if (index >= 0) {
 				deckgl.setProps({
 					layers: [
@@ -717,7 +786,7 @@ const initMap = async (config) => {
 				return;
 			}
 
-			// Sortie du marker
+			// Sortie du marker.
 			deckgl.setProps({
 				layers: [
 					tileLayer,
@@ -730,7 +799,12 @@ const initMap = async (config) => {
 
 	// ─── Phase 4 : Injection GPU ─────────────────────────────────────────────
 
-	// Couche géométrique initiale, positionnée strictement hors-champ.
+	/*
+	 * L'IconLayer est créée directement dans son état visuel initial.
+	 *
+	 * Cette première valeur constitue le point de départ réel de l'animation
+	 * d'entrée. La couche de picking est créée indépendamment et reste fixe.
+	 */
 	const visualLayer = createVisualLayer(
 		dropOffset,
 		animationGeneration,
@@ -768,10 +842,11 @@ const initMap = async (config) => {
 
 		layers: [tileLayer, pickLayer, visualLayer],
 
+		/*
+		 * Le contexte Deck.gl doit être opérationnel avant que le mécanisme
+		 * d'amorçage de la transition d'entrée soit engagé.
+		 */
 		onLoad: () => {
-			// Le contexte GPU est opérationnel. On déclenche la téléportation de 1ms
-			// pour forcer Deck.gl à indexer le point de départ en mémoire,
-			// ce qui provoquera la chute via le onEnd.
 			deckgl.setProps({
 				layers: [
 					tileLayer,
@@ -790,26 +865,14 @@ const initMap = async (config) => {
 	// ─── Déclenchement du drop ───────────────────────────────────────────────
 
 	/*
-	 * ATTENTE INITIALE
+	 * Le déclenchement de l'animation d'entrée modifie uniquement l'état
+	 * logique du cycle puis fournit à Deck.gl la nouvelle cible visuelle.
 	 *
-	 * La couche initiale est déjà rendue à dropOffset.
-	 *
-	 * Rien n'est animé pendant 1500 ms.
+	 * La transition elle-même reste responsable de l'interpolation.
 	 */
 	window.setTimeout(() => {
 		dropPhase = 1;
 
-		/*
-		 * Nouvelle IconLayer :
-		 *
-		 *   ancienne targetOffset = dropOffset
-		 *   nouvelle targetOffset = 0
-		 *
-		 * Les deux valeurs sont donc explicites dans les propriétés du
-		 * getPixelOffset.
-		 *
-		 * Deck.gl peut interpoler directement la transition.
-		 */
 		deckgl.setProps({
 			layers: [
 				tileLayer,
