@@ -17,7 +17,7 @@
             <div class="grid">
                 <div class="message-highlight">
                     <svg class="icon" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#info"></use>
+                        <use href="{% asset sprites/utils.svg %}#info"></use>
                     </svg>
                     <div>
                         <p>Il semble que vous n'ayez pas de connexion Internet ou que le serveur soit indisponible.</p>
@@ -30,7 +30,7 @@
     <hr>
     <button class="go-back button">
         <svg class="icon-inline reverse" role="img" aria-hidden="true">
-            <use href="{% asset utils.svg %}#arrow-right2"></use>
+            <use href="{% asset sprites/utils.svg %}#arrow-right2"></use>
         </svg>Retour à la page précédente
     </button>
 </article>{% endblock %}

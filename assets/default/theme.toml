@@ -97,7 +97,7 @@ files = [
     "images/tests/test-w600.webp",
     "images/tests/test-w400.webp",
     "images/tests/test-w300.webp",
-    "sprites/atlas.svg",
+    "images/atlas.svg",
     "libraries/deckgl/deckgl.js",
     # "libraries/htmx.min.js",
 ]

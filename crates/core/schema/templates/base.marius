@@ -5,16 +5,16 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>{% block head_title %}Default title{% endblock %}</title>
-    <link rel="preload" href="{% asset notoSans-Regular.woff2 %}" as="font" type="font/woff2" crossorigin>
-    <link rel="preload" href="{% asset notoSerif-Regular.woff2 %}" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="{% asset main.css %}" media="screen">
-    <link rel="stylesheet" href="{% asset print.css %}" media="print">
+    <link rel="preload" href="{% asset fonts/notoSans-Regular.woff2 %}" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="{% asset fonts/notoSerif-Regular.woff2 %}" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="{% asset styles/main.css %}" media="screen">
+    <link rel="stylesheet" href="{% asset styles/print.css %}" media="print">
     <meta name="description" content="{% block head_description %}Default description{% endblock %}">
     <meta name="theme-color" content="#333">
     <link rel="manifest" href="{% asset manifest.webmanifest %}" crossorigin="use-credentials">
-    <link rel="icon" type="image/svg+xml" href="{% asset favicon.svg %}">
-    <link rel="shortcut icon" href="{% asset favicon.ico %}">
-    <link rel="apple-touch-icon" sizes="180x180" href="{% asset apple-touch-icon.png %}">
+    <link rel="icon" type="image/svg+xml" href="{% asset favicons/favicon.svg %}">
+    <link rel="shortcut icon" href="{% asset favicons/favicon.ico %}">
+    <link rel="apple-touch-icon" sizes="180x180" href="{% asset favicons/apple-touch-icon.png %}">
     {% script %}
     <script src="{% asset service-worker.js %}" type="module"></script>{% endscript %}
     <!-- MARIUS_SCRIPTS -->
@@ -36,31 +36,31 @@
         </button>
         <ul class="sub-nav" id="sub-nav" aria-labelledby="cmd-nav">
             <li><a href="/content/1"><svg class="icon-inline" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#ampersand"></use>
+                        <use href="{% asset sprites/utils.svg %}#ampersand"></use>
                     </svg>Content 1</a></li>
             <li><a href="/content/2"><svg class="icon-inline" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#border-none"></use>
+                        <use href="{% asset sprites/utils.svg %}#border-none"></use>
                     </svg>Content 2</a></li>
             <li><a href="/content/3"><svg class="icon-inline" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#border-none"></use>
+                        <use href="{% asset sprites/utils.svg %}#border-none"></use>
                     </svg>Content 3</a></li>
             <li><a href="/content/4"><svg class="icon-inline" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#border-none"></use>
+                        <use href="{% asset sprites/utils.svg %}#border-none"></use>
                     </svg>Content 4</a></li>
             <li><a href="/content/5"><svg class="icon-inline" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#border-none"></use>
+                        <use href="{% asset sprites/utils.svg %}#border-none"></use>
                     </svg>Content 5</a></li>
             <li><a href="/content/6"><svg class="icon-inline" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#border-none"></use>
+                        <use href="{% asset sprites/utils.svg %}#border-none"></use>
                     </svg>Content 6</a></li>
             <li><a href="/content/7"><svg class="icon-inline" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#border-none"></use>
+                        <use href="{% asset sprites/utils.svg %}#border-none"></use>
                     </svg>Content 7</a></li>
             <li><a href="/content/10"><svg class="icon-inline" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#border-none"></use>
+                        <use href="{% asset sprites/utils.svg %}#border-none"></use>
                     </svg>Content 10</a></li>
             <li><a href="//github.com/scriptura/marius"><svg class="icon-inline" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#github"></use>
+                        <use href="{% asset sprites/utils.svg %}#github"></use>
                     </svg>Repository</a></li>
         </ul>
         <ol class="breadcrumb" aria-label="Breadcrumb">
@@ -77,7 +77,7 @@
             <div>
                 <div class="logo">
                     <svg>
-                        <use href="{% asset 195v.svg %}#a"></use>
+                        <use href="{% asset sprites/silos/195v.svg %}#a"></use>
                     </svg>
                 </div>
                 <p>Marius</p>
@@ -92,7 +92,7 @@
             <div class="wrap" id="gdpr-see">
                 <div class="mm" role="alert">
                     <svg class="icon" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#cookie-bite"></use>
+                        <use href="{% asset sprites/utils.svg %}#cookie-bite"></use>
                     </svg>
                     <div>
                         <p>Ce site utilise des cookies et vous donne le contrôle sur ceux que vous souhaitez activer.
@@ -102,19 +102,19 @@
                 <div class="flex gap">
                     <button class="button" id="gdpr-true-consent" style="background-color:tomato">
                         <svg class="icon-inline" aria-hidden="true">
-                            <use href="{% asset utils.svg %}#checkmark"></use>
+                            <use href="{% asset sprites/utils.svg %}#checkmark"></use>
                         </svg>
                         Tout accepter
                     </button>
                     <button class="button" id="gdpr-false-consent" style="background-color:tomato">
                         <svg class="icon-inline" aria-hidden="true">
-                            <use href="{% asset utils.svg %}#mark"></use>
+                            <use href="{% asset sprites/utils.svg %}#mark"></use>
                         </svg>
                         Tout refuser
                     </button>
                     <button class="button" style="background-color:tomato">
                         <svg class="icon-inline" aria-hidden="true">
-                            <use href="{% asset utils.svg %}#quill"></use>
+                            <use href="{% asset sprites/utils.svg %}#quill"></use>
                         </svg>
                         Personnaliser
                     </button>
@@ -125,7 +125,7 @@
             <div class="wrap">
                 <div class="mm" role="alert">
                     <svg class="icon" aria-hidden="true">
-                        <use href="{% asset utils.svg %}#warning"></use>
+                        <use href="{% asset sprites/utils.svg %}#warning"></use>
                     </svg>
                     <p>Javascript est désactivé dans votre navigateur. Afin de bénéficier de toutes les fonctionnalités
                         du site, réactivez cette option dans vos paramètres.</p>

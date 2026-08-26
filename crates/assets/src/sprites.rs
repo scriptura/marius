@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
-use crate::manifest::{AssetEntry, hash_content, join_slash, mime_for_extension};
+use crate::manifest::{AssetEntry, CanonicalAssetId, hash_content, join_slash, mime_for_extension};
 
 /// Erreur survenant lors du parsing ou de la fusion itérative des SVG.
 #[derive(Debug)]
@@ -311,7 +311,10 @@ pub(crate) fn run_sprites_pipeline(
         }
         fs::write(&output_abs, bytes)?;
 
-        let logical_key = format!("{sprite_name}.svg");
+        let logical_key = CanonicalAssetId::from_theme_relative_path(Path::new(&format!(
+            "sprites/{sprite_name}.svg"
+        )))
+        .into_string();
         manifest.insert(
             logical_key,
             AssetEntry {
