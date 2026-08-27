@@ -53,12 +53,15 @@
             <li><a href="/content/6"><svg class="icon-inline" aria-hidden="true">
                         <use href="{% asset sprites/utils.svg %}#border-none"></use>
                     </svg>Content 6</a></li>
-            <li><a href="/content/7"><svg class="icon-inline" aria-hidden="true">
-                        <use href="{% asset sprites/utils.svg %}#border-none"></use>
-                    </svg>Content 7</a></li>
             <li><a href="/content/10"><svg class="icon-inline" aria-hidden="true">
                         <use href="{% asset sprites/utils.svg %}#border-none"></use>
                     </svg>Content 10</a></li>
+            <li><a href="/content/14"><svg class="icon-inline" aria-hidden="true">
+                        <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                    </svg>Content 14</a></li>
+            <li><a href="/content/16"><svg class="icon-inline" aria-hidden="true">
+                        <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                    </svg>Content 16</a></li>
             <li><a href="//github.com/scriptura/marius"><svg class="icon-inline" aria-hidden="true">
                         <use href="{% asset sprites/utils.svg %}#github"></use>
                     </svg>Repository</a></li>

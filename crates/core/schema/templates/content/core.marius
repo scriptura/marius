@@ -9,7 +9,7 @@
         <h1 class="main-heading">{{ record.headline }}</h1>
         <!-- record.alternative_headline -->
         <div class="sub-header">
-            <div class="avatar" style="--img:url(/medias/images/uploads/henri-de-lubac-w100.webp)"></div>
+            <div class="avatar" style="--img:url({% asset images/tests/pisit-heng-w100.webp %})"></div>
             <address><a href="/content/3">Henri de Lubac</a></address>
             <time datetime="2017-04-23 20:33:21">Le 23 avril 2017 à 20h33</time>
         </div>
@@ -21,42 +21,6 @@
         </ul>
     </header>
     <div class="wrapper add-line-marks links add-drop-cap decorative-hr text-justify">
-
-        {% script %}
-        <script src="{% asset libraries/deckgl/deckgl.js %}" defer></script>{% endscript %}
-
-        <div class="grid gap gap-bottom">
-            <div class="map" data-name="La Chaise-Dieu"
-                data-places="[[&quot;Abbaye de la Chaise-Dieu&quot;, [45.321153730874585, 3.696077550805857]]]"
-                data-atlas="{% asset images/atlas.svg %}" data-zoom="16" data-maxzoom="19"
-                data-attribution="&lt;a href=&quot;//www.openstreetmap.org/&quot;&gt;OSM&lt;/a&gt;"></div>
-            <div class="map" data-name="La Chaise-Dieu"
-                data-places="[[&quot;Abbaye de la Chaise-Dieu&quot;, [45.321153730874585, 3.696077550805857]]]"
-                data-atlas="{% asset images/atlas.svg %}" data-zoom="16" data-maxzoom="20"
-                data-tileserver="https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png"
-                data-attribution="&lt;a href=&quot;//www.openstreetmap.org/&quot;&gt;OSM France&lt;/a&gt;"></div>
-            <div class="map" data-name="Via Podiensis, Le Puy – Conques"
-                data-places="[[&quot;Le Puy-en-Velay&quot;, [45.0455966440617, 3.884935601376469]],[&quot;Saint-Privat-d'Allier&quot;, [44.987927592669465, 3.678808317108506]],[&quot;Saugues&quot;, [44.96047626377144, 3.5473354650090596]],[&quot;Le Sauvage&quot;, [44.824518257012215, 3.487067835885111]],[&quot;Les Estrets&quot;, [44.741001187803924, 3.3525807542236152]],[&quot;Les Quatres chemins&quot;, [44.70685078496711, 3.192624249110267]],[&quot;Nasbinals&quot;, [44.66240315388833, 3.046495616987213]],[&quot;Saint-Chély-d'Aubrac&quot;, [44.59170960152898, 2.926362556665009]],[&quot;Saint-Côme-d'Olt&quot;, [44.515063594275574, 2.8151170711441775]],[&quot;Estaing&quot;, [44.55430261590735, 2.672508416693383]],[&quot;Conques&quot;, [44.59922220968624, 2.398123925260783]]]"
-                data-atlas="{% asset images/atlas.svg %}" data-maxzoom="19"
-                data-tileserver="https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png"
-                data-attribution="&lt;a href=&quot;//www.openstreetmap.org/&quot;&gt;OSM France&lt;/a&gt;"></div>
-            <div class="map map-grayscale" data-name="La Chaise-Dieu"
-                data-places="[[&quot;Abbaye de la Chaise-Dieu&quot;, [45.321153730874585, 3.696077550805857]]]"
-                data-atlas="{% asset images/atlas.svg %}" data-zoom="16" data-maxzoom="20"
-                data-tileserver="https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png"
-                data-attribution="&lt;a href=&quot;//www.openstreetmap.org&quot;&gt;OSM France&lt;/a&gt;"></div>
-            <div class="map map-dark" data-name="La Chaise-Dieu"
-                data-places="[[&quot;Abbaye de la Chaise-Dieu&quot;, [45.321153730874585, 3.696077550805857]]]"
-                data-atlas="{% asset images/atlas.svg %}" data-zoom="16" data-maxzoom="20"
-                data-tileserver="https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png"
-                data-attribution="&lt;a href=&quot;//www.openstreetmap.org&quot;&gt;OSM France&lt;/a&gt;"></div>
-            <div class="map map-vintage" data-name="La Chaise-Dieu"
-                data-places="[[&quot;Abbaye de la Chaise-Dieu&quot;, [45.321153730874585, 3.696077550805857]]]"
-                data-atlas="{% asset images/atlas.svg %}" data-zoom="16" data-maxzoom="19"
-                data-tileserver="https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png"
-                data-attribution="&lt;a href=&quot;//www.openstreetmap.org&quot;&gt;OSM France&lt;/a&gt;"></div>
-        </div>
-
         {% if record.is_readable %}{{ record.content }}{% endif %}
     </div>
 </article>{% endblock %}

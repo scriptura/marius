@@ -212,9 +212,17 @@ fn skip_ws_and_comments(source: &[u8], mut i: usize, ctx: &Path) -> Result<usize
 }
 
 /// Analyse le contenu d'UNE déclaration `import`, immédiatement après le
-/// mot-clé — cherche `from '<chemin>'`/`from "<chemin>"`, bornée par `;`,
-/// un saut de ligne, ou l'EOF. Retourne `((offset, len), position_après)`
-/// du contenu du chemin (guillemets exclus), ou `None` si :
+/// mot-clé — cherche `from '<chemin>'`/`from "<chemin>"`. Bornée par `;`
+/// ou un saut de ligne **uniquement en dehors d'une clause `{ ... }`
+/// ouverte** : un import multi-lignes (`import {\n  A,\n  B,\n} from
+/// '...'`, imposé par certains formatters dès que la liste de symboles
+/// nommés dépasse une longueur seuil) doit rester détecté — un saut de
+/// ligne à l'intérieur de la clause n'est jamais la fin de la
+/// déclaration. `{`/`}` n'apparaissent jamais ailleurs dans une clause
+/// d'import valide (identifiants, `,`, `as`, commentaires, chaînes déjà
+/// sautées) : un comptage plat de profondeur suffit, sans pile.
+/// Retourne `((offset, len), position_après)` du contenu du chemin
+/// (guillemets exclus), ou `None` si :
 ///  - c'est un `import(...)` dynamique (mission §4, ignoré délibérément) ;
 ///  - c'est un import sans `from` (`import './x.js';` — effet de bord pur,
 ///    hors grammaire v1, cf. doc de `lex_imports`) ;
@@ -230,28 +238,27 @@ fn lex_import_statement(
         return Ok(None); // import(...) dynamique — grammaire fermée.
     }
 
+    let mut brace_depth: i32 = 0;
+
     while i < source.len() {
         match source[i] {
-            b';' | b'\n' => return Ok(None),
+            b'{' => {
+                brace_depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                brace_depth -= 1;
+                i += 1;
+            }
+            b';' | b'\n' if brace_depth == 0 => return Ok(None),
             b'/' if source.get(i + 1) == Some(&b'/') => i = skip_line_comment(source, i),
             b'/' if source.get(i + 1) == Some(&b'*') => i = skip_block_comment(source, i, ctx)?,
-            // Bug réel identifié à la relecture : un import SANS `from`
-            // (`import './from-server.js';`) présente son chemin AVANT
-            // toute occurrence légitime de 'from'. Sans cette ligne, le
-            // mot "from" à l'intérieur même de ce chemin littéral serait
-            // pris pour le vrai mot-clé, et la recherche de guillemet
-            // qui suit repartirait d'un point arbitraire à l'intérieur de
-            // la chaîne — extraction silencieusement fausse, pas une
-            // erreur franche. Aucune grammaire JS valide ne place une
-            // chaîne AVANT un `from` réel : sauter toute chaîne rencontrée
-            // ici est donc sûr pour le cas légitime, et corrige le cas
-            // illégitime.
             b'\'' | b'"' | b'`' => i = skip_string_like(source, i, source[i], ctx)?,
             _ if starts_with_word(source, i, b"from") => {
                 let quote_pos = skip_ws_and_comments(source, i + "from".len(), ctx)?;
                 let quote = match source.get(quote_pos) {
                     Some(&q @ (b'\'' | b'"')) => q,
-                    _ => return Ok(None), // 'from' pas suivi d'une chaîne littérale
+                    _ => return Ok(None),
                 };
                 let content_start = quote_pos + 1;
                 let end = find_unescaped_quote(source, content_start, quote, ctx)?;
@@ -783,6 +790,90 @@ mod tests {
     #[test]
     fn lex_imports_unterminated_block_comment_is_an_error() {
         assert!(lex_imports(b"/* never closed", Path::new("test.js")).is_err());
+    }
+
+    /// Bug réel de session : un import multi-lignes (imposé par certains
+    /// formatters comme Biome dès que la clause `{ ... }` dépasse une
+    /// longueur seuil) faisait abandonner la recherche de `from` au premier
+    /// saut de ligne rencontré À L'INTÉRIEUR de la clause — le specifier
+    /// n'était alors jamais présenté à `resolve_asset_reference`, traversant
+    /// tout le pipeline non réécrit (404 au runtime, sans erreur de build).
+    #[test]
+    fn lex_imports_multiline_named_import_clause_is_still_detected() {
+        let src = "import {\n\t//Deck,\n\tIconLayer,\n\tScatterplotLayer,\n\tTileLayer,\n} from \"/libraries/deckgl/deckgl.js\";";
+        assert_eq!(lexed_specifiers(src), vec!["/libraries/deckgl/deckgl.js"]);
+    }
+
+    /// Même bug, sans commentaire interne — isole la seule variable en jeu
+    /// (le saut de ligne dans la clause), pour ne pas dépendre du bon
+    /// fonctionnement de `skip_line_comment` en plus.
+    #[test]
+    fn lex_imports_multiline_named_import_without_comment() {
+        let src = "import {\n\tA,\n\tB,\n} from './multi.js';";
+        assert_eq!(lexed_specifiers(src), vec!["./multi.js"]);
+    }
+
+    /// Variante default + named du même bug — clause `{ ... }` toujours
+    /// détectée après le binding par défaut, peu importe où le saut de
+    /// ligne structurant tombe dans la déclaration.
+    #[test]
+    fn lex_imports_multiline_default_and_named_import() {
+        let src = "import Deck, {\n\tIconLayer,\n\tScatterplotLayer,\n} from \"/libraries/deckgl/deckgl.js\";";
+        assert_eq!(lexed_specifiers(src), vec!["/libraries/deckgl/deckgl.js"]);
+    }
+
+    /// Bug réel de session, bout en bout : un import `ExternalAsset`
+    /// multi-lignes doit non seulement être DÉTECTÉ par le lexer (couvert
+    /// ci-dessus et dans `lex_imports_*`), mais effectivement RÉÉCRIT par
+    /// `patch_and_hash_modules` dans le fichier produit — c'est cette
+    /// dernière étape dont l'absence causait le 404 runtime malgré un build
+    /// sans erreur.
+    #[test]
+    fn run_scripts_pipeline_rewrites_multiline_external_import_to_hashed_url() {
+        let sandbox = std::env::temp_dir().join("marius-assets-test-scripts-multiline-import");
+        let theme_dir = sandbox.join("theme");
+        let build_root = sandbox.join("build");
+        let map_dir = theme_dir.join("scripts");
+        fs::create_dir_all(&map_dir).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        fs::write(
+        map_dir.join("map.js"),
+        "import {\n\t//Deck,\n\tIconLayer,\n\tScatterplotLayer,\n\tTileLayer,\n} from \"/libraries/deckgl/deckgl.js\";\n\nconsole.log(IconLayer, ScatterplotLayer, TileLayer);",
+    )
+    .unwrap();
+
+        let mut registry = AssetUrlRegistry::new();
+        registry.insert(
+            CanonicalAssetId::from_theme_relative_path(Path::new("libraries/deckgl/deckgl.js")),
+            "/libraries/deckgl.7c3a1.js".to_string(),
+        );
+
+        let mut components = HashMap::new();
+        components.insert("map".to_string(), "scripts/map.js".to_string());
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+
+        run_scripts_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &components,
+            &registry,
+            &mut manifest,
+        )
+        .unwrap();
+
+        let map_url = &manifest["map.js"].url;
+        let map_filename = Path::new(map_url).file_name().unwrap();
+        let map_written =
+            fs::read_to_string(build_root.join("scripts").join(map_filename)).unwrap();
+
+        // Le specifier canonique non haché ne doit plus jamais apparaître.
+        assert!(!map_written.contains("/libraries/deckgl/deckgl.js"));
+        // L'URL hachée exacte du registre doit être présente.
+        assert!(map_written.contains("/libraries/deckgl.7c3a1.js"));
+
+        let _ = fs::remove_dir_all(&sandbox);
     }
 
     // ── topological_order_leaves_first (Phase 7) ─────────────────────────────

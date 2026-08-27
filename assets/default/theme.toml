@@ -13,6 +13,9 @@ version = "1.0.0"
 # Le compilateur va lire ces fichiers, résoudre leurs @import internes, et générer les artéfacts.
 entries = ["styles/main.mcss", "styles/print.mcss"]
 
+[libraries.deckgl]
+root = "libraries/deckgl"
+
 [scripts.capabilities.disclosure]
 entry = "scripts/disclosure.js"
 markers = ["tabs", "accordion"]
@@ -64,7 +67,7 @@ utils = "sprites/utils"
 entry = "manifest.webmanifest"
 
 [service_worker]
-# Handoff §3 — point d'entrée unique, à la racine du thème, même convention que [webmanifest].entry.
+# Point d'entrée unique, à la racine du thème, même convention que [webmanifest].entry.
 entry = "scripts/service-worker.js"
 
 # ==========================================
@@ -97,7 +100,6 @@ files = [
     "images/tests/test-w600.webp",
     "images/tests/test-w400.webp",
     "images/tests/test-w300.webp",
+    "images/tests/pisit-heng-w100.webp",
     "images/atlas.svg",
-    "libraries/deckgl/deckgl.js",
-    # "libraries/htmx.min.js",
 ]

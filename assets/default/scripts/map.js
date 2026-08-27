@@ -922,7 +922,7 @@ const observeMaps = (configs) => {
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
 
-const bootstrap = () => {
+export const bootstrap = () => {
 	if (typeof window.deck === "undefined") {
 		console.warn("Pipeline AOT: deck.gl global namespace is missing.");
 

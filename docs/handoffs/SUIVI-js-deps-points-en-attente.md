@@ -27,22 +27,7 @@ Pour le réactiver un jour :
 
 ## 2. `js_deps` : 4 bits réservés, jamais câblés côté marqueurs
 
-`scripts_registry.lock` porte `disclosure=1`, `map=2`, `media-player=4`,
-`line-mark=8` — décidés en amont de cette session. Mais **aucun marqueur de
-classe HTML ne leur est associé** dans `content.compute_js_deps()`
-(`db/05_content/02_systems.sql`) : ces quatre capacités ne se déclencheront
-jamais, quel que soit le contenu éditorial, tant que leur vocabulaire de
-classes n'est pas fourni. Je ne l'ai pas inventé — voir le guide
-`docs/guides/js-deps-capacites-frontend.md` pour la procédure d'ajout, à
-appliquer telle quelle pour ces quatre-là quand leur vocabulaire sera
-disponible.
-
-De même, `theme.toml [scripts.capabilities]` ne porte à ce jour que
-`image-focus` confirmé avec un chemin de fichier réel. `range`/`youtube-embed`
-ont leurs bits (`32`/`64`) et leurs marqueurs SQL déjà câblés, mais leurs
-sections `theme.toml` (`entry`/`activation`) restent à écrire avec les vrais
-chemins de fichiers JS — je n'ai pas de confirmation que `range.js`/
-`youtube.js` existent réellement sous `assets/default/scripts/development/`.
+Tâche faite.
 
 ## 3. Duplication de logique de conversion NOT NULL (db-forge)
 
