@@ -35,6 +35,9 @@ secrets/
 *.cert
 
 # ── Éditeurs & IDEs ───────────────────────────────────────────────────────────
+# Zed
+.zed/
+
 # VS Code
 .vscode/
 !.vscode/extensions.json
