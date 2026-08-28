@@ -628,6 +628,10 @@ pub(crate) fn run_scripts_pipeline(
                 size: patched.size,
                 hash: patched.full_hash.clone(),
                 version: String::new(), // rempli par l'appelant (theme.version)
+                // Point d'entrée du graphe ESM propre au thème — toujours
+                // un module par construction, jamais une question de
+                // configuration ici (contrairement à [libraries.*]).
+                module: true,
             },
         );
 
@@ -679,6 +683,9 @@ pub(crate) fn run_scripts_pipeline(
                 size: patched.size,
                 hash: patched.full_hash.clone(),
                 version: String::new(),
+                // Dépendance transitive du MÊME graphe ESM — module par
+                // construction, comme le point d'entrée qui l'importe.
+                module: true,
             },
         );
 

@@ -82,6 +82,22 @@ pub(crate) struct LibraryConfig {
     /// sous-arbre est autorisé à entrer dans le build (JS, CSS, images,
     /// fonts, `.map`, sans distinction — SPEC §6).
     pub(crate) root: String,
+
+    /// Marius est ESM-first : par défaut, tout fichier `.js` découvert
+    /// sous `root` est considéré consommable comme module ES (`<script
+    /// type="module">` s'il est chargé via `deps`, §HANDOFF `deps`).
+    /// `module = false` est une concession explicite pour une
+    /// bibliothèque vendorée qui reste distribuée en UMD/classique et
+    /// expose son API via `window` — jamais une supposition implicite.
+    /// Propriété de l'ASSET, pas de la déclaration `deps` qui le consomme
+    /// (une même bibliothèque se charge toujours de la même façon, quelle
+    /// que soit la capacité qui la référence).
+    #[serde(default = "default_module_true")]
+    pub(crate) module: bool,
+}
+
+fn default_module_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -133,6 +149,21 @@ pub(crate) struct CapabilityConfig {
     /// AOT de `js_deps` (import ESM nommé), jamais par ce binaire.
     #[allow(dead_code)]
     pub(crate) activation: String,
+    /// Scripts dont le CHARGEMENT doit précéder l'activation de cette
+    /// capacité — jamais un `import` ESM à injecter dans `entry` (`map.js`
+    /// reste intégralement ignorant de ce mécanisme). Chemins canoniques
+    /// relatifs à la racine du thème, résolus par CE binaire exactement
+    /// comme un `ExternalAsset` de `scripts.rs` (`canonicalize_reference`
+    /// + `AssetUrlRegistry`, échec dur si absent) — la seule différence
+    /// est la DESTINATION du résultat : jamais une réécriture de texte
+    /// source, toujours une donnée transportée jusqu'à `build.rs` pour
+    /// émission d'une balise `<script>` distincte, avant celle de `entry`.
+    /// Jamais nommé `js_deps` : ceci est une dépendance de chargement de
+    /// script au sens de `[scripts.capabilities.*]`, pas un détail
+    /// d'implémentation du bitset `content.core.js_deps`, qui reste un
+    /// mécanisme totalement distinct.
+    #[serde(default)]
+    pub(crate) deps: Vec<String>,
 }
 
 #[derive(Deserialize)]

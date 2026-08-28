@@ -154,6 +154,7 @@ mod tests {
             &build_root,
             "build/default",
             &discovered,
+            &HashMap::new(), // aucune bibliothèque module=false dans ce test
             &mut manifest,
         )
         .unwrap();

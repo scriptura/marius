@@ -133,6 +133,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     library_names.sort();
 
     let mut all_verbatim_files = theme.static_.verbatim.files.clone();
+    // Marius est ESM-first (`LibraryConfig::module` défaut `true`) — seule
+    // une bibliothèque `module = false` explicite laisse une trace ici.
+    // Une entrée par FICHIER découvert (jamais par bibliothèque) : c'est
+    // `verbatim.rs` qui consulte cette table clé par clé, agnostique de
+    // toute notion de bibliothèque (§9 SPEC) — cette boucle est le seul
+    // endroit qui connaît encore l'association fichier → bibliothèque,
+    // perdue dès l'`extend` ci-dessous si elle n'est pas capturée ici.
+    let mut module_overrides: HashMap<String, bool> = HashMap::new();
     for name in library_names {
         let lib = &theme.libraries[name];
         let discovered = discover_library_files(&theme_dir, &lib.root)
@@ -142,6 +150,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "cargo:warning=[marius-assets] libraries.{name} : root {:?} ne contient aucun fichier",
                 lib.root
             );
+        }
+        if !lib.module {
+            for path in &discovered {
+                module_overrides.insert(path.clone(), false);
+            }
         }
         all_verbatim_files.extend(discovered);
     }
@@ -153,6 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &build_root,
         &build_root_rel,
         &all_verbatim_files,
+        &module_overrides,
         &mut manifest,
     )?;
 

@@ -73,6 +73,14 @@ struct CapabilityConfig {
     entry: String,
     markers: Vec<String>,
     activation: String,
+    /// Miroir de `crates/assets/src/config.rs::CapabilityConfig.deps` —
+    /// dépendances de CHARGEMENT (jamais un import ESM à injecter dans
+    /// `entry`), résolues ici contre le manifeste exactement comme
+    /// `entry` lui-même. Nom délibérément distinct de `js_deps`
+    /// (`content.core`) : deux mécanismes sans rapport, l'un statique
+    /// (chargement de script), l'autre un bitset runtime.
+    #[serde(default)]
+    deps: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -104,6 +112,29 @@ struct CapabilityInfo {
     /// pour le scan statique (comparés à `extract_static_class_tokens`),
     /// pas seulement pour la validation de non-vacuité.
     markers: Vec<String>,
+    /// Dépendances de chargement déjà résolues (clé canonique, URL hachée,
+    /// mode de chargement) — résolution faite UNE SEULE FOIS ici, jamais
+    /// recalculée par template (même discipline que `url` ci-dessus).
+    deps: Vec<ResolvedDep>,
+}
+
+/// Une dépendance de `deps` entièrement résolue contre le manifeste —
+/// jamais construite avant la résolution AOT, jamais une chaîne brute
+/// transportée telle quelle au-delà de `validate_capabilities`.
+#[derive(Clone, Debug, PartialEq)]
+struct ResolvedDep {
+    /// Identité canonique — clé de dédoublonnage entre capacités
+    /// partageant la même dépendance (SPEC `deps` §3) : jamais l'URL
+    /// hachée finale, qui varie avec le contenu et masquerait deux
+    /// déclarations identiques comme distinctes à la moindre
+    /// recompilation.
+    canonical_key: String,
+    url: String,
+    /// `true` (défaut ESM-first) → `<script type="module">` ; `false` →
+    /// `<script defer>` classique (bibliothèque `[libraries.*].module =
+    /// false`). Propriété de l'ASSET référencé, jamais de la déclaration
+    /// `deps` qui le consomme.
+    module: bool,
 }
 
 /// Une émission calculée pour UN template donné, par `lower_modules_for_template`.
@@ -130,6 +161,11 @@ struct ModuleEmission {
     activation: String,
     url: String,
     bit: Option<i64>,
+    /// Copie des dépendances déjà résolues de la capacité d'origine —
+    /// agrégées et dédupliquées PAR TEMPLATE par `aggregate_deps`, jamais
+    /// ici (une `ModuleEmission` reste une vue par capacité, pas la vue
+    /// finale par template).
+    deps: Vec<ResolvedDep>,
 }
 
 /// Résultat du lowering AOT de `ModulesPlaceholder`, assemblé en CODE RUST
@@ -289,6 +325,11 @@ struct AssetEntry {
     hash: String,
     #[allow(dead_code)]
     version: String,
+    /// Miroir strict de `crates/assets/src/manifest.rs::AssetEntry.module`
+    /// — seul champ de ce miroir consommé au-delà de `url` : décide, pour
+    /// une entrée référencée par `deps`, entre `<script type="module">`
+    /// et `<script defer>` classique (`ResolvedDep::module`).
+    module: bool,
 }
 
 /// Nom du thème actif. Décision actée en session : un seul thème possible
@@ -530,6 +571,38 @@ fn validate_capabilities(
             }
         };
 
+        // Résolution de `deps` — MÊME contrat que `manifest_key` ci-dessus
+        // (échec dur, jamais un repli silencieux), mais la clé de lookup
+        // est ici directement la chaîne canonique donnée par l'intégrateur
+        // (`"libraries/deckgl/deckgl.js"`), jamais suffixée `.js` comme
+        // pour un nom de capacité. Un slash de tête optionnel est toléré
+        // (même convention que `deps` côté JS, `scripts.rs` §3.2) :
+        // jamais une résolution différente selon que l'intégrateur l'a
+        // écrit ou non.
+        let mut deps: Vec<ResolvedDep> = Vec::new();
+        let mut dep_error = false;
+        for raw_dep in &cap.deps {
+            let dep_key = raw_dep.strip_prefix('/').unwrap_or(raw_dep);
+            match assets.get(dep_key) {
+                Some(entry) => deps.push(ResolvedDep {
+                    canonical_key: dep_key.to_string(),
+                    url: entry.url.clone(),
+                    module: entry.module,
+                }),
+                None => {
+                    dep_error = true;
+                    errors.push(format!(
+                        "'{name}' : deps '{raw_dep}' absente du manifeste d'assets — aucune \
+                         entrée '{dep_key}' (bibliothèque non déclarée dans [libraries.*], \
+                         chemin incorrect, ou build de marius-assets non relancé)"
+                    ));
+                }
+            }
+        }
+        if dep_error {
+            continue;
+        }
+
         result.push((
             name.clone(),
             CapabilityInfo {
@@ -537,6 +610,7 @@ fn validate_capabilities(
                 activation: cap.activation.clone(),
                 url,
                 markers: cap.markers.clone(),
+                deps,
             },
         ));
     }
@@ -590,12 +664,14 @@ fn lower_modules_for_template(
                 activation: cap.activation.clone(),
                 url: cap.url.clone(),
                 bit: None,
+                deps: cap.deps.clone(),
             });
         } else if has_record {
             out.push(ModuleEmission {
                 activation: cap.activation.clone(),
                 url: cap.url.clone(),
                 bit: Some(cap.bit),
+                deps: cap.deps.clone(),
             });
         }
         // else : STATIC_PAGES, marqueur absent statiquement — rien à
@@ -603,6 +679,76 @@ fn lower_modules_for_template(
     }
 
     out
+}
+
+/// Une dépendance UNIQUE (par identité canonique), pour un template donné,
+/// après agrégation de toutes les émissions qui la consomment.
+///
+/// `bit: None` — au moins une émission consommatrice est statique
+/// (domination, même règle que pour le `<script type="module">` lui-même,
+/// SPEC `deps` §3) : la dépendance devient inconditionnelle, quel que soit
+/// le nombre d'autres capacités dynamiques qui la partagent aussi.
+/// `bit: Some(mask)` — OU binaire des bits de TOUTES les émissions
+/// dynamiques qui la consomment, aucune n'étant statique.
+struct AggregatedDep {
+    dep: ResolvedDep,
+    bit: Option<i64>,
+}
+
+/// Agrège et déduplique les dépendances de TOUTES les émissions d'un
+/// template — jamais recalculé par dépendance individuelle. Déduplication
+/// par IDENTITÉ CANONIQUE (`ResolvedDep::canonical_key`), jamais par URL
+/// finale (SPEC `deps` §3) : deux émissions référençant la même clé
+/// produisent une seule entrée agrégée, quelle que soit l'URL (qui sera de
+/// toute façon identique, `CanonicalAssetId` étant unique par construction
+/// — SPEC-canonical-asset-identity.md §1 — mais la clé reste le contrat
+/// explicite, jamais une coïncidence exploitée implicitement).
+///
+/// Comparaison en O(n²) sur le nombre de dépendances DISTINCTES déjà vues
+/// — même justification que `hoist_and_dedupe_scripts` (fragment-forge) :
+/// une poignée de dépendances par template en pratique, pas la peine
+/// d'imposer `Hash` pour un gain invisible à cette échelle.
+///
+/// Ordre déterministe : première apparition, dans l'ordre déjà
+/// déterministe des émissions (lui-même hérité du tri par nom de
+/// `validate_capabilities`).
+fn aggregate_deps(emissions: &[ModuleEmission]) -> Vec<AggregatedDep> {
+    let mut out: Vec<AggregatedDep> = Vec::new();
+
+    for emission in emissions {
+        for dep in &emission.deps {
+            match out
+                .iter_mut()
+                .find(|agg| agg.dep.canonical_key == dep.canonical_key)
+            {
+                Some(existing) => {
+                    existing.bit = match (existing.bit, emission.bit) {
+                        (None, _) | (_, None) => None, // domination statique
+                        (Some(mask), Some(bit)) => Some(mask | bit),
+                    };
+                }
+                None => out.push(AggregatedDep {
+                    dep: dep.clone(),
+                    bit: emission.bit,
+                }),
+            }
+        }
+    }
+
+    out
+}
+
+/// Balise `<script>` littérale pour UNE dépendance déjà résolue — jamais
+/// assemblée en groupe (contrairement aux imports/appels de capacités,
+/// SPEC `deps` §4 : chaque dépendance reste sa propre balise `<script>`
+/// distincte, jamais fusionnée dans le `<script type="module">` de la
+/// capacité qui la consomme).
+fn render_dep_tag(dep: &ResolvedDep) -> String {
+    if dep.module {
+        format!("<script type=\"module\" src={:?}></script>", dep.url)
+    } else {
+        format!("<script src={:?} defer></script>", dep.url)
+    }
 }
 
 /// Assemble les émissions en CODE RUST — Mode Page (`resolve_page_template`),
@@ -669,18 +815,47 @@ fn render_modules_as_rust(emissions: &[ModuleEmission]) -> ModulesLowering {
         });
     }
 
+    // Dépendances de chargement (`deps`, SPEC `deps`) — agrégées et
+    // dédupliquées UNE FOIS pour tout le template (§3), jamais par
+    // émission individuelle. Balises `<script>` totalement indépendantes
+    // du regroupement import/appel ci-dessus : chacune sa propre balise,
+    // son propre bit, jamais fusionnée dans `OPEN`/`CLOSE`.
+    let aggregated_deps = aggregate_deps(emissions);
+    let dep_tags: Vec<(String, Option<i64>)> = aggregated_deps
+        .iter()
+        .map(|agg| (render_dep_tag(&agg.dep), agg.bit))
+        .collect();
+
     // Pire cas de capacité : TOUTES les pièces émises simultanément (jamais
     // une hypothèse d'exclusivité mutuelle entre bits) + les deux balises
     // d'enveloppe, présentes une seule fois quel que soit le nombre de
-    // capacités.
+    // capacités, + toutes les balises de dépendances déjà dédupliquées.
     let static_bytes = OPEN.len()
         + CLOSE.len()
         + pieces
             .iter()
             .map(|p| p.import.len() + p.call.len())
-            .sum::<usize>();
+            .sum::<usize>()
+        + dep_tags.iter().map(|(tag, _)| tag.len()).sum::<usize>();
 
     let mut snippet = String::new();
+
+    // Dépendances D'ABORD, dans l'ordre requis chargement → activation
+    // (deps → entry → activation) — jamais à l'intérieur de `emit_body`,
+    // jamais soumises au regroupement `OPEN`/`CLOSE` du `<script
+    // type="module">` de la capacité : chaque dépendance est sa propre
+    // balise `<script>` de premier niveau, conditionnelle à son propre bit
+    // agrégé (`None` = au moins un consommateur statique, domination).
+    for (tag, bit) in &dep_tags {
+        match bit {
+            None => writeln!(snippet, "buf.push_str({tag:?});").unwrap(),
+            Some(bit) => writeln!(
+                snippet,
+                "if record.js_deps & {bit} != 0 {{ buf.push_str({tag:?}); }}"
+            )
+            .unwrap(),
+        }
+    }
 
     // Corps commun aux deux cas (tag garanti vs tag conditionnel) — évite
     // de dupliquer la boucle d'assemblage des imports/appels.
@@ -749,7 +924,24 @@ fn render_modules_as_static_html(emissions: &[ModuleEmission]) -> String {
         );
     }
 
-    let mut html = String::from("<script type=\"module\">");
+    // Dépendances D'ABORD (deps → entry → activation) — mêmes garanties
+    // d'agrégation/dédoublonnage que `render_modules_as_rust`. `agg.bit`
+    // ne peut être ici que `None` : la domination statique (§ci-dessus)
+    // s'applique transitivement, chaque émission contribuant à l'agrégat
+    // ayant elle-même `bit: None` — défendu explicitement plutôt que
+    // supposé, même discipline que l'`assert!` sur `emissions` ci-dessus.
+    let mut html = String::new();
+    for agg in aggregate_deps(emissions) {
+        assert!(
+            agg.bit.is_none(),
+            "DB-Forge : dépendance conditionnelle rencontrée pour une page STATIC_PAGES — \
+             ne peut survenir que si une émission source portait déjà bit: Some(_), déjà exclu \
+             par l'assert! ci-dessus"
+        );
+        html.push_str(&render_dep_tag(&agg.dep));
+    }
+
+    html.push_str("<script type=\"module\">");
     for (i, e) in emissions.iter().enumerate() {
         html.push_str(&format!(
             "import{{{} as _{i}}}from{:?};",
@@ -774,6 +966,17 @@ mod tests_module_grouping {
         url: &str,
         markers: &[&str],
     ) -> (String, CapabilityInfo) {
+        cap_with_deps(name, bit, activation, url, markers, &[])
+    }
+
+    fn cap_with_deps(
+        name: &str,
+        bit: i64,
+        activation: &str,
+        url: &str,
+        markers: &[&str],
+        deps: &[ResolvedDep],
+    ) -> (String, CapabilityInfo) {
         (
             name.to_string(),
             CapabilityInfo {
@@ -781,8 +984,17 @@ mod tests_module_grouping {
                 activation: activation.to_string(),
                 url: url.to_string(),
                 markers: markers.iter().map(|s| s.to_string()).collect(),
+                deps: deps.to_vec(),
             },
         )
+    }
+
+    fn dep(canonical_key: &str, url: &str, module: bool) -> ResolvedDep {
+        ResolvedDep {
+            canonical_key: canonical_key.to_string(),
+            url: url.to_string(),
+            module,
+        }
     }
 
     // ── lower_modules_for_template + render_modules_as_rust (Mode Page) ────
@@ -1002,8 +1214,230 @@ mod tests_module_grouping {
             activation: "boot".to_string(),
             url: "/scripts/x.js".to_string(),
             bit: Some(1),
+            deps: Vec::new(),
         }];
         render_modules_as_static_html(&emissions);
+    }
+
+    // ── deps (SPEC `deps`) — agrégation, dédoublonnage, conditionnalité ────
+
+    #[test]
+    fn dep_classic_umd_emits_defer_script_before_module_tag() {
+        let capabilities = vec![cap_with_deps(
+            "map",
+            2,
+            "bootstrap",
+            "/scripts/map.HASH.js",
+            &["map"],
+            &[dep(
+                "libraries/deckgl/deckgl.js",
+                "/libraries/deckgl.HASH.js",
+                false,
+            )],
+        )];
+        let static_classes = std::collections::HashSet::new();
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let lowering = render_modules_as_rust(&emissions);
+
+        // Ordre : dépendance AVANT le <script type="module"> de l'entry.
+        let dep_pos = lowering
+            .snippet
+            .find("libraries/deckgl.HASH.js")
+            .expect("la balise de dépendance doit être présente");
+        let module_pos = lowering
+            .snippet
+            .find("<script type=\\\"module\\\">")
+            .expect("le <script type=\"module\"> de l'entry doit être présent");
+        assert!(
+            dep_pos < module_pos,
+            "la dépendance doit précéder le module dans le snippet généré"
+        );
+
+        assert!(lowering
+            .snippet
+            .contains("<script src=\\\"/libraries/deckgl.HASH.js\\\" defer></script>"));
+        // Jamais un <script type=\"module\"> pour une dépendance classique.
+        assert!(!lowering
+            .snippet
+            .contains("<script type=\\\"module\\\" src=\\\"/libraries/deckgl.HASH.js\\\">"));
+        // Même bit que la capacité consommatrice — jamais inconditionnelle
+        // ici, puisque `map` est dynamique.
+        assert!(lowering.snippet.contains("if record.js_deps & 2 != 0"));
+    }
+
+    #[test]
+    fn dep_esm_emits_module_script_tag() {
+        let capabilities = vec![cap_with_deps(
+            "foo",
+            4,
+            "boot",
+            "/scripts/foo.HASH.js",
+            &["foo"],
+            &[dep("libraries/bar/bar.js", "/libraries/bar.HASH.js", true)],
+        )];
+        let static_classes = std::collections::HashSet::new();
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let lowering = render_modules_as_rust(&emissions);
+
+        assert!(lowering
+            .snippet
+            .contains("<script type=\\\"module\\\" src=\\\"/libraries/bar.HASH.js\\\"></script>"));
+    }
+
+    #[test]
+    fn dep_shared_by_two_capabilities_emits_single_tag_with_or_of_bits() {
+        let shared = dep(
+            "libraries/deckgl/deckgl.js",
+            "/libraries/deckgl.HASH.js",
+            false,
+        );
+        let capabilities = vec![
+            cap_with_deps(
+                "map",
+                2,
+                "bootMap",
+                "/scripts/map.HASH.js",
+                &["map"],
+                &[shared.clone()],
+            ),
+            cap_with_deps(
+                "terrain",
+                4,
+                "bootTerrain",
+                "/scripts/terrain.HASH.js",
+                &["terrain"],
+                &[shared],
+            ),
+        ];
+        let static_classes = std::collections::HashSet::new();
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        assert_eq!(emissions.len(), 2);
+
+        let lowering = render_modules_as_rust(&emissions);
+
+        // Une seule balise pour la dépendance partagée — jamais deux.
+        assert_eq!(
+            lowering
+                .snippet
+                .matches("libraries/deckgl.HASH.js")
+                .count(),
+            1,
+            "la dépendance partagée par deux capacités ne doit produire qu'une seule balise"
+        );
+        // OU binaire des deux bits (2 | 4 = 6).
+        assert!(lowering.snippet.contains("if record.js_deps & 6 != 0"));
+    }
+
+    #[test]
+    fn dep_shared_with_one_static_consumer_becomes_unconditional() {
+        let shared = dep(
+            "libraries/deckgl/deckgl.js",
+            "/libraries/deckgl.HASH.js",
+            false,
+        );
+        let capabilities = vec![
+            cap_with_deps(
+                "map",
+                2,
+                "bootMap",
+                "/scripts/map.HASH.js",
+                &["map"],
+                &[shared.clone()],
+            ),
+            cap_with_deps(
+                "terrain-static",
+                4,
+                "bootTerrain",
+                "/scripts/terrain.HASH.js",
+                &["terrain-static"],
+                &[shared],
+            ),
+        ];
+        let mut static_classes = std::collections::HashSet::new();
+        static_classes.insert("terrain-static".to_string()); // capacité statique
+
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let lowering = render_modules_as_rust(&emissions);
+
+        // La dépendance partagée devient inconditionnelle — domination par
+        // le consommateur statique (SPEC `deps` §3), même si `map` reste
+        // dynamique par ailleurs.
+        let dep_line = lowering
+            .snippet
+            .lines()
+            .find(|l| l.contains("libraries/deckgl.HASH.js"))
+            .expect("la balise de dépendance doit être présente");
+        assert!(
+            !dep_line.contains("if record.js_deps"),
+            "attendu inconditionnel, trouvé : {dep_line}"
+        );
+    }
+
+    #[test]
+    fn no_deps_leaves_snippet_identical_to_before() {
+        // Non-régression explicite : une capacité sans `deps` ne doit
+        // produire aucune balise supplémentaire ni aucun changement de
+        // structure par rapport au comportement d'avant `deps`.
+        let capabilities = vec![cap(
+            "map",
+            2,
+            "initMapsSystem",
+            "/scripts/map.HASH.js",
+            &["map"],
+        )];
+        let static_classes = std::collections::HashSet::new();
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let lowering = render_modules_as_rust(&emissions);
+
+        assert_eq!(lowering.snippet.matches("<script").count(), 1);
+        assert!(!lowering.snippet.contains("defer"));
+    }
+
+    #[test]
+    fn static_page_dep_is_unconditional_and_dedup_still_applies() {
+        let shared = dep(
+            "libraries/deckgl/deckgl.js",
+            "/libraries/deckgl.HASH.js",
+            false,
+        );
+        let capabilities = vec![
+            cap_with_deps(
+                "map",
+                2,
+                "bootMap",
+                "/scripts/map.HASH.js",
+                &["map"],
+                &[shared.clone()],
+            ),
+            cap_with_deps(
+                "terrain",
+                4,
+                "bootTerrain",
+                "/scripts/terrain.HASH.js",
+                &["terrain"],
+                &[shared],
+            ),
+        ];
+        let mut static_classes = std::collections::HashSet::new();
+        static_classes.insert("map".to_string());
+        static_classes.insert("terrain".to_string());
+
+        // STATIC_PAGES : has_record = false, comme les autres tests de ce
+        // fichier pour ce pipeline.
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, false);
+        let html = render_modules_as_static_html(&emissions);
+
+        assert_eq!(
+            html.matches("libraries/deckgl.HASH.js").count(),
+            1,
+            "dédoublonnage attendu même sur STATIC_PAGES"
+        );
+        assert!(!html.contains("record.js_deps"));
+        // Ordre : dépendance avant le <script type="module">.
+        assert!(
+            html.find("libraries/deckgl.HASH.js").unwrap()
+                < html.find("<script type=\"module\">").unwrap()
+        );
     }
 }
 
@@ -2801,4 +3235,182 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&out_path, &output)?;
     eprintln!("DB-Forge : généré → {}", out_path.display());
     Ok(())
+}
+
+/// Tests de `validate_capabilities` — résolution AOT de `deps` (SPEC
+/// `deps`). Sandbox filesystem, même discipline que `verbatim.rs`/
+/// `libraries.rs`/`webmanifest.rs` (`marius-assets`) : nécessaire ici
+/// aussi, `validate_capabilities` lit réellement `theme.toml` et
+/// `scripts_registry.lock` depuis `manifest_dir` (via `theme_source_dir`,
+/// remontée fixe de 3 niveaux + `assets/{THEME_NAME}`).
+#[cfg(test)]
+mod tests_validate_capabilities_deps {
+    use super::*;
+    use std::fs;
+
+    /// Construit `{base}/a/b/c` (le `manifest_dir` fictif passé à
+    /// `validate_capabilities`) et `{base}/assets/default` (où
+    /// `theme_source_dir` va effectivement chercher `theme.toml` après
+    /// résolution des trois `..`) — les deux DOIVENT exister physiquement
+    /// pour que la traversée de chemin réussisse au niveau de l'OS.
+    fn sandbox(name: &str) -> (std::path::PathBuf, String) {
+        let base = std::env::temp_dir().join(format!(
+            "marius-core-schema-test-deps-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let manifest_dir = base.join("a/b/c");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::create_dir_all(base.join("assets/default")).unwrap();
+        (base, manifest_dir.to_string_lossy().into_owned())
+    }
+
+    fn write_theme_toml(base: &std::path::Path, capabilities_toml: &str) {
+        fs::write(base.join("assets/default/theme.toml"), capabilities_toml).unwrap();
+    }
+
+    fn write_registry(base: &std::path::Path, entries: &str) {
+        fs::write(base.join("assets/default/scripts_registry.lock"), entries).unwrap();
+    }
+
+    fn asset(url: &str, module: bool) -> AssetEntry {
+        AssetEntry {
+            url: url.to_string(),
+            path: String::new(),
+            mime: String::new(),
+            size: 0,
+            hash: String::new(),
+            version: String::new(),
+            module,
+        }
+    }
+
+    #[test]
+    fn deps_resolved_with_module_flag_from_manifest() {
+        let (base, manifest_dir) = sandbox("resolved");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.map]
+entry = "scripts/map.js"
+markers = ["map"]
+activation = "bootstrap"
+deps = ["libraries/deckgl/deckgl.js"]
+"#,
+        );
+        write_registry(&base, "map = 2\n");
+
+        let mut assets = HashMap::new();
+        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js", true));
+        assets.insert(
+            "libraries/deckgl/deckgl.js".to_string(),
+            asset("/libraries/deckgl.HASH.js", false),
+        );
+
+        let result = validate_capabilities(&manifest_dir, &assets).unwrap();
+        assert_eq!(result.len(), 1);
+        let (name, info) = &result[0];
+        assert_eq!(name, "map");
+        assert_eq!(info.deps.len(), 1);
+        assert_eq!(info.deps[0].canonical_key, "libraries/deckgl/deckgl.js");
+        assert_eq!(info.deps[0].url, "/libraries/deckgl.HASH.js");
+        assert!(
+            !info.deps[0].module,
+            "deckgl déclaré module=false côté [libraries.*] doit rester false ici"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `deps` absente : comportement STRICTEMENT identique à avant son
+    /// introduction — `#[serde(default)]` garantit une désérialisation
+    /// réussie, et `CapabilityInfo.deps` reste simplement vide.
+    #[test]
+    fn deps_absent_is_backward_compatible() {
+        let (base, manifest_dir) = sandbox("absent");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.map]
+entry = "scripts/map.js"
+markers = ["map"]
+activation = "bootstrap"
+"#,
+        );
+        write_registry(&base, "map = 2\n");
+
+        let mut assets = HashMap::new();
+        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js", true));
+
+        let result = validate_capabilities(&manifest_dir, &assets).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].1.deps.is_empty());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Contrat central de la résolution AOT : une `deps` absente du
+    /// manifeste est un échec DUR, jamais un repli silencieux vers une
+    /// capacité sans dépendance.
+    #[test]
+    fn deps_missing_from_manifest_is_a_hard_error_never_silent() {
+        let (base, manifest_dir) = sandbox("missing");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.map]
+entry = "scripts/map.js"
+markers = ["map"]
+activation = "bootstrap"
+deps = ["libraries/deckgl/deckgl.js"]
+"#,
+        );
+        write_registry(&base, "map = 2\n");
+
+        let mut assets = HashMap::new();
+        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js", true));
+        // deckgl.js volontairement absent du manifeste.
+
+        let result = validate_capabilities(&manifest_dir, &assets);
+        assert!(
+            result.is_err(),
+            "une deps absente du manifeste doit faire échouer le build, jamais un repli silencieux"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Même convention de slash de tête optionnel que côté JS
+    /// (`scripts.rs` §3.2, `ExternalAsset`) — jamais une résolution
+    /// différente selon que l'intégrateur l'a écrit ou non.
+    #[test]
+    fn deps_leading_slash_is_tolerated() {
+        let (base, manifest_dir) = sandbox("leading-slash");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.map]
+entry = "scripts/map.js"
+markers = ["map"]
+activation = "bootstrap"
+deps = ["/libraries/deckgl/deckgl.js"]
+"#,
+        );
+        write_registry(&base, "map = 2\n");
+
+        let mut assets = HashMap::new();
+        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js", true));
+        assets.insert(
+            "libraries/deckgl/deckgl.js".to_string(),
+            asset("/libraries/deckgl.HASH.js", false),
+        );
+
+        let result = validate_capabilities(&manifest_dir, &assets).unwrap();
+        assert_eq!(
+            result[0].1.deps[0].canonical_key,
+            "libraries/deckgl/deckgl.js"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }

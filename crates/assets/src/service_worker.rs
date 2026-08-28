@@ -287,6 +287,9 @@ pub(crate) fn run_service_worker_pipeline(
             // (§3.4) : la version doit lui être affectée explicitement par
             // l'appelant juste après cet appel, pas ici.
             version: String::new(),
+            // Jamais chargé via <script>/`deps` — enregistré par
+            // `navigator.serviceWorker.register(...)`. Champ inerte.
+            module: true,
         },
     );
 

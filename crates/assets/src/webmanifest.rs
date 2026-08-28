@@ -140,6 +140,8 @@ pub(crate) fn run_webmanifest_pipeline(
             size: bytes.len() as u64,
             hash: full_hash,
             version: String::new(), // rempli par l'appelant (theme.version)
+            // JSON — jamais consommé via `deps`, champ inerte.
+            module: true,
         },
     );
 

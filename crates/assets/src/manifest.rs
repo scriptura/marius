@@ -99,6 +99,20 @@ pub(crate) struct AssetEntry {
     /// Empreinte BLAKE3 complète (64 caractères hex) pour validation d'intégrité stricte.
     pub(crate) hash: String,
     pub(crate) version: String,
+    /// Mode de chargement natif de l'asset, pertinent uniquement pour du
+    /// JS consommé via `[scripts.capabilities.*].deps` : `true` (défaut,
+    /// Marius est ESM-first) → `<script type="module">` ; `false` →
+    /// `<script defer>` classique, seule concession explicite pour une
+    /// bibliothèque vendorée qui reste distribuée en UMD (`[libraries.*].
+    /// module = false`). Descripteur de l'ASSET tel que produit — au même
+    /// titre que `mime`, jamais une option de rendu recalculée ailleurs —
+    /// pas une donnée de configuration : sa valeur est déjà entièrement
+    /// déterminée à l'écriture de cette entrée, jamais relue depuis
+    /// `theme.toml` en aval (`build.rs` ne connaît que ce manifeste).
+    /// Inerte (toujours `true`) pour toute entrée non consommée par
+    /// `deps` — CSS, sprites, webmanifest, composants/capacités JS
+    /// propres au thème (systématiquement modules par construction).
+    pub(crate) module: bool,
 }
 
 /// Registre de résolution des URLs publiques (`url()`).
