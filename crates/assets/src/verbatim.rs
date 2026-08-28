@@ -36,23 +36,11 @@ use crate::manifest::{
 /// Parcourt la structure source de manière déterministe, calcule les empreintes,
 /// duplique les buffers vers le point de montage de build, et retourne un registre
 /// plat garantissant un accès direct aux URLs publiques.
-///
-/// `module_overrides` : clé = `CanonicalAssetId` DÉJÀ calculée (chaîne),
-/// valeur = mode de chargement explicite pour ce fichier — alimenté
-/// exclusivement par les bibliothèques `[libraries.*]` déclarant `module =
-/// false` (UMD/classique). Absence de clé = défaut ESM-first (`true`),
-/// jamais une supposition faite ici : `verbatim.rs` reste agnostique de
-/// toute notion de bibliothèque (§9 SPEC), c'est `main.rs` qui construit
-/// cette table à partir de `[libraries.*]` avant l'appel. Une entrée de
-/// `[static.verbatim].files` ordinaire (jamais concernée par `module`)
-/// n'a simplement aucune clé ici — comportement identique à avant ce
-/// paramètre.
 pub(crate) fn run_verbatim_pipeline(
     theme_dir: &Path,
     build_root: &Path,
     build_root_rel: &str,
     files: &[String],
-    module_overrides: &HashMap<String, bool>,
     manifest: &mut HashMap<String, AssetEntry>,
 ) -> Result<AssetUrlRegistry, Box<dyn std::error::Error>> {
     let mut asset_url_registry = AssetUrlRegistry::new();
@@ -106,14 +94,6 @@ pub(crate) fn run_verbatim_pipeline(
         // `url()` CSS, un import JS non-relatif, ou une icône webmanifest.
         asset_url_registry.insert(logical_key.clone(), url.clone());
 
-        // Défaut ESM-first : `true` sauf override explicite d'une
-        // bibliothèque `module = false` — jamais déduit de l'extension ou
-        // du contenu du fichier.
-        let module = module_overrides
-            .get(logical_key.as_str())
-            .copied()
-            .unwrap_or(true);
-
         manifest.insert(
             logical_key.into_string(),
             AssetEntry {
@@ -123,7 +103,6 @@ pub(crate) fn run_verbatim_pipeline(
                 size: bytes.len() as u64,
                 hash: full_hash,
                 version: String::new(), // rempli par l'appelant (theme.version)
-                module,
             },
         );
 
@@ -163,7 +142,6 @@ mod tests {
             &build_root,
             "build/default",
             &["fonts/noto.woff2".to_string()],
-            &HashMap::new(),
             &mut manifest,
         )
         .unwrap();
@@ -202,7 +180,6 @@ mod tests {
                 "libraries/foo/index.js".to_string(),
                 "libraries/bar/index.js".to_string(),
             ],
-            &HashMap::new(),
             &mut manifest,
         )
         .unwrap();
@@ -225,72 +202,5 @@ mod tests {
         assert_eq!(manifest.len(), 2);
 
         let _ = fs::remove_dir_all(&base);
-    }
-
-    /// ESM-first : un fichier verbatim sans override explicite reçoit
-    /// `module: true` — comportement par défaut, jamais une supposition
-    /// dépendant de l'extension ou du contenu du fichier.
-    #[test]
-    fn module_defaults_to_true_without_override() {
-        let base = sandbox("module-default");
-        let theme_dir = base.join("theme");
-        let build_root = base.join("build");
-        fs::create_dir_all(theme_dir.join("libraries/esmlib")).unwrap();
-        fs::create_dir_all(&build_root).unwrap();
-        fs::write(theme_dir.join("libraries/esmlib/index.js"), b"export {};").unwrap();
-
-        let mut manifest = HashMap::new();
-        run_verbatim_pipeline(
-            &theme_dir,
-            &build_root,
-            "build/default",
-            &["libraries/esmlib/index.js".to_string()],
-            &HashMap::new(), // aucun override
-            &mut manifest,
-        )
-        .unwrap();
-
-        assert!(manifest["libraries/esmlib/index.js"].module);
-    }
-
-    /// `module = false` explicite (bibliothèque UMD/classique) doit
-    /// atteindre l'entrée de manifeste correspondante, sans affecter les
-    /// autres fichiers du même appel n'ayant pas d'override.
-    #[test]
-    fn module_override_false_reaches_manifest_entry_only_for_that_file() {
-        let base = sandbox("module-override");
-        let theme_dir = base.join("theme");
-        let build_root = base.join("build");
-        fs::create_dir_all(theme_dir.join("libraries/deckgl")).unwrap();
-        fs::create_dir_all(&build_root).unwrap();
-        fs::write(theme_dir.join("libraries/deckgl/deckgl.js"), b"UMD content").unwrap();
-        fs::write(theme_dir.join("libraries/deckgl/other.js"), b"other").unwrap();
-
-        let mut overrides = HashMap::new();
-        overrides.insert("libraries/deckgl/deckgl.js".to_string(), false);
-
-        let mut manifest = HashMap::new();
-        run_verbatim_pipeline(
-            &theme_dir,
-            &build_root,
-            "build/default",
-            &[
-                "libraries/deckgl/deckgl.js".to_string(),
-                "libraries/deckgl/other.js".to_string(),
-            ],
-            &overrides,
-            &mut manifest,
-        )
-        .unwrap();
-
-        assert!(!manifest["libraries/deckgl/deckgl.js"].module);
-        // `other.js` n'a volontairement PAS d'entrée dans `overrides` ici
-        // (ce test isole le mécanisme de lookup de `verbatim.rs` : une clé
-        // absente vaut toujours `true`, quoi qu'il arrive). Propager
-        // `module = false` à TOUS les fichiers d'une bibliothèque
-        // `[libraries.*]` est la responsabilité de `main.rs`, qui construit
-        // la table `overrides` une entrée par fichier découvert — testé
-        // séparément, pas ici.
-        assert!(manifest["libraries/deckgl/other.js"].module);
     }
 }

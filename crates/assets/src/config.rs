@@ -151,17 +151,23 @@ pub(crate) struct CapabilityConfig {
     pub(crate) activation: String,
     /// Scripts dont le CHARGEMENT doit précéder l'activation de cette
     /// capacité — jamais un `import` ESM à injecter dans `entry` (`map.js`
-    /// reste intégralement ignorant de ce mécanisme). Chemins canoniques
-    /// relatifs à la racine du thème, résolus par CE binaire exactement
-    /// comme un `ExternalAsset` de `scripts.rs` (`canonicalize_reference`
-    /// + `AssetUrlRegistry`, échec dur si absent) — la seule différence
-    /// est la DESTINATION du résultat : jamais une réécriture de texte
-    /// source, toujours une donnée transportée jusqu'à `build.rs` pour
-    /// émission d'une balise `<script>` distincte, avant celle de `entry`.
-    /// Jamais nommé `js_deps` : ceci est une dépendance de chargement de
-    /// script au sens de `[scripts.capabilities.*]`, pas un détail
-    /// d'implémentation du bitset `content.core.js_deps`, qui reste un
-    /// mécanisme totalement distinct.
+    /// reste intégralement ignorant de ce mécanisme). Jamais nommé
+    /// `js_deps` : ceci est une dépendance de chargement de script au sens
+    /// de `[scripts.capabilities.*]`, pas un détail d'implémentation du
+    /// bitset `content.core.js_deps`, qui reste un mécanisme totalement
+    /// distinct.
+    ///
+    /// **Jamais lu par ce binaire**, exactement comme `markers`/
+    /// `activation` ci-dessus — déclaré ici uniquement pour documenter la
+    /// forme complète d'une capacité. La résolution AOT
+    /// (`canonicalize_reference` → `resolve_asset_reference` →
+    /// `AssetUrlRegistry` → échec dur si absent) est entièrement à la
+    /// charge de `crates/core/schema/build.rs`, via sa propre
+    /// désérialisation indépendante de `theme.toml` (aucun type partagé
+    /// entre les deux crates). `marius-assets` n'a besoin de rien savoir
+    /// de `deps` : il produit `manifest.toml` (via `[libraries.*]`), c'est
+    /// tout ce dont `build.rs` a besoin pour résoudre `deps` lui-même.
+    #[allow(dead_code)]
     #[serde(default)]
     pub(crate) deps: Vec<String>,
 }

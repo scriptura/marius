@@ -15,7 +15,7 @@
 //!
 //! `DATABASE_URL` pointe vers `marius` avec le rôle `marius_admin`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -306,12 +306,23 @@ fn emit_static_html<'r>(
 #[derive(Deserialize)]
 struct AssetManifest {
     assets: HashMap<String, AssetEntry>,
+    /// Miroir de `crates/assets/src/manifest.rs::AssetManifest.classic_scripts`
+    /// — métadonnée du mécanisme de chargement de `deps`, jamais une
+    /// propriété d'`AssetEntry` (voir doc-comment côté producteur pour la
+    /// justification complète de cette séparation). Sparse : ne contient
+    /// que les clés canoniques explicitement classiques/UMD.
+    #[serde(default)]
+    classic_scripts: Vec<String>,
 }
 
 /// Une entrée du manifeste — champs de la spec §7. Seuls `url` (et sa
 /// longueur) sont consommés par ce build.rs ; `path`/`mime`/`size`/`hash`/
 /// `version` sont ceux que le Shell consomme au runtime (`handlers.rs`),
 /// partagés depuis le même fichier — producteur unique, spec §8.
+///
+/// Reste un pur descripteur d'artefact — jamais de champ propre à un
+/// mécanisme de consommation particulier (voir `AssetManifest::
+/// classic_scripts` pour où vit cette nuance pour `deps`).
 #[derive(Deserialize)]
 struct AssetEntry {
     url: String,
@@ -325,11 +336,6 @@ struct AssetEntry {
     hash: String,
     #[allow(dead_code)]
     version: String,
-    /// Miroir strict de `crates/assets/src/manifest.rs::AssetEntry.module`
-    /// — seul champ de ce miroir consommé au-delà de `url` : décide, pour
-    /// une entrée référencée par `deps`, entre `<script type="module">`
-    /// et `<script defer>` classique (`ResolvedDep::module`).
-    module: bool,
 }
 
 /// Nom du thème actif. Décision actée en session : un seul thème possible
@@ -352,6 +358,18 @@ fn build_dir(manifest_dir: &str) -> PathBuf {
         .join(THEME_NAME)
 }
 
+/// Vue exploitable du manifeste, après désérialisation — sépare, dès la
+/// sortie de ce module, les deux natures de données que
+/// `manifest.toml` transporte : les artefacts eux-mêmes (`assets`) et la
+/// métadonnée de chargement de scripts (`classic_scripts`), jamais
+/// mélangées dans une même structure en aval non plus.
+struct LoadedAssets {
+    assets: HashMap<String, AssetEntry>,
+    /// Converti en `HashSet` ici (une seule fois) : `validate_capabilities`
+    /// fait un test d'appartenance par dépendance résolue, pas un parcours.
+    classic_scripts: HashSet<String>,
+}
+
 /// Résout le chemin du manifeste d'assets et l'enregistre auprès de Cargo.
 ///
 /// `cargo:rerun-if-changed` émis de façon INCONDITIONNELLE, avant tout test
@@ -359,7 +377,7 @@ fn build_dir(manifest_dir: &str) -> PathBuf {
 /// `guide-cycle-de-vie-runtime.md` §2 : une émission conditionnelle ne
 /// rattrape jamais un fichier qui apparaît après le premier build. Même
 /// discipline que `resolve_template` (ligne ~316) pour les templates.
-fn load_asset_manifest(manifest_dir: &str) -> Result<HashMap<String, AssetEntry>, ()> {
+fn load_asset_manifest(manifest_dir: &str) -> Result<LoadedAssets, ()> {
     let manifest_path = build_dir(manifest_dir).join("manifest.toml");
 
     // Émission inconditionnelle — avant le test d'existence.
@@ -382,7 +400,10 @@ fn load_asset_manifest(manifest_dir: &str) -> Result<HashMap<String, AssetEntry>
         );
     })?;
 
-    Ok(parsed.assets)
+    Ok(LoadedAssets {
+        assets: parsed.assets,
+        classic_scripts: parsed.classic_scripts.into_iter().collect(),
+    })
 }
 
 /// Répertoire source du thème (contient `theme.toml`) — symétrique de
@@ -428,6 +449,7 @@ fn is_valid_identifier(s: &str) -> bool {
 fn validate_capabilities(
     manifest_dir: &str,
     assets: &HashMap<String, AssetEntry>,
+    classic_scripts: &HashSet<String>,
 ) -> Result<Vec<(String, CapabilityInfo)>, ()> {
     let theme_toml_path = theme_source_dir(manifest_dir).join("theme.toml");
     println!("cargo:rerun-if-changed={}", theme_toml_path.display());
@@ -587,7 +609,10 @@ fn validate_capabilities(
                 Some(entry) => deps.push(ResolvedDep {
                     canonical_key: dep_key.to_string(),
                     url: entry.url.clone(),
-                    module: entry.module,
+                    // ESM-first : classique/UMD uniquement si explicitement
+                    // listé — jamais une propriété de `entry` lui-même
+                    // (`AssetEntry` reste un pur descripteur d'artefact).
+                    module: !classic_scripts.contains(dep_key),
                 }),
                 None => {
                     dep_error = true;
@@ -1253,13 +1278,17 @@ mod tests_module_grouping {
             "la dépendance doit précéder le module dans le snippet généré"
         );
 
-        assert!(lowering
-            .snippet
-            .contains("<script src=\\\"/libraries/deckgl.HASH.js\\\" defer></script>"));
+        assert!(
+            lowering
+                .snippet
+                .contains("<script src=\\\"/libraries/deckgl.HASH.js\\\" defer></script>")
+        );
         // Jamais un <script type=\"module\"> pour une dépendance classique.
-        assert!(!lowering
-            .snippet
-            .contains("<script type=\\\"module\\\" src=\\\"/libraries/deckgl.HASH.js\\\">"));
+        assert!(
+            !lowering
+                .snippet
+                .contains("<script type=\\\"module\\\" src=\\\"/libraries/deckgl.HASH.js\\\">")
+        );
         // Même bit que la capacité consommatrice — jamais inconditionnelle
         // ici, puisque `map` est dynamique.
         assert!(lowering.snippet.contains("if record.js_deps & 2 != 0"));
@@ -1279,9 +1308,11 @@ mod tests_module_grouping {
         let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
         let lowering = render_modules_as_rust(&emissions);
 
-        assert!(lowering
-            .snippet
-            .contains("<script type=\\\"module\\\" src=\\\"/libraries/bar.HASH.js\\\"></script>"));
+        assert!(
+            lowering.snippet.contains(
+                "<script type=\\\"module\\\" src=\\\"/libraries/bar.HASH.js\\\"></script>"
+            )
+        );
     }
 
     #[test]
@@ -1317,10 +1348,7 @@ mod tests_module_grouping {
 
         // Une seule balise pour la dépendance partagée — jamais deux.
         assert_eq!(
-            lowering
-                .snippet
-                .matches("libraries/deckgl.HASH.js")
-                .count(),
+            lowering.snippet.matches("libraries/deckgl.HASH.js").count(),
             1,
             "la dépendance partagée par deux capacités ne doit produire qu'une seule balise"
         );
@@ -3070,7 +3098,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Lecture unique du manifeste d'assets — une seule fois pour tout le
     // build, pas par table (évite un re-parsing TOML redondant et une
     // duplication d'émissions rerun-if-changed).
-    let assets = load_asset_manifest(&manifest_dir).unwrap_or_else(|()| {
+    let loaded = load_asset_manifest(&manifest_dir).unwrap_or_else(|()| {
         // cargo:error déjà émis par load_asset_manifest — arrêt immédiat,
         // même discipline que resolve_template plus bas.
         std::process::exit(1);
@@ -3083,9 +3111,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // précis avant toute tentative de connexion Postgres. Le lowering PAR
     // TEMPLATE (scan statique + croisement avec record.js_deps) est fait
     // plus loin, une fois par composant/page — jamais ici.
-    let capabilities = validate_capabilities(&manifest_dir, &assets).unwrap_or_else(|()| {
-        std::process::exit(1);
-    });
+    let capabilities =
+        validate_capabilities(&manifest_dir, &loaded.assets, &loaded.classic_scripts)
+            .unwrap_or_else(|()| {
+                std::process::exit(1);
+            });
+
+    // `classic_scripts` n'est plus nécessaire au-delà de la résolution
+    // ci-dessus (déjà consommée dans `capabilities[*].deps`) — `assets`
+    // redevient le nom utilisé par tout le reste de cette fonction,
+    // inchangé depuis avant l'introduction de `LoadedAssets`.
+    let assets = loaded.assets;
 
     // ── Pages sans donnée dynamique (STATIC_PAGES) ─────────────────────────
     //
@@ -3273,7 +3309,10 @@ mod tests_validate_capabilities_deps {
         fs::write(base.join("assets/default/scripts_registry.lock"), entries).unwrap();
     }
 
-    fn asset(url: &str, module: bool) -> AssetEntry {
+    /// `AssetEntry` reste un pur descripteur d'artefact — plus aucun
+    /// paramètre `module` ici, volontairement : voir `classic_scripts` en
+    /// argument direct de `validate_capabilities` dans chaque test.
+    fn asset(url: &str) -> AssetEntry {
         AssetEntry {
             url: url.to_string(),
             path: String::new(),
@@ -3281,12 +3320,15 @@ mod tests_validate_capabilities_deps {
             size: 0,
             hash: String::new(),
             version: String::new(),
-            module,
         }
     }
 
+    fn classic(keys: &[&str]) -> HashSet<String> {
+        keys.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
-    fn deps_resolved_with_module_flag_from_manifest() {
+    fn deps_resolved_with_module_flag_from_classic_scripts() {
         let (base, manifest_dir) = sandbox("resolved");
         write_theme_toml(
             &base,
@@ -3301,13 +3343,14 @@ deps = ["libraries/deckgl/deckgl.js"]
         write_registry(&base, "map = 2\n");
 
         let mut assets = HashMap::new();
-        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js", true));
+        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js"));
         assets.insert(
             "libraries/deckgl/deckgl.js".to_string(),
-            asset("/libraries/deckgl.HASH.js", false),
+            asset("/libraries/deckgl.HASH.js"),
         );
+        let classic_scripts = classic(&["libraries/deckgl/deckgl.js"]);
 
-        let result = validate_capabilities(&manifest_dir, &assets).unwrap();
+        let result = validate_capabilities(&manifest_dir, &assets, &classic_scripts).unwrap();
         assert_eq!(result.len(), 1);
         let (name, info) = &result[0];
         assert_eq!(name, "map");
@@ -3316,8 +3359,40 @@ deps = ["libraries/deckgl/deckgl.js"]
         assert_eq!(info.deps[0].url, "/libraries/deckgl.HASH.js");
         assert!(
             !info.deps[0].module,
-            "deckgl déclaré module=false côté [libraries.*] doit rester false ici"
+            "deckgl listée dans classic_scripts doit rester classique (module: false) ici"
         );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// ESM-first : une dépendance résolue mais ABSENTE de `classic_scripts`
+    /// doit rester `module: true` — comportement par défaut, jamais une
+    /// supposition dépendant de l'extension ou du contenu du fichier.
+    #[test]
+    fn dep_not_in_classic_scripts_defaults_to_module_true() {
+        let (base, manifest_dir) = sandbox("esm-default");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.foo]
+entry = "scripts/foo.js"
+markers = ["foo"]
+activation = "boot"
+deps = ["libraries/bar/bar.js"]
+"#,
+        );
+        write_registry(&base, "foo = 2\n");
+
+        let mut assets = HashMap::new();
+        assets.insert("foo.js".to_string(), asset("/scripts/foo.HASH.js"));
+        assets.insert(
+            "libraries/bar/bar.js".to_string(),
+            asset("/libraries/bar.HASH.js"),
+        );
+        let classic_scripts = HashSet::new(); // aucune bibliothèque classique déclarée
+
+        let result = validate_capabilities(&manifest_dir, &assets, &classic_scripts).unwrap();
+        assert!(result[0].1.deps[0].module);
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -3340,9 +3415,9 @@ activation = "bootstrap"
         write_registry(&base, "map = 2\n");
 
         let mut assets = HashMap::new();
-        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js", true));
+        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js"));
 
-        let result = validate_capabilities(&manifest_dir, &assets).unwrap();
+        let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert!(result[0].1.deps.is_empty());
 
@@ -3368,10 +3443,10 @@ deps = ["libraries/deckgl/deckgl.js"]
         write_registry(&base, "map = 2\n");
 
         let mut assets = HashMap::new();
-        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js", true));
+        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js"));
         // deckgl.js volontairement absent du manifeste.
 
-        let result = validate_capabilities(&manifest_dir, &assets);
+        let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new());
         assert!(
             result.is_err(),
             "une deps absente du manifeste doit faire échouer le build, jamais un repli silencieux"
@@ -3382,9 +3457,12 @@ deps = ["libraries/deckgl/deckgl.js"]
 
     /// Même convention de slash de tête optionnel que côté JS
     /// (`scripts.rs` §3.2, `ExternalAsset`) — jamais une résolution
-    /// différente selon que l'intégrateur l'a écrit ou non.
+    /// différente selon que l'intégrateur l'a écrit ou non. Vérifie aussi
+    /// que `classic_scripts` est consultée avec la même clé NORMALISÉE
+    /// (sans slash de tête), jamais la forme brute écrite par
+    /// l'intégrateur.
     #[test]
-    fn deps_leading_slash_is_tolerated() {
+    fn deps_leading_slash_is_tolerated_including_for_classic_scripts_lookup() {
         let (base, manifest_dir) = sandbox("leading-slash");
         write_theme_toml(
             &base,
@@ -3399,17 +3477,22 @@ deps = ["/libraries/deckgl/deckgl.js"]
         write_registry(&base, "map = 2\n");
 
         let mut assets = HashMap::new();
-        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js", true));
+        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js"));
         assets.insert(
             "libraries/deckgl/deckgl.js".to_string(),
-            asset("/libraries/deckgl.HASH.js", false),
+            asset("/libraries/deckgl.HASH.js"),
         );
+        // classic_scripts stocke la forme SANS slash de tête (celle produite
+        // par CanonicalAssetId côté marius-assets) — jamais celle,
+        // éventuellement préfixée, écrite par l'intégrateur dans `deps`.
+        let classic_scripts = classic(&["libraries/deckgl/deckgl.js"]);
 
-        let result = validate_capabilities(&manifest_dir, &assets).unwrap();
+        let result = validate_capabilities(&manifest_dir, &assets, &classic_scripts).unwrap();
         assert_eq!(
             result[0].1.deps[0].canonical_key,
             "libraries/deckgl/deckgl.js"
         );
+        assert!(!result[0].1.deps[0].module);
 
         let _ = fs::remove_dir_all(&base);
     }

@@ -78,6 +78,22 @@ impl std::fmt::Display for CanonicalAssetId {
 #[derive(Serialize)]
 pub(crate) struct AssetManifest {
     pub(crate) assets: HashMap<String, AssetEntry>,
+    /// Métadonnée du MÉCANISME DE CHARGEMENT DE SCRIPTS
+    /// (`[scripts.capabilities.*].deps`, résolu par
+    /// `crates/core/schema/build.rs`) — jamais une propriété de
+    /// l'artefact. `AssetEntry` reste un descripteur d'artefact produit,
+    /// vrai pour absolument tout fichier (CSS, image, police, JSON...) ;
+    /// cette structure est volontairement DISJOINTE de `assets`, exactement
+    /// comme `deps` lui-même vit hors de `AssetEntry`, dans
+    /// `CapabilityConfig`.
+    ///
+    /// Sparse et ESM-first : ne liste QUE les `CanonicalAssetId` (chaîne)
+    /// des scripts `[libraries.*].module = false` (UMD/classique) —
+    /// absence de clé = module ES, comportement par défaut de Marius.
+    /// Triée pour la reproductibilité du manifeste, même discipline que
+    /// le reste de ce crate (jamais l'ordre d'itération d'une `HashMap`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) classic_scripts: Vec<String>,
 }
 
 /// Entrée individuelle d'un asset dans le manifeste.
@@ -85,6 +101,13 @@ pub(crate) struct AssetManifest {
 /// **Invariant de rupture :** Les noms de champs doivent rester strictement identiques
 /// (caractère par caractère) à la struct `AssetEntry` lue par `build.rs`.
 /// Toute divergence cassera la désérialisation TOML silencieusement (sans erreur de compilation).
+///
+/// **Reste un pur descripteur d'artefact produit** — url/path/mime/size/
+/// hash/version sont vrais de TOUT fichier, sans exception ni condition.
+/// Toute métadonnée propre à un mécanisme de CONSOMMATION particulier
+/// (chargement de script via `deps`, ou autre besoin futur du même genre)
+/// ne doit jamais rejoindre cette struct — voir `AssetManifest::classic_scripts`
+/// pour l'exemple de la bonne séparation.
 #[derive(Serialize)]
 pub(crate) struct AssetEntry {
     /// URL publique versionnée (ex: `/static/image.a81f9.png`).
@@ -99,20 +122,6 @@ pub(crate) struct AssetEntry {
     /// Empreinte BLAKE3 complète (64 caractères hex) pour validation d'intégrité stricte.
     pub(crate) hash: String,
     pub(crate) version: String,
-    /// Mode de chargement natif de l'asset, pertinent uniquement pour du
-    /// JS consommé via `[scripts.capabilities.*].deps` : `true` (défaut,
-    /// Marius est ESM-first) → `<script type="module">` ; `false` →
-    /// `<script defer>` classique, seule concession explicite pour une
-    /// bibliothèque vendorée qui reste distribuée en UMD (`[libraries.*].
-    /// module = false`). Descripteur de l'ASSET tel que produit — au même
-    /// titre que `mime`, jamais une option de rendu recalculée ailleurs —
-    /// pas une donnée de configuration : sa valeur est déjà entièrement
-    /// déterminée à l'écriture de cette entrée, jamais relue depuis
-    /// `theme.toml` en aval (`build.rs` ne connaît que ce manifeste).
-    /// Inerte (toujours `true`) pour toute entrée non consommée par
-    /// `deps` — CSS, sprites, webmanifest, composants/capacités JS
-    /// propres au thème (systématiquement modules par construction).
-    pub(crate) module: bool,
 }
 
 /// Registre de résolution des URLs publiques (`url()`).

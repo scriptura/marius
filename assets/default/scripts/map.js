@@ -198,7 +198,7 @@ const MARKER_BOUNCE_HALF_DURATION = 350;
 // ─── Drop initial ────────────────────────────────────────────────────────────
 
 const MARKER_DROP_DURATION = 600;
-
+//const MARKER_DROP_WAIT = 1;
 const MARKER_DROP_BOUNCE_OFFSET = -30;
 const MARKER_DROP_BOUNCE_HALF_DURATION = 150;
 
@@ -870,17 +870,17 @@ const initMap = async (config) => {
 	 *
 	 * La transition elle-même reste responsable de l'interpolation.
 	 */
-	window.setTimeout(() => {
-		dropPhase = 1;
+	//window.setTimeout(() => {
+	dropPhase = 1;
 
-		deckgl.setProps({
-			layers: [
-				tileLayer,
-				pickLayer,
-				createVisualLayer(0, animationGeneration, "drop", "drop"),
-			],
-		});
-	}, MARKER_DROP_WAIT);
+	deckgl.setProps({
+		layers: [
+			tileLayer,
+			pickLayer,
+			createVisualLayer(0, animationGeneration, "drop", "drop"),
+		],
+	});
+	//}, MARKER_DROP_WAIT);
 };
 
 // ─── Pipeline de boot (Intersection Observer) ────────────────────────────────

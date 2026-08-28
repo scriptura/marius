@@ -1344,9 +1344,6 @@ pub(crate) fn run_styles_pipeline(
                 size: bytes.len() as u64,
                 hash: full_hash,
                 version: String::new(),
-                // CSS — jamais consommée via `deps` (mécanisme scopé au
-                // JS), champ inerte.
-                module: true,
             },
         );
 
