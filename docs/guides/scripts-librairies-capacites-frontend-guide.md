@@ -2,43 +2,63 @@
 
 > Renommé depuis `js-deps-capacites-frontend-guide.md` — l'ancien titre ne
 > couvrait que la branche `js_deps`/capacités. Ce guide couvre désormais les
-> **trois** mécanismes disponibles pour amener du JS au client, et comment
-> ils s'articulent entre eux.
+> mécanismes disponibles pour amener du JS au client, et comment ils
+> s'articulent entre eux.
 
 Références :
 - `HANDOFF-js-deps-capacites-frontend-v2.md` — implémentation d'origine du
-  système de capacités conditionnelles (§5 de ce guide).
+  système de capacités conditionnelles (§6 de ce guide).
 - `SPEC-canonical-asset-identity.md` — implémentation d'origine de
   `CanonicalAssetId` et des bibliothèques vendorées (§3 de ce guide).
 - `runtime-lifecycle-guide.md` — modèle du cycle build/runtime (AOT vs
   réactif PostgreSQL) dont dépend directement tout ce qui touche à la
-  branche dynamique des capacités (§5.2.2, §6, §7 de ce guide). À lire en
+  branche dynamique des capacités (§6.2.2, §7, §8 de ce guide). À lire en
   cas de doute sur « pourquoi mon changement n'apparaît pas alors que le
   build est vert ».
 
 Ce guide en est la version d'usage courant — pas d'historique de décisions,
 juste : comprendre le système, l'étendre, le compiler.
 
-## 1. Vue d'ensemble — trois mécanismes, un seul pipeline d'assets
+> **Deux noms proches, deux mécanismes disjoints — à ne jamais confondre.**
+> `deps` (`[scripts.capabilities.*].deps`, §4 de ce guide) est une
+> dépendance de **chargement de script**, décidée une fois pour toutes dans
+> `theme.toml`, jamais liée au contenu d'une page précise. `js_deps`
+> (`content.core.js_deps`, §6 de ce guide) est un **bitset SQL** décrivant
+> quelles capacités un enregistrement précis doit activer. Les deux se
+> croisent (une dépendance `deps` d'une capacité dynamique hérite de la
+> même conditionnalité que le bit `js_deps` de cette capacité, §4.4), mais
+> ce sont deux données, deux mécanismes, deux moments de résolution
+> entièrement différents.
 
-Trois besoins distincts, trois sections de `theme.toml`, un seul
-compilateur (`marius-assets`) pour les résoudre tous :
+## 1. Vue d'ensemble
+
+Quatre besoins distincts, trois sections de `theme.toml`, un seul
+compilateur (`marius-assets`) pour tout résoudre :
 
 | Besoin | Section `theme.toml` | Condition de chargement |
 |---|---|---|
-| Script chargé sur des pages précises, décidé au moment d'écrire le template | `[scripts.components]` | Aucune — inclusion explicite dans un `.marius` |
-| Script chargé selon un marqueur structurel (`.marius`) ou éditorial (`content.body`) | `[scripts.capabilities.*]` | Bit `js_deps`, testé au build (statique) ou au rendu (dynamique) |
-| Code tiers vendoré, consommé par un script ci-dessus | `[libraries.*]` | Jamais chargé seul — référencé par un `import` depuis un component ou une capacité |
+| Script chargé sur des pages précises, décidé au moment d'écrire le template | `[scripts.components]` | Aucune — inclusion explicite via `{% asset %}` dans un `.marius` |
+| Script chargé selon un marqueur structurel (`.marius`) ou éditorial (`content.body`) | `[scripts.capabilities.*]` | Bit `js_deps` (dynamique) ou détection statique au build |
+| Code tiers vendoré, importé **littéralement** par le texte ESM d'un script | `[libraries.*]` (`module = true`, défaut) | Jamais seul — un `import` écrit à la main dans le script consommateur (§3.2) |
+| Code tiers vendoré dont le **chargement** (pas l'import) doit précéder une capacité — notamment tout UMD/classique | `[libraries.*]` (`module = false` explicite) + `deps` sur la capacité consommatrice | Balise `<script>` distincte, injectée avant celle de la capacité — **jamais** un `import` (§4) |
 
 Une bibliothèque n'est jamais un point d'entrée en elle-même : elle existe
-pour être **importée** par un component ou une capacité (§3.2). Un
-component et une capacité sont tous deux des points d'entrée ESM,
-traités par le même pipeline d'exploration/tri/hachage (`scripts.rs`) — leur
-seule différence est la présence ou non d'une condition de chargement.
+pour être **consommée** par un component ou une capacité, de deux façons
+orthogonales, choisies selon son format :
+
+- **Import ESM direct** (§3.2) — la bibliothèque expose une vraie syntaxe
+  de module (`export`), `module = true` (défaut) suffit, on l'importe comme
+  n'importe quel autre module.
+- **`deps`** (§4) — la bibliothèque est UMD/classique (`module = false`
+  explicite) et expose son API via un global (`window.X`), ou on veut
+  simplement garantir son chargement avant une capacité sans l'importer
+  nommément. **Disponible uniquement sur `[scripts.capabilities.*]`** —
+  aucun mécanisme équivalent pour un component à ce jour (limite actuelle,
+  §9).
 
 Si le besoin est conditionné par le contenu ou par le template, allez
-directement en §5. Si c'est un script sans condition, §2. Si c'est du code
-tiers à vendorer, §3.
+directement en §6. Script sans condition, §2. Code tiers à vendorer, §3.
+Garantir le chargement d'un script tiers avant une capacité, §4.
 
 ## 2. Scripts inconditionnels — `[scripts.components]`
 
@@ -49,9 +69,13 @@ Dans `assets/default/theme.toml` :
 main = "scripts/main/index.js"
 ```
 
-- Clé (`main`) = nom logique = clé de manifeste `main.js`.
+- Clé (`main`) = nom logique = clé de manifeste `main.js` (voir §9 pour une
+  asymétrie de convention à connaître sur cette clé).
 - Aucun `markers`, aucune `activation`, aucun bit `scripts_registry.lock` —
   rien à synchroniser côté SQL, rien à câbler dans `compute_js_deps`.
+- **Aucun `deps`** — ce champ n'existe que sur `[scripts.capabilities.*]`
+  (`CapabilityConfig`) ; `[scripts.components]` reste une simple table
+  `nom → chemin`, sans configuration additionnelle possible à ce jour.
 - Résolu par le **même pipeline ESM** que les capacités
   (`build_module_arena` → tri topologique → `patch_and_hash_modules`) :
   les imports relatifs entre fichiers d'un même composant sont suivis et
@@ -60,9 +84,9 @@ main = "scripts/main/index.js"
   `index.js`) — reçoit sa propre entrée de manifeste, sous son chemin
   canonique complet (`scripts/main/navigation.js`), jamais son seul nom de
   fichier.
-- Un component peut importer une bibliothèque vendorée exactement comme une
-  capacité (§3.2) — le mécanisme de résolution est identique, indépendant
-  de la section d'origine du point d'entrée.
+- Un component peut importer une bibliothèque ESM vendorée exactement comme
+  une capacité (§3.2) — le mécanisme de résolution est identique,
+  indépendant de la section d'origine du point d'entrée.
 
 Consommation côté template : via `{% asset main.js %}`, comme toute entrée
 de manifeste (même convention que `webmanifest`/CSS/sprites). 🟡 La forme
@@ -70,8 +94,8 @@ exacte de la balise (`<script type="module" src="...">` posée à la main
 dans le `.marius`, vs. un mécanisme d'inclusion différent) n'a pas été
 vérifiée sur pièce pour ce guide — contrairement aux capacités, dont
 l'émission HTML est entièrement générée par `lower_modules_for_template`
-(§5.2), un component n'est probablement pas orchestré automatiquement : à
-confirmer sur un `.marius` existant en utilisant déjà `[scripts.components]`
+(§6.2), un component n'est probablement pas orchestré automatiquement : à
+confirmer sur un `.marius` existant utilisant déjà `[scripts.components]`
 avant de considérer ce point clos.
 
 **Quand l'utiliser :** un script dont le besoin est connu à l'écriture du
@@ -85,11 +109,12 @@ recherche, tout ce qui n'a pas de sens à conditionner.
 ```toml
 [libraries.deckgl]
 root = "libraries/deckgl"
+module = false   # défaut : true — voir ci-dessous
 ```
 
-- Autorise la découverte récursive de **tout** le sous-arbre
-  `assets/default/libraries/deckgl/` — déterministe (chemins triés), aucune
-  distinction de type de fichier (JS, CSS, images, `.map`, fonts...).
+- `root` autorise la découverte récursive de **tout** le sous-arbre
+  `assets/default/libraries/deckgl/` — déterministe (chemins triés),
+  aucune distinction de type de fichier (JS, CSS, images, `.map`, fonts...).
 - Chaque fichier découvert est copié **tel quel** (même pipeline que
   `[static.verbatim]`, zéro transformation de contenu) et haché
   individuellement. Sa clé de registre/manifeste est son chemin canonique
@@ -100,15 +125,27 @@ root = "libraries/deckgl"
 - Le nom logique (`deckgl` dans `[libraries.deckgl]`) est une étiquette de
   configuration uniquement — il n'apparaît dans aucune identité d'asset ni
   aucun préfixe d'URL au-delà du chemin physique réel sous `root`.
+- **`module` — Marius est ESM-first.** Défaut `true` (omis) : la
+  bibliothèque est traitée comme un module ES partout où elle est
+  consommée via `deps` (§4.3 — sans effet sur un import direct, §3.2, qui
+  ne consulte jamais ce champ). `module = false` est une concession
+  **explicite**, jamais une supposition, réservée aux bibliothèques qui
+  restent distribuées en UMD/classique et exposent leur API via un global
+  (`window.X`). C'est une propriété de la bibliothèque elle-même — la même
+  bibliothèque produit toujours le même type de balise, quelle que soit la
+  capacité qui la consomme via `deps`.
 
 Procédure : déposer les fichiers réels de la bibliothèque, tels que fournis
 par l'éditeur tiers, sous `assets/default/libraries/<nom>/` (aucun
 build/bundling supplémentaire n'est effectué par ce mécanisme), déclarer
-`root` dans `theme.toml`, relancer l'Étape 1 (§6).
+`root` (et `module = false` si nécessaire) dans `theme.toml`, relancer
+l'Étape 1 (§7).
 
-### 3.2 Référencer une bibliothèque depuis un script
+### 3.2 Consommer une bibliothèque ESM par import direct
 
-Depuis n'importe quel `[scripts.components]` ou `[scripts.capabilities.*]` :
+Réservé aux bibliothèques `module = true` (défaut) qui exposent une vraie
+syntaxe de module. Depuis n'importe quel `[scripts.components]` ou
+`[scripts.capabilities.*]` :
 
 ```js
 import { IconLayer } from "libraries/deckgl/deckgl.js";
@@ -121,16 +158,21 @@ résout à l'identique.
   jamais relatif au fichier qui importe. Un import commençant par `./` ou
   `../` désigne toujours un autre module du **même composant/capacité**
   (résolu, haché individuellement, chaîné dans le graphe ESM) — jamais une
-  bibliothèque, même si un fichier de même nom existe sous
-  `libraries/`.
+  bibliothèque, même si un fichier de même nom existe sous `libraries/`.
 - Résolu au build contre le registre déjà peuplé par
   `[libraries.*]`/`[static.verbatim]` — qui s'exécute systématiquement
-  avant tout script (§6, Étape 1) — et réécrit vers l'URL hachée réelle
+  avant tout script (§7, Étape 1) — et réécrit vers l'URL hachée réelle
   (`/libraries/deckgl.<hash>.js`).
 - Absence de la clé dans le registre (bibliothèque non déclarée, `root`
   incorrect, faute de frappe dans le chemin) : **échec de build immédiat**
   (`AssetNotFound`), jamais un 404 silencieux découvert seulement au
   runtime.
+- **Rien ne vérifie ici que la bibliothèque importée est bien `module =
+  true`.** Importer littéralement une bibliothèque `module = false` compile
+  sans erreur (la résolution ne consulte jamais ce champ pour un `import`
+  direct) mais échoue au runtime navigateur — un bundle UMD n'est pas un
+  module ES valide. Pour une bibliothèque `module = false`, utiliser `deps`
+  (§4), jamais `import`. Voir piège correspondant en §9.
 
 ### 3.3 Limite connue — les références internes à une bibliothèque ne sont pas réécrites
 
@@ -151,9 +193,131 @@ fourni par l'éditeur tiers, résolution interne propre à la bibliothèque à
 l'exécution, etc.) — sinon le fichier cassera au chargement malgré un
 build entièrement vert.
 
-## 4. Grammaire des imports reconnue
+## 4. `deps` — dépendances de chargement d'une capacité
 
-S'applique à tout script traité comme point d'entrée ou dépendance ESM
+### 4.1 Le contrat exact
+
+`deps` est une liste de scripts dont le **chargement** doit précéder
+l'activation d'une capacité — **jamais** un mécanisme d'import ES6 à
+injecter dans le code source de `entry`. Disponible **uniquement** sur
+`[scripts.capabilities.*]` (§2 : pas de `deps` sur `[scripts.components]`).
+
+```toml
+[scripts.capabilities.map]
+entry = "scripts/map.js"
+markers = ["map"]
+activation = "bootstrap"
+deps = ["libraries/deckgl/deckgl.js"]
+```
+
+Le script référencé dans `deps` n'est **jamais** importé littéralement dans
+`entry` — `map.js` reste totalement ignorant de ce mécanisme, il n'a rien à
+écrire de particulier pour en bénéficier. Pour du code UMD/classique (le
+cas d'usage d'origine, Deck.gl), qui expose son API via un global
+(`window.deck`), c'est la **seule** façon de le charger correctement : un
+`import` ESM d'un bundle UMD échouerait à l'exécution — ce n'est pas une
+limite de Marius, mais du format UMD lui-même (§3.2). Le script consommateur
+accède directement au global (`window.deck.DeckGL`, etc.) sans jamais
+écrire d'`import` pour cette dépendance précise.
+
+### 4.2 Résolution AOT
+
+Chaque entrée de `deps` est résolue au build, avec la même rigueur que tout
+le reste de ce pipeline : chemin canonique (relatif à la racine du thème,
+slash de tête optionnel et sans effet — même convention que §3.2) →
+recherche dans `manifest.toml` → URL hachée, ou **échec dur** (le build de
+`crates/core/schema` échoue, jamais `marius-assets` — voir §4.5) si la clé
+est absente. Jamais un repli silencieux, jamais un 404 découvert seulement
+au runtime — même discipline que la résolution d'import direct déjà en
+place (§3.2).
+
+### 4.3 `module` — ESM ou classique, décidé par la bibliothèque
+
+Le mode de chargement d'une dépendance suit exactement le `module` déclaré
+sur sa bibliothèque d'origine (§3.1) :
+
+- `module = true` (défaut) → `<script type="module" src="...">`.
+- `module = false` (explicite) → `<script src="..." defer>`.
+
+Cette information ne transite **jamais** par une relecture de `theme.toml`
+côté `crates/core/schema/build.rs` (qui ne lit jamais `[libraries.*]`) —
+elle passe par une entrée dédiée et disjointe du manifeste,
+`classic_scripts` : une liste **sparse** des seules clés canoniques
+explicitement classiques (`module = false`) ; l'absence d'une clé dans
+cette liste signifie module, comportement par défaut. `AssetEntry` (la
+structure qui décrit un artefact produit — CSS, image, JS, peu importe)
+**ne porte jamais** cette information : ce n'est pas une propriété de
+l'artefact produit, mais une métadonnée propre au mécanisme de chargement
+de `deps` — une version antérieure de ce projet avait fait cette confusion
+(`module` porté par `AssetEntry` lui-même), provoquant un échec de
+désérialisation sur toute entrée non-JS (`styles/print.css`, `images/
+logo.svg`, ...) qui n'avait évidemment aucune raison de porter ce champ ;
+corrigé en séparant `classic_scripts` de `assets` au niveau du manifeste.
+
+### 4.4 Ordre de chargement, dédoublonnage, conditionnalité
+
+**Ordre** — garanti, toujours : les dépendances d'abord, dans l'ordre
+déclaré, puis le `<script type="module">` de `entry`, qui exécute enfin
+`activation` :
+
+```html
+<script src="/libraries/deckgl.HASH.js" defer></script>
+<script type="module">import{bootstrap as _0}from"/scripts/map.HASH.js";_0();</script>
+```
+
+Chaque dépendance est sa propre balise `<script>` de premier niveau —
+jamais fusionnée dans le `<script type="module">` de la capacité qui la
+consomme (à ne pas confondre avec le regroupement import/appel **entre
+plusieurs capacités**, §6.2.4 — ce regroupement-là ne concerne jamais
+`deps`).
+
+**Dédoublonnage** — une même dépendance déclarée par plusieurs capacités du
+même template ne produit **jamais** plus d'une balise. Le dédoublonnage
+porte sur l'**identité canonique** de la dépendance (sa clé, ex.
+`"libraries/deckgl/deckgl.js"`), **jamais** sur l'URL hachée finale.
+
+**Conditionnalité** — une dépendance hérite de la conditionnalité agrégée
+de **toutes** ses capacités consommatrices sur ce template :
+- si l'une d'elles est **statique** (§6.2.1), la dépendance devient
+  **inconditionnelle** — même si d'autres capacités dynamiques la
+  partagent aussi (domination statique, exactement la même règle que pour
+  le `<script type="module">` d'une capacité elle-même) ;
+- si **toutes** les capacités consommatrices sont dynamiques, la
+  dépendance est chargée sous la condition « OU binaire de tous leurs
+  bits » — jamais une balise par bit.
+
+Exemple : `map` (bit 2) et `terrain` (bit 4) déclarent toutes deux
+`deps = ["libraries/deckgl/deckgl.js"]` → une seule balise, sous la
+condition `if record.js_deps & 6 != 0`.
+
+### 4.5 Ce que `deps` ne fait jamais
+
+- Ne modifie **jamais** le texte source de `entry` — aucune injection,
+  aucune réécriture d'`import`. Le script reste exactement ce que son
+  auteur a écrit.
+- N'est **jamais résolu par `marius-assets`** lui-même. La résolution AOT
+  complète (§4.2) est entièrement à la charge de
+  `crates/core/schema/build.rs`, via sa propre lecture indépendante de
+  `theme.toml` (même principe que `markers`/`activation`, jamais partagés
+  entre les deux crates). `marius-assets` n'a besoin de rien connaître de
+  `deps` : il lui suffit de produire un `manifest.toml` correct (`assets`
+  + `classic_scripts`, §4.3).
+- N'existe **pas** pour `[scripts.components]` — seule
+  `[scripts.capabilities.*]` porte ce champ à ce jour (§2).
+- Ne bénéficie **jamais** à un fichier `[static.verbatim]` qui ne serait
+  pas passé par `[libraries.*]` de la façon attendue : `classic_scripts`
+  n'est alimentée QUE par les bibliothèques explicitement `module = false`.
+  Un `.js` posé directement sous `[static.verbatim].files` sans jamais
+  passer par `[libraries.*]` serait techniquement résolvable via `deps` (il
+  atterrit dans le même registre) mais toujours comme `module: true` par
+  défaut, sans aucun moyen de le déclarer classique — voir la conclusion
+  architecturale en §10.1.
+
+## 5. Grammaire des imports reconnue
+
+S'applique **uniquement** à l'import ESM direct (§3.2) — jamais à `deps`
+(§4), qui ne touche jamais le texte source d'un script. Concerne tout
+script traité comme point d'entrée ou dépendance ESM
 (`[scripts.components]`/`[scripts.capabilities.*]`) — **jamais** aux
 fichiers d'une bibliothèque verbatim eux-mêmes (§3.3). Le lexer est
 volontairement borné (aucun AST JS complet) : il reconnaît une grammaire
@@ -173,7 +337,7 @@ import {
 ```
 
 **Non reconnu — n'échoue pas, mais le specifier n'est jamais réécrit**
-(piège potentiel, cf. §8) :
+(piège potentiel, cf. §9) :
 
 ```js
 import('./x.js');       // import() dynamique
@@ -184,9 +348,9 @@ Un chemin composé dans un gabarit (`` `${base}/x.js` ``) n'est jamais
 détecté non plus — un gabarit est traité comme une région opaque de bout
 en bout.
 
-## 5. Capacités frontend conditionnelles (`js_deps`)
+## 6. Capacités frontend conditionnelles (`js_deps`)
 
-### 5.1 Le problème que ça résout
+### 6.1 Le problème que ça résout
 
 Certains contenus ont besoin d'un module JS spécifique côté client — une
 vidéo YouTube embarquée, un slider `range`, une image avec point de focus.
@@ -221,13 +385,13 @@ sans jamais se mélanger en amont.
 Contrairement à un component (§2), une capacité est **toujours** un point
 d'entrée ESM candidat à un test conditionnel — jamais chargée
 inconditionnellement sur toutes les pages qui incluent son layout, sauf
-dans le cas particulier où son marqueur est détecté statiquement (§5.2.1).
+dans le cas particulier où son marqueur est détecté statiquement (§6.2.1).
 
-### 5.2 Suivre la donnée — vue d'ensemble
+### 6.2 Suivre la donnée — vue d'ensemble
 
 Deux chemins, indépendants, qui convergent au même endroit du HTML final.
 
-#### 5.2.1 Branche statique — détection AOT dans les templates
+#### 6.2.1 Branche statique — détection AOT dans les templates
 
 ```
 ┌───────────────────────────────┐
@@ -255,7 +419,7 @@ Deux chemins, indépendants, qui convergent au même endroit du HTML final.
 
 ```
 
-#### 5.2.2 Branche dynamique — détection à l'écriture, décision au rendu
+#### 6.2.2 Branche dynamique — détection à l'écriture, décision au rendu
 
 ```
 ┌──────────────────────────────┐
@@ -286,12 +450,12 @@ Deux chemins, indépendants, qui convergent au même endroit du HTML final.
       if record.js_deps & 16 != 0 { buf.push_str(...); }
 ```
 
-#### 5.2.3 Convergence — un seul point d'agrégation, jamais deux émissions
+#### 6.2.3 Convergence — un seul point d'agrégation, jamais deux émissions
 
 ```
 ┌──────────────────────┐   ┌──────────────────────┐
 │ Émission statique    │   │ Émission dynamique   │
-│ (5.2.1, si marqueur  │   │ (5.2.2, si marqueur  │
+│ (6.2.1, si marqueur  │   │ (6.2.2, si marqueur  │
 │  détecté dans le     │   │  absent du template  │
 │  template)           │   │  ET has_record=true) │
 └──────────┬───────────┘   └──────────┬───────────┘
@@ -301,11 +465,12 @@ Deux chemins, indépendants, qui convergent au même endroit du HTML final.
               <!-- MARIUS_MODULES -->  (base.marius, position fixe)
                            │
                            ▼
-              HTML servi au navigateur — AU PLUS UN <script>
-              regroupant tous les imports puis tous les appels
-              (§5.2.4), présent UNIQUEMENT si au moins un besoin
-              (statique OU dynamique) est réel pour CE template/
-              CE record
+              HTML servi au navigateur — précédé, le cas échéant, des
+              balises <script> de deps (§4.4), puis AU PLUS UN <script>
+              regroupant tous les imports puis tous les appels des
+              capacités elles-mêmes (§6.2.4), présent UNIQUEMENT si au
+              moins un besoin (statique OU dynamique) est réel pour CE
+              template/CE record
 ```
 
 **Invariant garanti par construction, jamais une déduplication après
@@ -314,7 +479,8 @@ coup** : pour une capacité et un template donnés, il n'y a **au plus une**
 template, l'émission est inconditionnelle et le test `if record.js_deps &
 BIT != 0` n'est **même pas généré** pour cette capacité sur ce template —
 la présence statique domine toujours le besoin dynamique, elle ne s'ajoute
-jamais à lui.
+jamais à lui. La même règle de domination s'applique séparément à toute
+`deps` consommée par cette capacité (§4.4).
 
 **Point clé à retenir :** la détection statique (scan des `.marius`) se
 fait **au build**, côté Rust, sur le HTML du template lui-même — jamais sur
@@ -330,12 +496,14 @@ Quatre fichiers doivent donc rester synchronisés à la main : `theme.toml`,
 dynamique), et le HTML des `.marius` concernés (marqueur statique). Rien ne
 les régénère automatiquement les uns à partir des autres.
 
-#### 5.2.4 Sérialisation finale — un seul `<script>` par page, jamais un par capacité
+#### 6.2.4 Sérialisation finale — un seul `<script>` par page, jamais un par capacité
 
-Ce qui précède (§5.2.1 à §5.2.3) décide **quelles** capacités sont
+Ce qui précède (§6.2.1 à §6.2.3) décide **quelles** capacités sont
 nécessaires pour une page donnée. Une fois cette liste établie, la
 sérialisation finale regroupe **tout** dans une seule balise, plutôt que
-d'émettre un `<script type="module">` distinct par capacité :
+d'émettre un `<script type="module">` distinct par capacité — cela ne
+concerne que les capacités elles-mêmes, **jamais** leurs `deps` (§4.4, qui
+restent des balises individuelles, hors de ce regroupement) :
 
 ```html
 <!-- Avant regroupement (une balise par capacité) -->
@@ -347,7 +515,7 @@ d'émettre un `<script type="module">` distinct par capacité :
 
 Règles de ce regroupement, purement une affaire de sortie — **le contrat
 `js_deps`, le scan statique, et la décision statique/dynamique par
-capacité (§5.2.1-§5.2.3) n'y participent pas et n'en sont pas affectés** :
+capacité (§6.2.1-§6.2.3) n'y participent pas et n'en sont pas affectés** :
 
 - **Tous les `import` d'abord, tous les appels d'activation ensuite** —
   jamais entrelacés capacité par capacité.
@@ -359,8 +527,8 @@ capacité (§5.2.1-§5.2.3) n'y participent pas et n'en sont pas affectés** :
   réellement présentes.
 - **Présence de la balise elle-même** :
   - si au moins une capacité de la page est détectée **statiquement**
-    (§5.2.1), la balise est garantie présente — aucun test enveloppe ;
-  - si **toutes** les capacités de la page sont dynamiques (§5.2.2), la
+    (§6.2.1), la balise est garantie présente — aucun test enveloppe ;
+  - si **toutes** les capacités de la page sont dynamiques (§6.2.2), la
     balise entière est conditionnée à *au moins un* bit actif parmi ceux
     concernés — jamais de `<script></script>` vide ;
   - zéro capacité concernée → rien n'est émis.
@@ -369,16 +537,16 @@ capacité (§5.2.1-§5.2.3) n'y participent pas et n'en sont pas affectés** :
   la balise `<script>` elle-même change de granularité, jamais la logique
   par capacité.
 
-### 5.3 Ajouter une nouvelle capacité
+### 6.3 Ajouter une nouvelle capacité
 
 Exemple fil rouge : ajouter une capacité `carousel`, déclenchée soit par la
 classe `carousel-embed` posée par un éditeur dans le corps d'un article
 (branche dynamique), soit par un `.marius` qui la porte en dur dans son
 propre layout (branche statique) — via un module `carousel.js` exportant
-une fonction `boot`. Les étapes 5.3.1 à 5.3.3 sont **communes aux deux
-branches** ; l'étape 5.3.4 ne concerne que la branche dynamique.
+une fonction `boot`. Les étapes 6.3.1 à 6.3.3 sont **communes aux deux
+branches** ; l'étape 6.3.4 ne concerne que la branche dynamique.
 
-#### 5.3.1 Le module JS
+#### 6.3.1 Le module JS
 
 Créer `assets/default/scripts/development/carousel.js`, avec une fonction
 exportée nommée (c'est cette fonction qui sera appelée automatiquement) :
@@ -392,9 +560,11 @@ export function boot() {
 Le nom de la fonction est libre — il sera référencé tel quel dans
 `theme.toml` (`activation`). Convention observée dans ce projet : `init` ou
 un nom court et explicite (`boot`, `mount`). Si ce module a besoin de code
-tiers vendoré, l'importer comme décrit en §3.2.
+tiers vendoré : import ESM direct (§3.2) si la bibliothèque est
+`module = true`, ou déclaration `deps` (§4) si elle est `module = false`
+(UMD/classique) — jamais les deux pour la même bibliothèque.
 
-#### 5.3.2 `theme.toml` — déclarer la capacité
+#### 6.3.2 `theme.toml` — déclarer la capacité
 
 Dans `assets/default/theme.toml`, sous `[scripts.capabilities]` :
 
@@ -403,24 +573,27 @@ Dans `assets/default/theme.toml`, sous `[scripts.capabilities]` :
 entry = "scripts/development/carousel.js"
 markers = ["carousel-embed"]
 activation = "boot"
+# deps = ["libraries/<nom>/<fichier>.js"]   # optionnel, voir §4
 ```
 
 - `entry` : chemin du fichier JS, relatif au dossier du thème.
 - `markers` : liste des classes HTML qui déclenchent cette capacité. Peut
   contenir plusieurs entrées (cf. `range`/`range-multithumb`, une seule
   capacité, deux marqueurs qui activent le même bit). **Sert aux deux
-  branches** (§5.2) : c'est cette même liste que `lower_modules_for_template`
-  (build.rs) compare au HTML statique des `.marius` (§5.2.1) — mais elle
-  n'alimente **jamais mécaniquement** `compute_js_deps` (§5.2.2, SQL) :
+  branches** (§6.2) : c'est cette même liste que `lower_modules_for_template`
+  (build.rs) compare au HTML statique des `.marius` (§6.2.1) — mais elle
+  n'alimente **jamais mécaniquement** `compute_js_deps` (§6.2.2, SQL) :
   ajouter un marqueur ici ne le fait pas apparaître comme par magie côté
-  SQL, il faut l'étape 5.3.4 séparément. Les deux listes doivent rester
+  SQL, il faut l'étape 6.3.4 séparément. Les deux listes doivent rester
   synchronisées à la main.
 - `activation` : nom de la fonction exportée à appeler. **Doit être un
   identifiant valide** (lettres/chiffres/underscore, ne commence pas par un
   chiffre) — il est injecté tel quel dans le code Rust généré, jamais
   échappé comme une chaîne.
+- `deps` : optionnel, voir §4 en détail. Absent = comportement strictement
+  identique à avant l'introduction de ce champ.
 
-#### 5.3.3 `scripts_registry.lock` — attribuer un bit
+#### 6.3.3 `scripts_registry.lock` — attribuer un bit
 
 Fichier `assets/default/scripts_registry.lock`, à côté de `theme.toml`.
 **Manuel, append-only, jamais généré automatiquement.** Ajouter une ligne
@@ -437,14 +610,14 @@ Règles strictes :
   ligne.
 - Bijection stricte avec `theme.toml [scripts.capabilities]` : toute
   capacité active dans l'un doit exister dans l'autre, sinon le build
-  échoue (`cargo:error`, volontaire — voir §6).
+  échoue (`cargo:error`, volontaire — voir §7).
 
-#### 5.3.4 `compute_js_deps` — reconnaître le marqueur côté SQL (branche dynamique — §5.2.2)
+#### 6.3.4 `compute_js_deps` — reconnaître le marqueur côté SQL (branche dynamique — §6.2.2)
 
 Nécessaire **uniquement si** la capacité doit pouvoir être déclenchée par du
 contenu éditorial (un éditeur pose la classe dans le corps d'un article).
-Si `carousel` ne doit jamais être déclenchée que par des `.marius` (§5.3.5),
-cette étape peut être sautée — mais alors le bit attribué en 5.3.3 ne sera
+Si `carousel` ne doit jamais être déclenchée que par des `.marius` (§6.3.5),
+cette étape peut être sautée — mais alors le bit attribué en 6.3.3 ne sera
 jamais réellement testé au runtime : autant ne pas le prévoir du tout, ou
 le documenter comme réservé à l'usage statique.
 
@@ -465,12 +638,12 @@ attributs `class="..."` du corps en tokens individuels (`v_classes`,
 de tester son appartenance à cet ensemble, rien d'autre à toucher dans le
 corps de la fonction.
 
-#### 5.3.5 Déclencher par un `.marius` (branche statique — §5.2.1)
+#### 6.3.5 Déclencher par un `.marius` (branche statique — §6.2.1)
 
 Rien à câbler séparément côté Rust — le scan statique
 (`extract_static_class_tokens`) est générique, il compare **automatiquement**
 le HTML de **chaque template** aux `markers` de **toutes** les capacités
-déclarées en 5.3.2. Il suffit d'écrire le marqueur directement dans le
+déclarées en 6.3.2. Il suffit d'écrire le marqueur directement dans le
 `.marius` concerné :
 
 ```html
@@ -482,7 +655,7 @@ déclarées en 5.3.2. Il suffit d'écrire le marqueur directement dans le
 Dès que ce `.marius` (ou un layout dont il hérite) contient ce marqueur
 littéralement dans son HTML, `carousel.js` est émis **inconditionnellement**
 pour ce template — aucun bit testé, aucun `content.body` consulté, y
-compris sur les pages `STATIC_PAGES` (§8). Écrire `class="{{ some_field }}"`
+compris sur les pages `STATIC_PAGES` (§9). Écrire `class="{{ some_field }}"`
 ne compte **jamais** comme un marqueur statique — seule une chaîne littérale
 dans le HTML du template est détectable ici, par construction (fragment-forge
 ne scanne que les tokens `FlatPageToken::Static`, jamais l'intérieur d'un
@@ -491,17 +664,16 @@ ne scanne que les tokens `FlatPageToken::Static`, jamais l'intérieur d'un
 Si le même marqueur apparaît **à la fois** dans un `.marius` et dans le
 corps d'un enregistrement rendu par ce template, une seule émission est
 produite — la présence statique domine toujours, le test dynamique n'est
-même pas généré pour cette capacité sur ce template (§5.2.3).
+même pas généré pour cette capacité sur ce template (§6.2.3).
 
-## 6. Compiler — l'ordre compte, chaque étape peut échouer isolément
+## 7. Compiler — l'ordre compte, chaque étape peut échouer isolément
 
-L'Étape 1 est commune aux **trois** mécanismes (§1) : tout ajout —
-component, bibliothèque, ou capacité — passe par le même compilateur
-d'assets. L'Étape 2 est spécifique à la branche dynamique des capacités
-(SQL, `content.core`) ; un component ou une bibliothèque seuls n'en ont
-jamais besoin. L'Étape 3 est nécessaire dès qu'un `.marius` référence
-l'asset ajouté — via `{% asset %}` (component, bibliothèque) ou via
-l'émission générée pour une capacité.
+L'Étape 1 est commune aux **trois** mécanismes de configuration (§1) : tout
+ajout — component, bibliothèque, ou capacité — passe par le même
+compilateur d'assets. **`deps` n'est jamais résolu à l'Étape 1** (§4.5) —
+sa résolution AOT complète a lieu à l'Étape 3. L'Étape 2 est spécifique à
+la branche dynamique des capacités (SQL, `content.core`) ; un component ou
+une bibliothèque seuls n'en ont jamais besoin.
 
 **L'Étape 5 est la plus souvent oubliée, et son absence ne produit aucune
 erreur.** Voir `runtime-lifecycle-guide.md` pour le détail complet — le
@@ -529,19 +701,23 @@ cargo run --release --bin marius-assets -- ./assets/default
 
 Régénère `build/default/manifest.toml` — c'est lui qui contient l'URL
 hachée (`/scripts/carousel.HASH.js`, `/libraries/deckgl.HASH.js`, ...) que
-`validate_capabilities`/`{% asset %}` iront lire. Sans cette étape, une
-clé peut être parfaitement déclarée et pourtant introuvable :
+`validate_capabilities`/`{% asset %}` iront lire, ainsi que
+`classic_scripts` (§4.3, la liste sparse des bibliothèques `module =
+false`). Sans cette étape, une clé peut être parfaitement déclarée et
+pourtant introuvable :
 - capacité/component : `cargo build` échouera avec *« clé 'carousel.js'
   absente du manifeste d'assets »* ;
-- bibliothèque référencée depuis un script : le build de `marius-assets`
-  lui-même échoue avec `AssetNotFound` (§3.2) — jamais un 404 silencieux
-  découvert plus tard.
+- bibliothèque référencée par un `import` direct (§3.2) : le build de
+  `marius-assets` lui-même échoue avec `AssetNotFound` — jamais un 404
+  silencieux découvert plus tard.
+
+Une `deps` (§4), elle, n'est **jamais** validée à cette étape — voir Étape 3.
 
 ### Étape 2 — Recharger le schéma SQL (capacité, branche dynamique uniquement)
 
 Uniquement si `02_systems.sql` (ou tout autre fichier sous `db/`) a changé —
 **inutile pour un component ou une bibliothèque, et inutile si la capacité
-n'est déclenchée que statiquement (§5.3.5), sans passer par 5.3.4** :
+n'est déclenchée que statiquement (§6.3.5), sans passer par 6.3.4** :
 
 ```bash
 psql "$DATABASE_URL" -f db/master_init.sql
@@ -555,7 +731,7 @@ capacité reste ajoutée dans `theme.toml`/`scripts_registry.lock` côté Rust,
 mais son marqueur `class` correspondant n'est jamais reconnu côté SQL : le
 bit ne s'allumera jamais, quel que soit le contenu éditorial écrit.
 
-### Étape 3 — Compiler le schéma Rust (dès qu'un `.marius` référence l'asset)
+### Étape 3 — Compiler le schéma Rust (dès qu'un `.marius` référence l'asset, ou qu'une `deps` est déclarée)
 
 ```bash
 cargo build
@@ -563,20 +739,27 @@ cargo build
 
 C'est ici que `validate_capabilities` (crates/core/schema/build.rs) lit
 `theme.toml` + `scripts_registry.lock` + `manifest.toml`, valide la
-bijection et les bits — puis `lower_modules_for_template`, appelée une fois
-par composant/page, scanne le HTML de chaque `.marius` (`.marius` fusionné
-parent+enfant) et génère soit une émission inconditionnelle (marqueur
-détecté statiquement), soit un test `if record.js_deps & BIT != 0 { ... }`
-(marqueur absent statiquement). Toute résolution `{% asset %}` (component,
-bibliothèque référencée directement par un template) est également
-figée à cette étape. Échoue fort (jamais silencieusement) sur :
+bijection et les bits, **et résout entièrement `deps`** (§4.2 : chaque
+entrée, canonicalisée puis recherchée dans `manifest.toml`, croisée avec
+`classic_scripts` pour le mode de chargement) — puis
+`lower_modules_for_template`, appelée une fois par composant/page, scanne
+le HTML de chaque `.marius` (`.marius` fusionné parent+enfant) et génère
+soit une émission inconditionnelle (marqueur détecté statiquement), soit un
+test `if record.js_deps & BIT != 0 { ... }` (marqueur absent statiquement),
+en agrégeant et dédupliquant les `deps` de toutes les capacités du
+template (§4.4). Toute résolution `{% asset %}` (component, bibliothèque
+référencée directement par un template) est également figée à cette étape.
+Échoue fort (jamais silencieusement) sur :
 - capacité présente dans un fichier (`theme.toml`/`scripts_registry.lock`),
   absente de l'autre ;
 - bit invalide (pas une puissance de deux) ou dupliqué ;
 - `activation` qui n'est pas un identifiant valide ;
 - `markers` vide ;
 - clé `{nom}.js` (ou toute clé `{% asset %}`) absente du manifeste d'assets
-  (→ retour à l'Étape 1).
+  (→ retour à l'Étape 1) ;
+- **une entrée de `deps` absente du manifeste** (bibliothèque non
+  déclarée, `root` incorrect, faute de frappe dans le chemin — même classe
+  d'erreur que pour `entry`, jamais un repli silencieux, §4.2).
 
 ### Étape 4 — `marius-dump` (transport de données, **sans rapport avec le rendu HTML**)
 
@@ -584,7 +767,6 @@ figée à cette étape. Échoue fort (jamais silencieusement) sur :
 cargo run --bin marius-dump
 ```
 
-**Correction par rapport à une version antérieure de ce guide** :
 `marius-dump` peut produire `{table}_store.bin` (dump brut, transport) et,
 séparément, provisionner un pack HTML initial — mais `regenerate_and_swap`
 (le chemin qui sert réellement le HTML) **ne lit jamais** `store.bin` ; il
@@ -627,25 +809,25 @@ UPDATE {schema}.{table} SET {pk} = {pk};
 S'applique aussi bien à une capacité dynamique nouvellement déclenchée par
 un marqueur déjà présent dans un vieux document, qu'à une capacité ou un
 component nouvellement rendus **inconditionnels** par un marqueur ajouté
-dans un `.marius` (§5.2.1/§5.3.5) : dans les deux cas, c'est le pack
-existant de l'enregistrement qui doit être régénéré, jamais seulement le
-binaire.
+dans un `.marius` (§6.2.1/§6.3.5), qu'à une `deps` nouvellement ajoutée à
+une capacité déjà active : dans tous les cas, c'est le pack existant de
+l'enregistrement qui doit être régénéré, jamais seulement le binaire.
 
 Prérequis souvent oublié en local : le serveur doit être en écoute
 (`PgListener` abonné) **avant** l'écriture SQL — un `NOTIFY` émis pendant
 que le serveur est arrêté n'est jamais rejoué à son redémarrage.
 
-## 7. Vérifier que ça fonctionne
+## 8. Vérifier que ça fonctionne
 
-Avertissement commun aux trois vérifications ci-dessous, avant même de
-regarder le HTML : **si la page testée existait déjà avant ce
-déploiement**, l'Étape 5 (§6) est un préalable — sinon vous inspectez
-encore le pack produit par l'ancien `render()`. Pour une page tout juste
-créée après le déploiement du nouveau binaire, ce préalable ne se pose pas
-(son premier rendu utilise déjà le nouveau code). Seules les pages
-`STATIC_PAGES` échappent entièrement à cette question.
+Avertissement commun aux vérifications ci-dessous, avant même de regarder
+le HTML : **si la page testée existait déjà avant ce déploiement**,
+l'Étape 5 (§7) est un préalable — sinon vous inspectez encore le pack
+produit par l'ancien `render()`. Pour une page tout juste créée après le
+déploiement du nouveau binaire, ce préalable ne se pose pas (son premier
+rendu utilise déjà le nouveau code). Seules les pages `STATIC_PAGES`
+échappent entièrement à cette question.
 
-### Component ou bibliothèque seule
+### Component ou bibliothèque seule (import direct, §3.2)
 
 1. Vérifier la présence de la clé dans `build/default/manifest.toml` après
    l'Étape 1.
@@ -657,7 +839,25 @@ créée après le déploiement du nouveau binaire, ce préalable ne se pose pas
    l'`import` vers la bibliothèque a bien été réécrit vers son URL hachée
    (§3.2) — pas seulement que le script consommateur se charge.
 
-### Branche dynamique (§5.2.2, si l'étape 5.3.4 a été faite)
+### `deps` (§4)
+
+1. Vérifier que `build/default/manifest.toml` contient bien la clé de la
+   bibliothèque sous `[assets]`, et, si `module = false`, que sa clé
+   canonique figure dans `classic_scripts` (§4.3) après l'Étape 1.
+2. `cargo build` (Étape 3) : aucune erreur `deps '...' absente du
+   manifeste d'assets`.
+3. Servir la page (après Étape 5 si elle existait déjà) et inspecter le
+   HTML : la balise de la dépendance doit apparaître **avant** le
+   `<script type="module">` de la capacité, avec la forme attendue
+   (`<script src="..." defer>` pour `module = false`, `<script
+   type="module" src="...">` pour `module = true`).
+4. Si plusieurs capacités du même template partagent la même `deps` :
+   vérifier qu'une seule balise apparaît dans le HTML rendu (§4.4).
+5. Pour une dépendance partagée par des capacités dynamiques uniquement :
+   vérifier que la condition affichée correspond bien au OU binaire des
+   bits attendus.
+
+### Branche dynamique (§6.2.2, si l'étape 6.3.4 a été faite)
 
 1. Écrire ou modifier un document dont le corps contient le marqueur
    (`class="carousel-embed"` quelque part dans `content.body.content`) —
@@ -675,7 +875,7 @@ créée après le déploiement du nouveau binaire, ce préalable ne se pose pas
    dans `base.marius`) — uniquement sur les documents qui portent le
    marqueur, absent partout ailleurs.
 
-### Branche statique (§5.2.1/5.3.5)
+### Branche statique (§6.2.1/6.3.5)
 
 Aucune base de données à interroger pour la **décision** — elle est prise
 au build, identique pour tous les enregistrements du template concerné.
@@ -685,7 +885,7 @@ différente selon le type de page :
 - **`STATIC_PAGES`** : `cargo build` (`core/schema`) écrit directement le
   `.html` final. Aucune étape supplémentaire.
 - **Page adossée à un `record`** (Mode Page) : même si le test lui-même
-  n'est jamais généré (§5.2.3), le pack déjà servi pour un enregistrement
+  n'est jamais généré (§6.2.3), le pack déjà servi pour un enregistrement
   existant ne se régénère pas tout seul après `cargo build` — l'Étape 5
   reste nécessaire pour que ce document précis soit re-rendu par le
   nouveau `render()`.
@@ -699,23 +899,23 @@ différente selon le type de page :
      `<script type="module">` : la présence vient du template, jamais du
      contenu.
 
-## 8. Pièges déjà rencontrés
+## 9. Pièges déjà rencontrés
 
 - **`cargo build` vert ne garantit pas que le bit fonctionne réellement.**
-  Il valide la cohérence structurelle (bijection, bits, manifeste) — pas
-  que la base de données a bien été rechargée avec le dernier
-  `compute_js_deps`. Un build vert après une modification de `02_systems.sql`
-  sans rechargement SQL (Étape 2) compile un code parfaitement correct...
-  qui ne sera jamais déclenché par aucun contenu réel.
+  Il valide la cohérence structurelle (bijection, bits, manifeste, `deps`)
+  — pas que la base de données a bien été rechargée avec le dernier
+  `compute_js_deps`. Un build vert après une modification de
+  `02_systems.sql` sans rechargement SQL (Étape 2) compile un code
+  parfaitement correct... qui ne sera jamais déclenché par aucun contenu
+  réel.
 - **`cargo build` vert + serveur relancé ne régénère aucun pack HTML déjà
-  servi** (cf. `runtime-lifecycle-guide.md`, et Étape 5 ci-dessus). C'est
-  le piège le plus trompeur des trois mécanismes de ce guide, parce
-  qu'aucune erreur ne le signale : la page se sert normalement, juste avec
-  l'ancien contenu. Si un changement de template, de component ou de
-  capacité n'apparaît toujours pas après un déploiement propre, vérifier
-  en priorité si un `NOTIFY` a réellement été déclenché pour la page
-  testée avant de chercher une erreur dans le template ou dans
-  `theme.toml`.
+  servi** (cf. `runtime-lifecycle-guide.md`, et Étape 5, §7). C'est le
+  piège le plus trompeur de ce guide, parce qu'aucune erreur ne le
+  signale : la page se sert normalement, juste avec l'ancien contenu. Si
+  un changement de template, de component, de capacité ou de `deps`
+  n'apparaît toujours pas après un déploiement propre, vérifier en
+  priorité si un `NOTIFY` a réellement été déclenché pour la page testée
+  avant de chercher une erreur dans le template ou dans `theme.toml`.
 - **`store.bin`/`marius-dump` n'a aucune incidence sur le rendu HTML d'une
   capacité.** Une confusion héritée d'une ancienne version de ce guide,
   antérieure à l'introduction du Sweep Merge (`runtime-lifecycle-guide.md`
@@ -732,7 +932,7 @@ différente selon le type de page :
   capacités actives DYNAMIQUEMENT**, par construction (pas de `record`,
   pas de `js_deps` à tester). Mais elle **peut** émettre un module si le
   marqueur est détecté **statiquement** dans son propre `.marius` ou dans
-  `base.marius` (§5.2.1/5.3.5) — ce n'est pas une exception, c'est la
+  `base.marius` (§6.2.1/6.3.5) — ce n'est pas une exception, c'est la
   partie statique qui, elle, ne dépend jamais d'un `record`. Ne pas
   confondre « aucun bit à tester » (toujours vrai pour `STATIC_PAGES`) avec
   « ne peut jamais avoir besoin d'un module » (faux).
@@ -743,17 +943,24 @@ différente selon le type de page :
   `js_deps` porte bien le bit correspondant, vérifiez d'abord si ce
   template (ou un layout dont il hérite) porte déjà le marqueur en dur :
   l'émission a probablement déjà eu lieu, inconditionnelle — pas un bug.
-- **Les alias `_0`/`_1`/… (§5.2.4) ne sont jamais stables d'une page à
+- **Les alias `_0`/`_1`/… (§6.2.4) ne sont jamais stables d'une page à
   l'autre.** Ils dépendent de la liste des capacités réellement présentes
   sur CETTE page précise — `map` peut être `_0` sur une page et `_2` sur
   une autre. Ne rien coder côté JS qui suppose un alias fixe pour une
   capacité donnée ; ces alias sont strictement internes au bloc généré,
   jamais une API.
-- **Un `import` vers une bibliothèque non vendorée, ou avec un chemin
-  incorrect, échoue au build de `marius-assets`, jamais au runtime.** Si
-  vous cherchez un 404 navigateur pour une bibliothèque, le build a
-  probablement été lancé avant l'ajout de `[libraries.*]`/le dépôt des
-  fichiers — pas un bug du pipeline de résolution.
+- **Un `import` direct vers une bibliothèque non vendorée, ou avec un
+  chemin incorrect, échoue au build de `marius-assets`, jamais au
+  runtime.** Si vous cherchez un 404 navigateur pour une bibliothèque, le
+  build a probablement été lancé avant l'ajout de `[libraries.*]`/le dépôt
+  des fichiers — pas un bug du pipeline de résolution.
+- **Importer directement (§3.2) une bibliothèque `module = false` compile
+  sans erreur mais casse au runtime.** Rien, à aucune étape du build,
+  n'empêche d'écrire `import ... from "libraries/deckgl/deckgl.js"` même
+  si `deckgl` est déclarée `module = false` — la résolution d'un `import`
+  direct ne consulte jamais ce champ. L'échec (bundle UMD chargé comme
+  module ES) n'apparaît qu'au chargement dans le navigateur. Pour une
+  bibliothèque `module = false`, toujours `deps` (§4), jamais `import`.
 - **Confondre chemin relatif et chemin canonique pour une bibliothèque.**
   Depuis `map.js`, `import "./deckgl.js"` cherche un fichier `deckgl.js`
   **sibling de `map.js`**, jamais la bibliothèque `libraries/deckgl/`. Le
@@ -764,4 +971,84 @@ différente selon le type de page :
   autre fichier de la même bibliothèque garde ce chemin intact après le
   build. Un 404 sur un chemin qui n'apparaît nulle part dans `theme.toml`
   ni dans aucun script du thème pointe généralement vers ce cas.
-  
+- **`deps` sur `[scripts.components]` n'existe pas.** `CapabilityConfig`
+  seul porte ce champ ; `[scripts.components]` reste une simple table
+  `nom → chemin` (§2). Un component qui a besoin d'un chargement garanti
+  avant lui n'a, à ce jour, aucun mécanisme équivalent à `deps` — seul
+  l'import direct ESM (§3.2) reste disponible pour lui.
+
+## 10. Constats d'architecture pour une prochaine passe (informationnel)
+
+Les deux points suivants sont des observations faites en documentant
+l'implémentation actuelle — **aucun n'est corrigé dans le code**, aucune
+action n'est requise d'un intégrateur frontend suivant ce guide. Ils sont
+consignés ici pour ne pas perdre le contexte avant une éventuelle passe
+dédiée.
+
+### 10.1 `[static.verbatim]` ne devrait plus jamais contenir de `.js`
+
+Avec `deps` (§4) en place, les cas d'usage légitimes pour amener du JS au
+client sont désormais tous couverts explicitement :
+
+```
+[scripts.capabilities.*]  → script applicatif conditionnel
+[scripts.components]      → script applicatif autonome/structurel
+deps = [...]              → dépendance de chargement d'une capacité
+{% script %}...{% endscript %}  → script explicitement écrit dans un template
+[service_worker]          → pipeline spécialisé
+```
+
+Il ne semble plus exister de cas d'usage légitime pour déposer un `.js`
+directement sous `[static.verbatim].files` : conceptuellement, ce pipeline
+doit rester celui des assets **opaques et non interprétés** (images,
+fonts, `.map`, etc.), jamais celui du JS applicatif ou vendoré.
+
+**Rien dans le code n'empêche aujourd'hui de le faire**, et ça ne produit
+même pas un résultat clairement cassé — un `.js` sous `[static.verbatim]`
+entre dans le même `AssetUrlRegistry` que tout le reste, est donc
+techniquement résolvable par un `import` direct (§3.2) ou par `deps` (§4).
+Mais il hérite alors silencieusement de deux limites qui ne se voient
+qu'à l'usage :
+- **aucun moyen de le déclarer `module = false`** — ce champ n'existe que
+  sur `[libraries.*]` (§3.1) ; un tel fichier serait donc toujours traité
+  comme `module: true` par `deps`, même s'il s'agit en réalité d'un bundle
+  UMD, sans qu'aucune erreur ne le signale (même risque que le piège §9
+  sur l'import direct d'une bibliothèque classique) ;
+  - **aucune réécriture de ses références internes** (`import`/`require`
+  éventuels vers d'autres fichiers) — [static.verbatim] partage
+  l'invariant « zéro transformation » de `[libraries.*]` (§3.3), pour les
+  mêmes raisons.
+
+**À traiter dans une passe dédiée, pas maintenant** : une validation au
+build de `marius-assets` (avertissement, voire erreur dure) rejetant toute
+extension `.js` dans `[static.verbatim].files` formaliserait cette
+conclusion plutôt que de la laisser purement documentaire.
+
+### 10.2 Asymétrie de convention de clé `{% asset %}`
+
+Observation factuelle, non corrigée : la clé attendue par `{% asset %}` ne
+suit pas une convention unique selon le pipeline d'origine de l'asset.
+
+| Pipeline | Forme de la clé | Exemple |
+|---|---|---|
+| `styles.rs` (CSS) | Chemin canonique physique | `{% asset styles/print.css %}` |
+| `verbatim.rs` / `libraries.rs` | Chemin canonique physique | `{% asset favicons/logo.svg %}` |
+| `sprites.rs` | Chemin canonique **construit** (`sprites/{nom}.svg`) | `{% asset sprites/utils.svg %}` |
+| `webmanifest.rs` | Nom logique **fixe**, unique dans tout le projet | `{% asset manifest.webmanifest %}` |
+| `scripts.rs` — **point d'entrée** `[scripts.components]`/`[scripts.capabilities.*]` | **Nom symbolique choisi dans `theme.toml`** + `.js` — **pas** le chemin physique | `{% asset mon-script.js %}`, même si le fichier réel est `scripts/mon-script.js` |
+| `scripts.rs` — module transitif (importé relativement, jamais nommé dans `theme.toml`) | Chemin canonique physique | `{% asset scripts/mon-script/navigation.js %}` |
+
+Concrètement : `{% asset styles/print.css %}` fonctionne parce que
+`styles.rs` clé ses entrées par leur chemin réel — mais
+`{% asset scripts/mon-script.js %}` échouerait (clé absente), alors que
+`{% asset mon-script.js %}` (le nom `theme.toml`, pas le chemin) est la
+forme correcte pour un point d'entrée `[scripts.components]`/
+`[scripts.capabilities.*]`. Cette double convention semble hériter du fait
+que `scripts.rs` clé un point d'entrée par son **nom logique de
+configuration**, jamais par son chemin — à la différence de tous les
+autres pipelines de ce crate.
+
+**À traiter dans une passe dédiée, pas maintenant** : soit unifier sur le
+chemin physique partout (romprait la rétrocompatibilité des templates
+existants utilisant déjà `{% asset nom.js %}`), soit documenter cette
+distinction comme définitive et volontaire. Aucune décision prise ici.

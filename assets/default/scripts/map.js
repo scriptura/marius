@@ -75,9 +75,9 @@
  *
  * Le drop est une animation d'entrée one-shot.
  *
- * Les markers visuels sont d'abord initialisés hors de la zone visible de la
- * map. Leur offset initial est calculé à partir de la géométrie réelle de la
- * map afin que le marker soit entièrement situé au-dessus de celle-ci.
+ * Les markers visuels sont initialisés à leur position nominale, puis
+ * "téléportés" hors de la zone visible de la map avant le déclenchement
+ * de la chute.
  *
  * Une transition technique très courte, déclenchée une fois que le contexte
  * Deck.gl est opérationnel, sert à établir explicitement l'état source dans
