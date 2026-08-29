@@ -1313,6 +1313,22 @@ mod tests_module_grouping {
                 "<script type=\\\"module\\\" src=\\\"/libraries/bar.HASH.js\\\"></script>"
             )
         );
+
+        // Ordre : dépendance AVANT le <script type="module"> de l'entry —
+        // même exigence que pour une dépendance classique, jamais vérifiée
+        // jusqu'ici pour le cas ESM spécifiquement.
+        let dep_pos = lowering
+            .snippet
+            .find("libraries/bar.HASH.js")
+            .expect("la balise de dépendance ESM doit être présente");
+        let module_pos = lowering
+            .snippet
+            .find("<script type=\\\"module\\\">")
+            .expect("le <script type=\"module\"> de l'entry doit être présent");
+        assert!(
+            dep_pos < module_pos,
+            "la dépendance ESM doit précéder le module de l'entry dans le snippet généré"
+        );
     }
 
     #[test]
@@ -1354,6 +1370,71 @@ mod tests_module_grouping {
         );
         // OU binaire des deux bits (2 | 4 = 6).
         assert!(lowering.snippet.contains("if record.js_deps & 6 != 0"));
+    }
+
+    /// Scénario 5 du cahier de non-régression `deps` : plusieurs
+    /// dépendances DISTINCTES (jamais partagées) sur une même capacité —
+    /// chacune doit apparaître exactement une fois, dans l'ordre de
+    /// déclaration (déterministe), jamais un ordre d'itération de
+    /// `HashMap`.
+    #[test]
+    fn multiple_distinct_deps_each_appear_once_in_declaration_order() {
+        let capabilities = vec![cap_with_deps(
+            "map",
+            2,
+            "bootMap",
+            "/scripts/map.HASH.js",
+            &["map"],
+            &[
+                dep("libraries/a/a.js", "/libraries/a.HASH.js", true),
+                dep("libraries/b/b.js", "/libraries/b.HASH.js", false),
+            ],
+        )];
+        let static_classes = std::collections::HashSet::new();
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let lowering = render_modules_as_rust(&emissions);
+
+        assert_eq!(lowering.snippet.matches("libraries/a.HASH.js").count(), 1);
+        assert_eq!(lowering.snippet.matches("libraries/b.HASH.js").count(), 1);
+
+        let pos_a = lowering.snippet.find("libraries/a.HASH.js").unwrap();
+        let pos_b = lowering.snippet.find("libraries/b.HASH.js").unwrap();
+        assert!(
+            pos_a < pos_b,
+            "l'ordre de déclaration dans `deps` doit être préservé : a avant b"
+        );
+    }
+
+    /// Scénario 6 du cahier de non-régression `deps`, variante non couverte
+    /// par `dep_shared_by_two_capabilities_*` : une SEULE capacité qui
+    /// déclare deux fois la MÊME dépendance dans son propre `deps`. Exerce
+    /// le dédoublonnage INTRA-émission d'`aggregate_deps` (`out.iter_mut()
+    /// .find(...)` sur les dépendances d'une seule et même émission),
+    /// chemin distinct du dédoublonnage inter-capacités déjà testé.
+    #[test]
+    fn same_dep_declared_twice_on_one_capability_is_not_duplicated() {
+        let same = dep(
+            "libraries/deckgl/deckgl.js",
+            "/libraries/deckgl.HASH.js",
+            false,
+        );
+        let capabilities = vec![cap_with_deps(
+            "map",
+            2,
+            "bootMap",
+            "/scripts/map.HASH.js",
+            &["map"],
+            &[same.clone(), same],
+        )];
+        let static_classes = std::collections::HashSet::new();
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let lowering = render_modules_as_rust(&emissions);
+
+        assert_eq!(
+            lowering.snippet.matches("libraries/deckgl.HASH.js").count(),
+            1,
+            "une dépendance déclarée deux fois par la même capacité ne doit produire qu'une balise"
+        );
     }
 
     #[test]
@@ -1465,6 +1546,43 @@ mod tests_module_grouping {
         assert!(
             html.find("libraries/deckgl.HASH.js").unwrap()
                 < html.find("<script type=\"module\">").unwrap()
+        );
+    }
+
+    /// Cas fondateur de `deps` (SPEC/session originelle) : `map.js`
+    /// consommant Deck.gl, UMD/classique, via `deps`. Contrairement aux
+    /// autres tests de ce module (qui inspectent un *snippet de codegen
+    /// Rust*, un niveau d'indirection avant le HTML réellement servi),
+    /// celui-ci vérifie le HTML FINAL, littéral, produit par
+    /// `render_modules_as_static_html` — aucune indirection
+    /// supplémentaire : c'est le texte exact qui atteindrait le
+    /// navigateur pour ce template. Assertion sur la chaîne exacte, pas
+    /// seulement des sous-chaînes, pour verrouiller l'ordre ET l'absence
+    /// de tout caractère parasite entre les deux balises.
+    #[test]
+    fn founding_case_deckgl_umd_dep_produces_exact_final_html() {
+        let capabilities = vec![cap_with_deps(
+            "map",
+            2,
+            "bootstrap",
+            "/scripts/map.HASH.js",
+            &["map"],
+            &[dep(
+                "libraries/deckgl/deckgl.js",
+                "/libraries/deckgl.HASH.js",
+                false, // UMD/classique — [libraries.deckgl].module = false
+            )],
+        )];
+        let mut static_classes = std::collections::HashSet::new();
+        static_classes.insert("map".to_string());
+
+        let emissions = lower_modules_for_template(&capabilities, &static_classes, false);
+        let html = render_modules_as_static_html(&emissions);
+
+        assert_eq!(
+            html,
+            "<script src=\"/libraries/deckgl.HASH.js\" defer></script>\
+             <script type=\"module\">import{bootstrap as _0}from\"/scripts/map.HASH.js\";_0();</script>"
         );
     }
 }

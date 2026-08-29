@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-08-27 07:19:16
+**Généré le:** 2026-08-30 00:16:59
 
 ## Racine du Workspace
 
@@ -207,10 +207,11 @@
 │   └── static-usage-driven-selection-pipeline-v3.md
 ├── guides
 │   ├── fragment-forge-guide.md
-│   ├── js-deps-capacites-frontend-guide.md
 │   ├── meta-tooling-guide.md
 │   ├── runtime-lifecycle-guide.md
 │   ├── scenario-ajout-champ-varlena.md
+│   ├── scenario-ajout-script-ou-librairie.md
+│   ├── scripts-librairies-capacites-frontend-guide.md
 │   └── terminal-memo-cmd.md
 ├── handoffs
 │   ├── ADDENDUM-modules-placeholder-static-pages.md
@@ -288,6 +289,6 @@
 │       └── provisioning-projection-specification.md
 └── memento.md
 
-20 directories, 86 files
+20 directories, 87 files
 ```
 

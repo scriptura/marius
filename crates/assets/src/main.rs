@@ -39,7 +39,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod config;
 mod js_minify;
@@ -120,6 +120,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&build_root)?;
 
     let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+
+    // [static.verbatim] est réservé aux assets dont le pipeline n'a pas à
+    // connaître la sémantique d'exécution (images, polices, fichiers
+    // statiques...) — décision actée, cf. guide
+    // scripts-librairies-capacites-frontend-guide.md §10.1. Le JavaScript
+    // dispose désormais de deux voies déclaratives légitimes,
+    // [scripts.components] et [scripts.capabilities.*] (cette dernière
+    // avec, si besoin, `deps`, §4 du même guide) — jamais
+    // [static.verbatim]. Vérifié ICI, sur la liste brute écrite par
+    // l'intégrateur dans `theme.toml` (`theme.static_.verbatim.files`),
+    // avant toute fusion avec les fichiers découverts par `[libraries.*]`
+    // (juste en dessous) : ce sont deux interfaces déclaratives
+    // distinctes, et seule celle-ci est concernée — une bibliothèque
+    // vendorée reste libre de contenir du `.js`, ce garde-fou ne
+    // s'applique jamais à `run_verbatim_pipeline` lui-même, seulement à
+    // ce qu'un intégrateur peut écrire sous `[static.verbatim].files`.
+    for f in &theme.static_.verbatim.files {
+        if Path::new(f).extension().and_then(|e| e.to_str()) == Some("js") {
+            return Err(format!(
+                "[static.verbatim].files: JavaScript asset {f:?} is not allowed here; \
+                 use [scripts.components] or [scripts.capabilities.*]."
+            )
+            .into());
+        }
+    }
 
     // [libraries.*] (SPEC-canonical-asset-identity.md §6) — découverte
     // récursive AVANT le pipeline verbatim, jamais un second pipeline :

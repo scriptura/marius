@@ -105,5 +105,4 @@ files = [
     "images/tests/test-w300.webp",
     "images/tests/pisit-heng-w100.webp",
     "images/atlas.svg",
-    "libraries/deckgl/deckgl.js",
 ]

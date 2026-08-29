@@ -60,6 +60,10 @@ Si le besoin est conditionné par le contenu ou par le template, allez
 directement en §6. Script sans condition, §2. Code tiers à vendorer, §3.
 Garantir le chargement d'un script tiers avant une capacité, §4.
 
+**`[static.verbatim]` n'est jamais une option pour du JavaScript** —
+`[scripts.components]` et `[scripts.capabilities.*]` sont les deux seules
+voies légitimes, décision actée en détail en §10.1.
+
 ## 2. Scripts inconditionnels — `[scripts.components]`
 
 Dans `assets/default/theme.toml` :
@@ -901,6 +905,14 @@ différente selon le type de page :
 
 ## 9. Pièges déjà rencontrés
 
+- **Un `.js` dans `[static.verbatim].files` échoue au build, volontairement**
+  (§10.1) : *« JavaScript asset "..." is not allowed here; use
+  [scripts.components] or [scripts.capabilities.*]. »* Ce n'est jamais un
+  bug — c'est le garde-fou attendu. Déplacer le fichier vers l'une des deux
+  sections indiquées. Ne s'applique jamais aux fichiers `.js` d'une
+  bibliothèque `[libraries.*]` — la restriction porte uniquement sur
+  l'interface déclarative `[static.verbatim]`, jamais sur le mécanisme
+  interne de copie qu'elle partage avec `[libraries.*]`.
 - **`cargo build` vert ne garantit pas que le bit fonctionne réellement.**
   Il valide la cohérence structurelle (bijection, bits, manifeste, `deps`)
   — pas que la base de données a bien été rechargée avec le dernier
@@ -979,16 +991,30 @@ différente selon le type de page :
 
 ## 10. Constats d'architecture pour une prochaine passe (informationnel)
 
-Les deux points suivants sont des observations faites en documentant
-l'implémentation actuelle — **aucun n'est corrigé dans le code**, aucune
-action n'est requise d'un intégrateur frontend suivant ce guide. Ils sont
-consignés ici pour ne pas perdre le contexte avant une éventuelle passe
-dédiée.
+Le point 10.1 ci-dessous a depuis été **tranché et implémenté** — ce n'est
+plus un simple constat, contrairement au point 10.2, qui lui reste une
+observation ouverte, sans décision prise.
 
-### 10.1 `[static.verbatim]` ne devrait plus jamais contenir de `.js`
+### 10.1 `[static.verbatim]` interdit au JavaScript — décision actée
 
-Avec `deps` (§4) en place, les cas d'usage légitimes pour amener du JS au
-client sont désormais tous couverts explicitement :
+**Statut : décision architecturale actée.** Le JavaScript ne relève plus
+jamais de `[static.verbatim]`, quelle que soit la façon dont il est
+consommé. Deux voies légitimes, et seulement deux, pour déclarer du
+JavaScript dans ce projet :
+
+- **`[scripts.capabilities.*]`** — un script rattaché à une capacité
+  conditionnelle, avec éventuellement des dépendances de chargement
+  (`deps`, §4) ;
+- **`[scripts.components]`** — un script autonome, consommé explicitement
+  comme asset (`{% asset %}`, §2), sans condition.
+
+`[static.verbatim]` reste réservé aux assets dont le pipeline n'a **pas**
+besoin de connaître la sémantique d'exécution — images, polices, fichiers
+`.map`, tout ce qui est copié tel quel sans jamais être exécuté par un
+navigateur en tant que script.
+
+**Justification.** Avec `deps` (§4) en place, les cas d'usage légitimes
+pour amener du JS au client sont désormais tous couverts explicitement :
 
 ```
 [scripts.capabilities.*]  → script applicatif conditionnel
@@ -998,31 +1024,46 @@ deps = [...]              → dépendance de chargement d'une capacité
 [service_worker]          → pipeline spécialisé
 ```
 
-Il ne semble plus exister de cas d'usage légitime pour déposer un `.js`
-directement sous `[static.verbatim].files` : conceptuellement, ce pipeline
-doit rester celui des assets **opaques et non interprétés** (images,
-fonts, `.map`, etc.), jamais celui du JS applicatif ou vendoré.
+Un `.js` glissé directement sous `[static.verbatim].files` héritait
+silencieusement de deux limites qui ne se voyaient qu'à l'usage : aucun
+moyen de le déclarer `module = false` (ce champ n'existe que sur
+`[libraries.*]`, §3.1 — un tel fichier était donc toujours traité comme
+`module: true` par `deps`, même s'il s'agissait en réalité d'un bundle
+UMD, sans qu'aucune erreur ne le signale) ; et aucune réécriture de ses
+références internes (`[static.verbatim]` partage l'invariant « zéro
+transformation » de `[libraries.*]`, §3.3).
 
-**Rien dans le code n'empêche aujourd'hui de le faire**, et ça ne produit
-même pas un résultat clairement cassé — un `.js` sous `[static.verbatim]`
-entre dans le même `AssetUrlRegistry` que tout le reste, est donc
-techniquement résolvable par un `import` direct (§3.2) ou par `deps` (§4).
-Mais il hérite alors silencieusement de deux limites qui ne se voient
-qu'à l'usage :
-- **aucun moyen de le déclarer `module = false`** — ce champ n'existe que
-  sur `[libraries.*]` (§3.1) ; un tel fichier serait donc toujours traité
-  comme `module: true` par `deps`, même s'il s'agit en réalité d'un bundle
-  UMD, sans qu'aucune erreur ne le signale (même risque que le piège §9
-  sur l'import direct d'une bibliothèque classique) ;
-  - **aucune réécriture de ses références internes** (`import`/`require`
-  éventuels vers d'autres fichiers) — [static.verbatim] partage
-  l'invariant « zéro transformation » de `[libraries.*]` (§3.3), pour les
-  mêmes raisons.
+**Portée de la règle — important.** Elle concerne strictement
+l'**interface déclarative** `[static.verbatim].files` (ce que
+l'intégrateur écrit dans `theme.toml`), jamais le mécanisme interne de
+copie verbatim lui-même (`run_verbatim_pipeline`), qui reste utilisé tel
+quel — sans aucune restriction d'extension — pour les fichiers découverts
+via `[libraries.*]` (une bibliothèque vendorée contient légitimement du
+`.js`, `.css`, des images, etc., tous copiés verbatim). La garde ne
+s'applique qu'au moment où `[static.verbatim].files` est lu, jamais à
+l'intérieur de `run_verbatim_pipeline` lui-même.
 
-**À traiter dans une passe dédiée, pas maintenant** : une validation au
-build de `marius-assets` (avertissement, voire erreur dure) rejetant toute
-extension `.js` dans `[static.verbatim].files` formaliserait cette
-conclusion plutôt que de la laisser purement documentaire.
+**Erreur de build attendue**, dès qu'un `.js` apparaît dans
+`[static.verbatim].files` :
+
+```
+[static.verbatim].files: JavaScript asset "scripts/legacy.js" is not
+allowed here; use [scripts.components] or [scripts.capabilities.*].
+```
+
+Échec de build immédiat et déterministe — jamais un avertissement, jamais
+une tolérance silencieuse, cohérent avec la discipline « échec dur, jamais
+un repli silencieux » déjà en place pour `deps` (§4.2) et pour la
+résolution d'assets en général (§3.2, §7).
+
+**Implémentation.** Faite dans cette même session — `crates/assets/src/main.rs`,
+juste après la lecture de `theme.static_.verbatim.files` et avant toute
+fusion avec les fichiers découverts par `[libraries.*]`. Vérifiée
+empiriquement sur le message d'erreur exact et les cas limites (extension
+homonyme partielle, absence d'extension, position dans une liste mixte) —
+pas de test automatisé dans le crate à ce jour (`main.rs` n'a aucune
+infrastructure de test existante, cf. §10 de l'audit de session
+correspondant).
 
 ### 10.2 Asymétrie de convention de clé `{% asset %}`
 

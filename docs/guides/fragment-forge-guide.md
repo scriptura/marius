@@ -332,8 +332,6 @@ Politique de taille visée (`FRAGMENT_FORGE_STATIC_WARN_BYTES`, défaut 32 768) 
 
 ### 4.5bis `{% asset key %}` et `{% script %} … {% endscript %}` — absents de ce guide jusqu'ici, réels depuis le début
 
-**Ajouté le 17 juillet 2026**, à la suite d'une session où ces deux constructions ont été prises pour de la syntaxe non câblée — la grammaire documentée en §5 (avant cette révision) ne les mentionnait pas du tout. Elles sont pourtant réelles, compilées, et utilisées en production dans `templates/base.marius`. L'absence n'était pas un signal qu'elles n'existaient pas : c'était un point aveugle de ce document, pas du code.
-
 **`{% asset key %}`** — résout `key` (un nom de fichier logique, ex. `main.js`, `utils.svg`, jamais un chemin complet) contre le manifeste d'assets produit par `marius-assets` (`build/{theme}/manifest.toml`, table `[assets."clé"]`). Généré comme `FlatPageToken::AssetRef(key)` par le parseur — même famille de token que `Static`/`Field`, mais résolu au moment de l'écriture (build.rs), pas au moment du parsing.
 
 **`{% script %} … {% endscript %}`** — capture un bloc `<script>...</script>` complet, le "hisse" (déduplication si plusieurs blocs identiques apparaissent, par exemple parce que deux pages différentes chargent le même script), et le réinjecte à l'emplacement du marqueur littéral `<!-- MARIUS_SCRIPTS -->` dans le layout parent (`templates/base.marius`). Le marqueur est cherché comme sous-chaîne exacte, jamais interprété comme une construction `.marius` — un simple point d'ancrage textuel.
@@ -482,6 +480,6 @@ Toute violation est une erreur de compilation (`cargo build` échoue), jamais un
 
 ---
 
-_Vérifié et corrigé le 7 juillet 2026 (v2 : frontière vues sémantiques \/ tables physiques ajoutée) — audit croisé + revue de code (`lib.rs`, `introspect.rs`) contre le guide._
-_Mis à jour le 17 juillet 2026 (v3) : `{% asset %}`/`{% script %}` documentés (§4.5bis, absents des versions précédentes bien que réels et implémentés depuis le début) ; contradiction §0/§4 sur le statut de la Partie 2 corrigée ; exception `STATIC_PAGES` ajoutée (§4.8) — session de mise en œuvre du pipeline `[service_worker]`/`offline.html` de `marius-assets`._
-_Corrigé le 25 juillet 2026 (v4), en préparation d'une interruption prolongée de disponibilité — non revérifié par exécution réelle après cette révision : §2.4, l'affirmation « `pre_escaped` est le seul tag `pg_description` reconnu » était devenue fausse (`marius:raw`/`marius:large_content` ajoutés en session, `CONTRAT-implementation-varlena-raw.md`/`CONTRAT-implementation-projection-segmentee.md`) ; §4.8bis ajouté (`render_segments()`) ; §4.8 : réserve ajoutée sur l'existence réelle de `render_page()`, jamais rencontrée dans le code confronté cette session — à vérifier, pas tranché._
+_Vérifié et corrigé le 7 juillet 2026._
+_Mis à jour le 17 juillet 2026 (v3)._
+_Corrigé le 25 juillet 2026 (v4)._
