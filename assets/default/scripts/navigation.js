@@ -1,83 +1,72 @@
 /**
  * @module NavigationSystem
- * @description Pipeline de contrôle du menu (Hamburger / Sub-nav).
+ * @summary Pipeline de contrôle O(1) avec teardown déterministe encapsulé.
  */
 
-// --- DATA LAYOUT (Pointeurs Mémoire) ---
-const DOM = {
-	html: document.documentElement,
-	body: document.body,
-	btn: null,
-	subNav: null,
-	contentNode: null, // Cible unique O(1) privilégiée
-	contentList: null, // Fallback O(N)
-};
+let activeController = null;
 
-let mql = null; // MediaQueryList (Détecteur matériel de point de rupture)
-
-// --- SYSTEM : State Synchronization ---
-export const toggleNav = () => {
-	if (!DOM.btn) return;
-
-	const isActive = DOM.html.classList.toggle("active");
-	DOM.body.classList.toggle("active");
-
-	DOM.btn.setAttribute("aria-expanded", isActive);
-	DOM.subNav.setAttribute("aria-hidden", !isActive);
-
-	// Privilégier un conteneur unique O(1), sinon fallback sur le NodeList O(N)
-	if (DOM.contentNode) {
-		DOM.contentNode.toggleAttribute("inert", isActive);
-	} else if (DOM.contentList) {
-		DOM.contentList.forEach((node) => {
-			node.toggleAttribute("inert", isActive);
-		});
-	}
-};
-
-// --- SYSTEM : Event Bus (Hardware breakpoint) ---
-const handleBreakpointChange = (e) => {
-	const isDesktop = e.matches;
-
-	// Fermeture propre si passage en desktop avec menu ouvert
-	if (isDesktop && DOM.btn.getAttribute("aria-expanded") === "true") {
-		toggleNav();
-	}
-
-	// En desktop, le sub-nav est visible (CSS), on retire aria-hidden
-	DOM.subNav.setAttribute("aria-hidden", !isDesktop);
-};
-
-// --- EXPORT PUBLIC (Entrypoint) ---
+/**
+ * Initialise le système et lie le cycle de vie au DOM actuel.
+ * @returns {boolean} État de l'initialisation.
+ */
 export const initNavigation = () => {
-	DOM.btn = document.querySelector(".cmd-nav");
-	DOM.subNav = document.querySelector(".sub-nav");
+	// Teardown O(1) du pipeline précédent en cas de re-projection du fragment HTML
+	if (activeController) activeController.abort();
+	activeController = new AbortController();
+	const { signal } = activeController;
 
-	if (!DOM.btn || !DOM.subNav) return;
+	const btn = document.querySelector(".cmd-nav");
+	const subNav = document.querySelector(".sub-nav");
+	if (!btn || !subNav) return false;
 
-	// TODO: Dans le HTML, encapsuler le contenu hors-nav dans <main id="main-content">
-	DOM.contentNode = document.getElementById("main-content");
-	// Fallback conservé temporairement
-	if (!DOM.contentNode) {
-		DOM.contentList = document.querySelectorAll("body > :not(.nav)");
-	}
+	const html = document.documentElement;
+	const body = document.body;
+	const contentNode = document.getElementById("main-content");
+	const contentList = contentNode
+		? null
+		: document.querySelectorAll("body > :not(.nav)");
 
-	// Extraction AOT de la variable CSS
-	// Note: Si --size-nav est fixe (ex: 60rem), remplacez ce getComputedStyle par la valeur en dur
-	// pour éliminer totalement le Layout Thrashing.
-	const rawSize =
-		getComputedStyle(DOM.html).getPropertyValue("--size-nav").trim() || "60rem";
+	// Résolution AOT : Suppression du Layout Thrashing synchrone.
+	const breakpoint = "60rem";
+	const mql = window.matchMedia(`(min-width: ${breakpoint})`);
 
-	// Compilateur de Media Query
-	mql = window.matchMedia(`(min-width: ${rawSize})`);
+	const toggleNav = () => {
+		const isActive = html.classList.toggle("active");
+		body.classList.toggle("active");
 
-	// Initialisation synchrone de l'état ARIA selon le layout initial
-	DOM.btn.setAttribute("aria-expanded", "false");
-	DOM.subNav.setAttribute("aria-hidden", !mql.matches);
+		// Résolution statique (String literal interning) = 0 allocation heap
+		btn.setAttribute("aria-expanded", isActive ? "true" : "false");
+		subNav.setAttribute("aria-hidden", isActive ? "false" : "true");
 
-	// Bindings
-	DOM.btn.addEventListener("click", toggleNav);
+		if (contentNode) {
+			contentNode.toggleAttribute("inert", isActive);
+		} else if (contentList) {
+			for (let i = 0; i < contentList.length; i++) {
+				contentList[i].toggleAttribute("inert", isActive);
+			}
+		}
+	};
 
-	// Écouteur natif (remplace la boucle resize O(N) + setTimeout)
-	mql.addEventListener("change", handleBreakpointChange);
+	// Branchement direct O(1)
+	btn.addEventListener("click", toggleNav, { signal });
+
+	mql.addEventListener(
+		"change",
+		(event) => {
+			const isDesktop = event.matches;
+			if (isDesktop && btn.getAttribute("aria-expanded") === "true") {
+				toggleNav();
+			}
+			if (subNav) {
+				subNav.setAttribute("aria-hidden", isDesktop ? "false" : "true");
+			}
+		},
+		{ signal },
+	);
+
+	// Alignement immédiat sur l'état matériel
+	btn.setAttribute("aria-expanded", "false");
+	subNav.setAttribute("aria-hidden", mql.matches ? "false" : "true");
+
+	return true;
 };

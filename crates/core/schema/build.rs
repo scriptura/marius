@@ -579,8 +579,18 @@ fn validate_capabilities(
             continue;
         }
 
-        let manifest_key = format!("{name}.js");
-        let url = match assets.get(&manifest_key) {
+        // Identité canonique (SPEC-canonical-asset-identity.md) : la clé
+        // manifeste d'un point d'entrée est son chemin THÈME-RELATIF réel
+        // (`cap.entry`, ex. "scripts/map.js"), jamais un nom symbolique
+        // suffixé `.js` dérivé de `name` — l'identité publique d'un asset
+        // ne dépend jamais du pipeline/de la clé `theme.toml` qui l'a
+        // produit (même invariant que `deps` juste en dessous, et que
+        // `[libraries.*]`/`[static.verbatim]`/CSS/sprites partout ailleurs
+        // dans ce projet). Slash de tête toléré, même convention que
+        // `deps` : jamais une résolution différente selon que
+        // l'intégrateur l'a écrit ou non.
+        let manifest_key = cap.entry.strip_prefix('/').unwrap_or(&cap.entry);
+        let url = match assets.get(manifest_key) {
             Some(entry) => entry.url.clone(),
             None => {
                 errors.push(format!(
@@ -593,14 +603,12 @@ fn validate_capabilities(
             }
         };
 
-        // Résolution de `deps` — MÊME contrat que `manifest_key` ci-dessus
-        // (échec dur, jamais un repli silencieux), mais la clé de lookup
-        // est ici directement la chaîne canonique donnée par l'intégrateur
-        // (`"libraries/deckgl/deckgl.js"`), jamais suffixée `.js` comme
-        // pour un nom de capacité. Un slash de tête optionnel est toléré
-        // (même convention que `deps` côté JS, `scripts.rs` §3.2) :
-        // jamais une résolution différente selon que l'intégrateur l'a
-        // écrit ou non.
+        // Résolution de `deps` — MÊME contrat et MÊME convention d'identité
+        // que `manifest_key` ci-dessus (chemin canonique thème-relatif,
+        // jamais un nom symbolique) : échec dur, jamais un repli silencieux.
+        // Slash de tête optionnel toléré (même convention que `scripts.rs`
+        // §3.2 côté JS) — jamais une résolution différente selon que
+        // l'intégrateur l'a écrit ou non.
         let mut deps: Vec<ResolvedDep> = Vec::new();
         let mut dep_error = false;
         for raw_dep in &cap.deps {
@@ -3461,7 +3469,7 @@ deps = ["libraries/deckgl/deckgl.js"]
         write_registry(&base, "map = 2\n");
 
         let mut assets = HashMap::new();
-        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js"));
+        assets.insert("scripts/map.js".to_string(), asset("/scripts/map.HASH.js"));
         assets.insert(
             "libraries/deckgl/deckgl.js".to_string(),
             asset("/libraries/deckgl.HASH.js"),
@@ -3502,7 +3510,7 @@ deps = ["libraries/bar/bar.js"]
         write_registry(&base, "foo = 2\n");
 
         let mut assets = HashMap::new();
-        assets.insert("foo.js".to_string(), asset("/scripts/foo.HASH.js"));
+        assets.insert("scripts/foo.js".to_string(), asset("/scripts/foo.HASH.js"));
         assets.insert(
             "libraries/bar/bar.js".to_string(),
             asset("/libraries/bar.HASH.js"),
@@ -3511,6 +3519,41 @@ deps = ["libraries/bar/bar.js"]
 
         let result = validate_capabilities(&manifest_dir, &assets, &classic_scripts).unwrap();
         assert!(result[0].1.deps[0].module);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Décision d'architecture de cette session : l'identité manifeste
+    /// d'un point d'entrée est son chemin thème-relatif réel (`entry`),
+    /// jamais le nom symbolique `theme.toml` de la capacité suffixé
+    /// `.js`. Nom de capacité délibérément SANS RAPPORT avec le nom de
+    /// fichier pour rendre le test sans ambiguïté possible : si le code
+    /// utilisait encore `format!("{name}.js")`, il chercherait
+    /// "the-map-feature.js" et échouerait, jamais "scripts/map.js".
+    #[test]
+    fn capability_manifest_key_is_entry_path_not_capability_name() {
+        let (base, manifest_dir) = sandbox("entry-path-key");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.the-map-feature]
+entry = "scripts/map.js"
+markers = ["map"]
+activation = "bootstrap"
+"#,
+        );
+        write_registry(&base, "the-map-feature = 2\n");
+
+        let mut assets = HashMap::new();
+        assets.insert("scripts/map.js".to_string(), asset("/scripts/map.HASH.js"));
+
+        let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].1.url, "/scripts/map.HASH.js",
+            "la résolution doit trouver l'entrée sous 'scripts/map.js', jamais \
+             'the-map-feature.js'"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -3533,7 +3576,7 @@ activation = "bootstrap"
         write_registry(&base, "map = 2\n");
 
         let mut assets = HashMap::new();
-        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js"));
+        assets.insert("scripts/map.js".to_string(), asset("/scripts/map.HASH.js"));
 
         let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new()).unwrap();
         assert_eq!(result.len(), 1);
@@ -3561,7 +3604,7 @@ deps = ["libraries/deckgl/deckgl.js"]
         write_registry(&base, "map = 2\n");
 
         let mut assets = HashMap::new();
-        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js"));
+        assets.insert("scripts/map.js".to_string(), asset("/scripts/map.HASH.js"));
         // deckgl.js volontairement absent du manifeste.
 
         let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new());
@@ -3595,7 +3638,7 @@ deps = ["/libraries/deckgl/deckgl.js"]
         write_registry(&base, "map = 2\n");
 
         let mut assets = HashMap::new();
-        assets.insert("map.js".to_string(), asset("/scripts/map.HASH.js"));
+        assets.insert("scripts/map.js".to_string(), asset("/scripts/map.HASH.js"));
         assets.insert(
             "libraries/deckgl/deckgl.js".to_string(),
             asset("/libraries/deckgl.HASH.js"),

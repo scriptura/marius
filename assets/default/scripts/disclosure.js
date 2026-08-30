@@ -353,7 +353,7 @@ const bindTabKeyboard = (container) => {
 };
 
 // --- EXPORT PUBLIC (Entrypoint System) ---
-export const initDisclosureSystem = () => {
+export const initDisclosure = () => {
 	const pageState = hydrateState().uiState[DisclosureState.slug];
 	const containers = document.querySelectorAll(".tabs, .accordion");
 

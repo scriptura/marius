@@ -248,17 +248,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // s'arrêtent à `ThemeConfig`, jamais projetés dans `script_targets`
     // ni dans `AssetManifest`.
     //
-    // Collision de clé finale entre un nom de `components` et un nom de
-    // `capabilities` (même `"{name}.js"` en sortie) : erreur dure de la
-    // Forge, jamais un écrasement silencieux — le manifeste est un
-    // namespace d'assets JS commun aux deux sources.
+    // Collision de NOM entre un `[scripts.components]` et un
+    // `[scripts.capabilities]` déclarant la même clé `theme.toml` (ex.
+    // `[scripts.components.foo]` ET `[scripts.capabilities.foo]`) : erreur
+    // dure de la Forge, jamais un écrasement silencieux. Ce n'est plus une
+    // histoire de clé de MANIFESTE partagée (l'identité publique d'un
+    // point d'entrée est désormais son chemin thème-relatif réel, jamais
+    // le nom `theme.toml` suffixé `.js` — voir `scripts.rs`,
+    // `run_scripts_pipeline`) : deux chemins différents produisent
+    // maintenant deux clés différentes, sans collision. Le risque réel visé
+    // ici est plus en amont — `script_targets.insert(name.clone(), ...)`
+    // écraserait silencieusement le chemin de l'un par celui de l'autre
+    // AVANT même que `run_scripts_pipeline` ne s'exécute, si les deux
+    // sections utilisent la même clé `theme.toml` pour désigner deux
+    // fichiers distincts.
     let mut script_targets: HashMap<String, String> = theme.scripts.components.clone();
     for (name, capability) in &theme.scripts.capabilities {
         if script_targets.contains_key(name) {
             return Err(format!(
-                "collision de manifeste scripts : '{name}' est déclaré à la fois \
-                 dans [scripts.components] et [scripts.capabilities] — les deux \
-                 produiraient la même clé '{name}.js' dans le manifeste d'assets"
+                "collision de configuration scripts : '{name}' est déclaré à la fois \
+                 dans [scripts.components] et [scripts.capabilities] — l'un écraserait \
+                 silencieusement le chemin de l'autre avant toute résolution"
             )
             .into());
         }

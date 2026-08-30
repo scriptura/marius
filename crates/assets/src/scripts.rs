@@ -607,13 +607,48 @@ pub(crate) fn run_scripts_pipeline(
     let order = topological_order_leaves_first(&arena)?;
     let resolved = patch_and_hash_modules(&arena, &order, build_root)?;
 
+    // `arena[idx].path` est TOUJOURS un chemin filesystem absolu
+    // (`reserve_module_index` canonicalise systématiquement, symlinks
+    // compris) — jamais garanti de coïncider avec `theme_dir` tel que reçu
+    // par cette fonction (`main.rs` ne canonicalise jamais l'argument CLI :
+    // "./assets/default" reste relatif). Canonicalisé UNE SEULE FOIS ici,
+    // pour comparer deux chemins dans la MÊME représentation avant tout
+    // `strip_prefix` — jamais `theme_dir` brut, dont dépendait le bug de
+    // session (clé manifeste préfixée `//`, jamais détecté par les tests
+    // faute d'un `theme_dir` de test resté relatif jusqu'ici).
+    let theme_dir_canonical = theme_dir
+        .canonicalize()
+        .unwrap_or_else(|_| theme_dir.to_path_buf());
+
     for (target_name, &entry_idx) in target_names.iter().zip(entry_indices.iter()) {
         let patched = resolved[entry_idx]
             .as_ref()
             .expect("chaque point d'entrée est traité par la Passe 3");
 
+        // Identité canonique (SPEC-canonical-asset-identity.md) : la clé
+        // manifeste d'un point d'entrée [scripts.components]/
+        // [scripts.capabilities.*] est son chemin THÈME-RELATIF réel —
+        // jamais le nom symbolique `theme.toml` (`target_name`) suffixé
+        // `.js`. Construite DIRECTEMENT depuis `components[*target_name]`
+        // (la chaîne relative déjà déclarée dans `theme.toml`, ex.
+        // "scripts/map.js") — jamais depuis `arena[entry_idx].path` : ce
+        // dernier est un chemin FILESYSTEM ABSOLU (`reserve_module_index`
+        // canonicalise systématiquement, résolution de symlinks comprise),
+        // et un `strip_prefix(theme_dir)` contre un `theme_dir` resté
+        // relatif (cas réel : `main.rs` ne canonicalise jamais l'argument
+        // CLI, ex. "./assets/default") échoue TOUJOURS en usage réel —
+        // bug constaté en session, jamais détecté par les tests jusque-là
+        // (sandbox de test = `std::env::temp_dir()`, déjà absolu, donc
+        // insensible au problème par coïncidence). Même principe déjà
+        // correct que `verbatim.rs`/`styles.rs`/`sprites.rs` : construire
+        // la clé depuis une chaîne DÉJÀ relative, jamais depuis un chemin
+        // filesystem résolu.
+        let canonical_key =
+            CanonicalAssetId::from_theme_relative_path(Path::new(&components[*target_name]))
+                .into_string();
+
         manifest.insert(
-            format!("{target_name}.js"),
+            canonical_key,
             AssetEntry {
                 url: patched.url.clone(),
                 path: join_slash(build_root_rel, &patched.output_rel),
@@ -642,16 +677,20 @@ pub(crate) fn run_scripts_pipeline(
     // build apparemment réussi.
     //
     // Clé : CanonicalAssetId (chemin complet relatif à la racine du thème),
-    // SPEC-canonical-asset-identity.md §4 — remplace l'ancienne clé par
-    // `file_stem()` seul (`format!("{stem}.js")`), dont ce commentaire
-    // documentait lui-même la collision (`foo/utils.js` vs `bar/utils.js`)
-    // comme une limite connue et non résolue. Ce n'est plus le cas : deux
-    // dépendances de même nom sous des répertoires distincts coexistent
-    // désormais sans écrasement, comme partout ailleurs dans ce crate.
+    // SPEC-canonical-asset-identity.md §4 — MÊME IDENTITÉ PUBLIQUE que les
+    // points d'entrée ci-dessus (chemin, jamais nom logique de
+    // configuration), mais construction nécessairement différente : une
+    // dépendance transitive n'a pas de chaîne relative déclarée dans
+    // `theme.toml` à disposition (elle n'existe que comme
+    // `arena[idx].path`, un chemin filesystem ABSOLU canonicalisé — voir
+    // `reserve_module_index`). D'où `theme_dir_canonical` (calculé une
+    // fois plus haut) plutôt que `theme_dir` brut pour ce `strip_prefix` :
+    // comparer un chemin absolu à un chemin resté relatif échoue
+    // TOUJOURS en usage réel (bug de session corrigé ici).
     let entry_idx_set: HashSet<usize> = entry_indices.iter().copied().collect();
     for (idx, slot) in resolved.iter().enumerate() {
         if entry_idx_set.contains(&idx) {
-            continue; // déjà couvert ci-dessus, sous sa clé logique (nom de cible)
+            continue; // déjà couvert ci-dessus, sous sa clé canonique (chemin)
         }
         let Some(patched) = slot else {
             continue; // jamais atteint par la Passe 2/3 — nœud mort, hors graphe réel
@@ -659,7 +698,7 @@ pub(crate) fn run_scripts_pipeline(
 
         let rel = arena[idx]
             .path
-            .strip_prefix(theme_dir)
+            .strip_prefix(&theme_dir_canonical)
             .unwrap_or(&arena[idx].path);
         let canonical_key = CanonicalAssetId::from_theme_relative_path(rel).into_string();
 
@@ -906,23 +945,18 @@ mod tests {
         .unwrap();
 
         // Les cibles logiques ET les modules dépendance entrent au
-        // manifeste — correctif de session : un module atteint seulement
-        // par import ESM transitif (navigation.js, jamais déclaré comme
-        // cible dans theme.toml) doit rester résolvable, sous peine d'être
-        // introuvable par tout consommateur de manifest.toml malgré sa
-        // présence réelle sur disque (bug constaté en usage réel : 404
-        // côté navigateur).
-        //
-        // Clé de navigation.js : chemin canonique complet
-        // (SPEC-canonical-asset-identity.md §4), plus "navigation.js" seul
-        // — l'ancienne clé par `file_stem()` collisionnerait entre deux
-        // dépendances homonymes sous des répertoires distincts, ce que ce
-        // test ne peut pas exercer isolément (un seul fichier nommé
-        // "navigation.js" ici) mais que `verbatim.rs`
+        // manifeste, sous la MÊME convention d'identité : le chemin
+        // canonique complet thème-relatif (SPEC-canonical-asset-identity.md
+        // §4), jamais un nom symbolique `theme.toml` suffixé `.js` pour les
+        // cibles, ni `file_stem()` seul pour les dépendances — l'ancienne
+        // clé par nom collisionnerait entre deux dépendances homonymes sous
+        // des répertoires distincts, ce que ce test ne peut pas exercer
+        // isolément (un seul fichier nommé "navigation.js" ici) mais que
+        // `verbatim.rs`
         // (`no_silent_overwrite_between_same_basename_in_different_directories`)
         // couvre explicitement pour le même invariant.
-        assert!(manifest.contains_key("main.js"));
-        assert!(manifest.contains_key("more.js"));
+        assert!(manifest.contains_key("scripts/main/index.js"));
+        assert!(manifest.contains_key("scripts/more/index.js"));
         assert!(manifest.contains_key("scripts/main/navigation.js"));
         assert!(
             manifest["scripts/main/navigation.js"]
@@ -931,7 +965,7 @@ mod tests {
         );
         assert!(manifest["scripts/main/navigation.js"].url.ends_with(".js"));
 
-        let main_url = &manifest["main.js"].url;
+        let main_url = &manifest["scripts/main/index.js"].url;
         let main_filename = Path::new(main_url).file_name().unwrap();
         let main_written =
             fs::read_to_string(build_root.join("scripts").join(main_filename)).unwrap();
@@ -952,7 +986,7 @@ mod tests {
         // coïncidence.
         assert!(main_written.contains(manifest["scripts/main/navigation.js"].url.as_str()));
 
-        let more_url = &manifest["more.js"].url;
+        let more_url = &manifest["scripts/more/index.js"].url;
         let more_filename = Path::new(more_url).file_name().unwrap();
         let more_written =
             fs::read_to_string(build_root.join("scripts").join(more_filename)).unwrap();
@@ -962,6 +996,160 @@ mod tests {
         assert!(!more_written.contains("/libs/leaflet.js'"));
 
         let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    /// Cas exact du changement de convention de cette session : un
+    /// component simple, sans dépendance transitive, doit être identifié
+    /// par son chemin thème-relatif réel — jamais par le nom `theme.toml`
+    /// suffixé `.js`. `{% asset navigation.js %}` n'est plus une identité
+    /// valide ; seul `{% asset scripts/navigation.js %}` doit résoudre.
+    #[test]
+    fn entry_point_manifest_key_is_theme_relative_path_not_symbolic_name() {
+        let sandbox = std::env::temp_dir().join("marius-assets-test-scripts-canonical-entry-key");
+        let theme_dir = sandbox.join("theme");
+        let build_root = sandbox.join("build");
+        let scripts_dir = theme_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        fs::write(
+            scripts_dir.join("navigation.js"),
+            "export function boot() {}",
+        )
+        .unwrap();
+
+        let registry = AssetUrlRegistry::new();
+        let mut components = HashMap::new();
+        components.insert(
+            "navigation".to_string(),
+            "scripts/navigation.js".to_string(),
+        );
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+
+        run_scripts_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &components,
+            &registry,
+            &mut manifest,
+        )
+        .unwrap();
+
+        assert!(
+            manifest.contains_key("scripts/navigation.js"),
+            "la clé doit être le chemin thème-relatif réel, trouvé : {:?}",
+            manifest.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !manifest.contains_key("navigation.js"),
+            "l'ancienne clé par nom symbolique ne doit plus jamais être produite, \
+             en parallèle de la nouvelle"
+        );
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    /// Bug de session : `theme_dir` RELATIF (comme le reçoit réellement
+    /// `main.rs` depuis l'argument CLI, ex. "./assets/default" — jamais
+    /// canonicalisé) devait produire des clés manifeste relatives
+    /// correctes, jamais un chemin absolu ni un préfixe `//`. Les sandbox
+    /// de ce fichier utilisent `std::env::temp_dir()` (déjà absolu), ce
+    /// qui masquait entièrement ce bug — ce test construit délibérément
+    /// un `theme_dir` RELATIF, sous `target/` (CWD réel de `cargo test`),
+    /// pour l'exposer véritablement plutôt que de le contourner par
+    /// coïncidence.
+    ///
+    /// Couvre en un seul scénario les quatre invariants de non-régression
+    /// de cette correction : (1) clé relative correcte pour un point
+    /// d'entrée sous un `theme_dir` relatif, (2) nom symbolique différent
+    /// du chemin réel → la clé suit le chemin, jamais le nom, (3) une
+    /// dépendance transitive produit également une clé relative correcte,
+    /// (4) aucune clé du manifeste produit par ce pipeline n'est absolue
+    /// ni ne contient l'artefact `//`.
+    #[test]
+    fn relative_theme_dir_never_leaks_absolute_path_into_manifest_keys() {
+        let rel_base = PathBuf::from(format!(
+            "target/marius-assets-test-relative-theme-dir-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&rel_base);
+        let theme_dir = rel_base.join("theme"); // RELATIF — jamais canonicalisé ici,
+        let build_root = rel_base.join("build"); // exactement comme le fait main.rs.
+        fs::create_dir_all(theme_dir.join("scripts/main")).unwrap();
+        fs::create_dir_all(&build_root).unwrap();
+
+        // Point d'entrée dont le nom symbolique diffère délibérément du
+        // chemin réel (invariant 2).
+        fs::write(
+            theme_dir.join("scripts/map.js"),
+            "import { boot } from './main/navigation.js'; boot();",
+        )
+        .unwrap();
+        // Dépendance transitive, importée relativement (invariant 3).
+        fs::write(
+            theme_dir.join("scripts/main/navigation.js"),
+            "export function boot() {}",
+        )
+        .unwrap();
+
+        let registry = AssetUrlRegistry::new();
+        let mut components = HashMap::new();
+        components.insert(
+            "the-map-feature".to_string(), // nom symbolique ≠ chemin réel
+            "scripts/map.js".to_string(),
+        );
+        let mut manifest: HashMap<String, AssetEntry> = HashMap::new();
+
+        run_scripts_pipeline(
+            &theme_dir,
+            &build_root,
+            "build/default",
+            &components,
+            &registry,
+            &mut manifest,
+        )
+        .unwrap();
+
+        // Invariant 1 & 2 : clé = chemin relatif réel, jamais absolue,
+        // jamais le nom symbolique.
+        assert!(
+            manifest.contains_key("scripts/map.js"),
+            "clé attendue 'scripts/map.js', trouvé : {:?}",
+            manifest.keys().collect::<Vec<_>>()
+        );
+        assert!(!manifest.contains_key("the-map-feature.js"));
+        assert!(
+            manifest["scripts/map.js"].url.starts_with("/scripts/map."),
+            "l'URL hachée doit rester correcte : {:?}",
+            manifest["scripts/map.js"].url
+        );
+        assert!(manifest["scripts/map.js"].url.ends_with(".js"));
+
+        // Invariant 3 : dépendance transitive également relative et
+        // correcte — jamais absente, jamais absolue.
+        assert!(
+            manifest.contains_key("scripts/main/navigation.js"),
+            "clé attendue 'scripts/main/navigation.js', trouvé : {:?}",
+            manifest.keys().collect::<Vec<_>>()
+        );
+
+        // Invariant 4 : aucune clé absolue, aucun artefact '//' — pour
+        // TOUTES les clés produites par ce pipeline, pas seulement celles
+        // vérifiées ci-dessus explicitement.
+        for key in manifest.keys() {
+            assert!(
+                !key.starts_with('/'),
+                "clé manifeste absolue ou préfixée '/' détectée : {key:?}"
+            );
+            assert!(
+                !key.contains("//"),
+                "artefact de double slash (chemin absolu mal dépouillé) détecté \
+                 dans la clé : {key:?}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&rel_base);
     }
 
     /// Fail-hard (même politique que CSS/webmanifest) : un import
@@ -1054,7 +1242,8 @@ mod tests {
         assert_eq!(
             manifest.len(),
             4,
-            "foo.js + bar.js (cibles) + scripts/foo/utils.js + scripts/bar/utils.js (dépendances)"
+            "scripts/foo/index.js + scripts/bar/index.js (cibles, identité par chemin) + \
+             scripts/foo/utils.js + scripts/bar/utils.js (dépendances)"
         );
 
         let _ = fs::remove_dir_all(&sandbox);
