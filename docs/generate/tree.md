@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-08-31 07:07:35
+**Généré le:** 2026-08-31 22:19:16
 
 ## Racine du Workspace
 
@@ -182,6 +182,24 @@
 
 ```text
 /home/nunn/Development/GitHub/marius/docs
+├── adr-postgres
+│   ├── Codegen.md
+│   ├── PostgreSQL(OLTP)-vs-OLAP.md
+│   ├── adr-031-Nix-vs-Docker.md
+│   └── architecture-decision-records-for-postgresql-from-ADR-001-to-ADR-030.md
+├── adr-rust
+│   ├── ADR-001-hashset-to-bit-vector.md
+│   ├── ADR-002-reactive-projection-and-hybrid-state-management.md
+│   ├── ADR-003-thread-alignment-projection-varlena-transport-and-thread-invariants.md
+│   ├── ADR-004-normalization-of-configuration-indexes-and-memory-offsets.md
+│   ├── ADR-005-HTMX-versus-Web-Components.md
+│   ├── ADR-006-safeguarding-the-read-path-via-sendfile(2).md
+│   ├── ADR-007-introspection-varlena-bounds.md
+│   ├── ADR-008-topologie-artefact-lecture.md
+│   ├── ADR-009-pages-non-adressables-pk.md
+│   ├── ADR-010-chunking-of-large-varlena-objects.md
+│   ├── ADR-011-projections-ordonnancees.md
+│   └── ADR-rust-versus-zig.md
 ├── architecture
 │   ├── runtime-data-flow
 │   │   ├── CONTRAT-implementation-phase1.md
@@ -205,6 +223,7 @@
 │   ├── ADDENDUM-modules-placeholder-static-pages.md
 │   ├── HANDOFF-js-deps-capacites-frontend-v2.md
 │   ├── enquete.md
+│   ├── logical-data-model.pgsql
 │   ├── manifest-reactive-projection-OLD.md
 │   ├── static-usage-driven-selection-pipeline-v0_2_1.md
 │   └── static-usage-driven-selection-pipeline-v3.md
@@ -212,9 +231,10 @@
 │   ├── fragment-forge-guide.md
 │   ├── meta-tooling-guide.md
 │   ├── runtime-lifecycle-guide.md
-│   ├── scenario-ajout-champ-varlena.md
-│   ├── scenario-ajout-script-ou-librairie.md
-│   ├── scripts-librairies-capacites-frontend-guide.md
+│   ├── scenario-adding-a-script-or-library.md
+│   ├── scenario-adding-varlena-field.md
+│   ├── scripts-libraries-capabilities-frontend-guide.md
+│   ├── styles-mcss-guide.md
 │   └── terminal-memo-cmd.md
 ├── handoffs
 │   ├── HANDOFF-scripts-architecture-reprise.md
@@ -234,14 +254,6 @@
 │   ├── static-view-driven-data-pipeline.md
 │   ├── when-a-system-becomes-harder-to-read-than-to-design.md
 │   └── when-architecture-ends-up-forgetting-its-own-past.md
-├── postgres
-│   ├── adr
-│   │   ├── Codegen.md
-│   │   ├── PostgreSQL(OLTP)-vs-OLAP.md
-│   │   ├── adr-031-Nix-vs-Docker.md
-│   │   └── architecture-decision-records-for-postgresql.md
-│   └── old
-│       └── logical-data-model.pgsql
 ├── prospective
 │   ├── horizontal-scaling-strategies-for-marius.md
 │   ├── pack_html_format-as-the-canonical-protocol-for-packfiles.md
@@ -254,42 +266,28 @@
 ├── reflexivity
 │   ├── when-architecture-ceases-to-be-a-plan-and-becomes-an-instrument-of-discovery.md
 │   └── why-marius-could-only-emerge-outside-the-tech-world.md
-├── rust
-│   ├── adr
-│   │   ├── ADR-001-hashset-to-bit-vector.md
-│   │   ├── ADR-002-reactive-projection-and-hybrid-state-management.md
-│   │   ├── ADR-003-thread-alignment-projection-varlena-transport-and-thread-invariants.md
-│   │   ├── ADR-004-normalization-of-configuration-indexes-and-memory-offsets.md
-│   │   ├── ADR-005-HTMX-versus-Web-Components.md
-│   │   ├── ADR-006-safeguarding-the-read-path-via-sendfile(2).md
-│   │   ├── ADR-007-introspection-varlena-bounds.md
-│   │   ├── ADR-008-topologie-artefact-lecture.md
-│   │   ├── ADR-009-pages-non-adressables-pk.md
-│   │   ├── ADR-010-chunking-of-large-varlena-objects.md
-│   │   ├── ADR-011-projections-ordonnancees.md
-│   │   └── ADR-rust-versus-zig.md
-│   └── specifications
-│       ├── dependances-mode-page
-│       │   ├── core-system-blueprint.md
-│       │   ├── doc1-parser-mode-page.md
-│       │   ├── doc2-linker-lowering.md
-│       │   ├── doc3-orchestration-build-rs.md
-│       │   ├── graphe-dependances-mode-page.md
-│       │   └── mode-page-implementation-roadmap.md
-│       ├── db-forge-roadmap.md
-│       ├── db-forge-specification.md
-│       ├── marius-assets-roadmap.md
-│       ├── marius-assets-specification.md
-│       ├── marius-compilateur-projections-html-roadmap.md
-│       ├── marius-compilateur-projections-html-specification.md
-│       ├── marius-merge-rcu-specification-roadmap.md
-│       ├── marius-render-shell-roadmap.md
-│       ├── marius-render-shell-specification.md
-│       ├── orchestration-main-roadmap.md
-│       ├── orchestration-main-specification.md
-│       └── provisioning-projection-specification.md
+├── specifications
+│   ├── dependances-mode-page
+│   │   ├── core-system-blueprint.md
+│   │   ├── doc1-parser-mode-page.md
+│   │   ├── doc2-linker-lowering.md
+│   │   ├── doc3-orchestration-build-rs.md
+│   │   ├── graphe-dependances-mode-page.md
+│   │   └── mode-page-implementation-roadmap.md
+│   ├── db-forge-roadmap.md
+│   ├── db-forge-specification.md
+│   ├── marius-assets-roadmap.md
+│   ├── marius-assets-specification.md
+│   ├── marius-compilateur-projections-html-roadmap.md
+│   ├── marius-compilateur-projections-html-specification.md
+│   ├── marius-merge-rcu-specification-roadmap.md
+│   ├── marius-render-shell-roadmap.md
+│   ├── marius-render-shell-specification.md
+│   ├── orchestration-main-roadmap.md
+│   ├── orchestration-main-specification.md
+│   └── provisioning-projection-specification.md
 └── memento.md
 
-20 directories, 88 files
+17 directories, 89 files
 ```
 
