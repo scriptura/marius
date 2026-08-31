@@ -158,3 +158,7 @@ Ce qu'il faut savoir sur les mixins :
   c'est un bug du pipeline, pas un comportement normal.
 - Toute erreur (variable, mixin ou boucle) indique le fichier concerné et,
   quand c'est pertinent, une suggestion de correction.
+
+---
+
+_Document créé le 31 août 2026_

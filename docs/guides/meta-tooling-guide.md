@@ -2,24 +2,6 @@
 
 > **Créé le 17 juin 2026. Vérifié et daté le 7 juillet 2026. Note de statut
 > corrigée le 22 juillet 2026.**
-> **Note de statut, corrigée** : le §1 (dernière étape) et le §5 (étape 10)
-> décrivaient un modèle de service obsolète — résolution _à la requête_
-> depuis `store.bin` directement (`OnceLock`/`fetch_batch` au premier appel
-> HTTP). La note précédente affirmait que ce modèle avait été « explicitement
-> écarté par ADR-008 » au profit d'une résolution _à l'écriture_. **C'était
-> inexact au niveau du code, bien que correct au niveau de l'intention** :
-> `ADR-008` actait la décision, mais `codegen/projection.rs` généra
-> effectivement, jusqu'à une session de correction du 20-22 juillet 2026, un
-> `fetch_batch` lisant `store.bin` via un `OnceLock` monté une seule fois —
-> exactement le modèle qu'ADR-008 était censé avoir écarté. Corrigé depuis :
-> `StoreRegistry<P>` (registre atomiquement remplaçable) remplace le
-> `OnceLock`, et un second artefact doit désormais être rafraîchi de façon
-> réactive avant `store.bin` puisse nourrir la régénération de
-> `{table}.bin` — voir `DFS-phase1-reactivite-cow.md` et
-> `PHASE1-CLOSURE.md`, qui font désormais autorité sur ce point, plus
-> `guide-cycle-de-vie-runtime.md`. Le reste de ce document (registre,
-> annotations, format binaire de `store.bin`, procédure d'ajout de
-> composant) reste exact et complémentaire.
 
 Guide opérationnel du pipeline AOT. Destiné au développeur qui ajoute, modifie
 ou débogue un composant dans Marius. Ne documente pas les internals de la Forge
@@ -402,4 +384,5 @@ cargo test -p marius-schema
 
 ---
 
-_Créé le 17 Juin 2026 (Phase 4 db-forge). Vérifié et daté le 7 juillet 2026. Corrigé le 22 juillet 2026 après la session de correction de la réactivité varlena — voir note de statut en tête de document. Corrigé le 23-25 juillet 2026 (§2.2, §3) après confrontation au code réel : le multi-slot varlena (`join_slot_idx` > 0) et deux nouveaux tags `pg_description` (`marius:raw`, `marius:large_content`) sont devenus réels en session — voir `CONTRAT-implementation-multi-slot-varlena.md`, `CONTRAT-implementation-varlena-raw.md`, `CONTRAT-implementation-projection-segmentee.md`, qui font désormais autorité sur ces points._
+_Créé le 17 Juin 2026 (Phase 4 db-forge)._
+_Dernière mise à jour le 23-25 juillet 2026_

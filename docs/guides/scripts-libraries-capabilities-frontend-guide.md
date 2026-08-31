@@ -87,15 +87,11 @@ main = "scripts/main/index.js"
   une capacité (§3.2) — le mécanisme de résolution est identique,
   indépendant de la section d'origine du point d'entrée.
 
-Consommation côté template : via `{% asset main.js %}`, comme toute entrée
-de manifeste (même convention que `webmanifest`/CSS/sprites). 🟡 La forme
-exacte de la balise (`<script type="module" src="...">` posée à la main
-dans le `.marius`, vs. un mécanisme d'inclusion différent) n'a pas été
-vérifiée sur pièce pour ce guide — contrairement aux capacités, dont
-l'émission HTML est entièrement générée par `lower_modules_for_template`
-(§6.2), un component n'est probablement pas orchestré automatiquement : à
-confirmer sur un `.marius` existant utilisant déjà `[scripts.components]`
-avant de considérer ce point clos.
+Un component, `[scripts.components]`, n'est pas orchestré automatiquement
+dans un `.marius` mais géré manuellement. La forme exacte de la balise
+(ex : `<script type="module" src="`{% asset scripts/main.js %}`">`,
+`<script src="`{% asset scripts/main.js %}`" defer>`, etc) est à la
+discrétion du développeur frontend.
 
 **Quand l'utiliser :** un script dont le besoin est connu à l'écriture du
 template, indépendamment du contenu de la page — navigation globale,
@@ -754,7 +750,7 @@ référencée directement par un template) est également figée à cette étape
 - bit invalide (pas une puissance de deux) ou dupliqué ;
 - `activation` qui n'est pas un identifiant valide ;
 - `markers` vide ;
-- clé `{nom}.js` (ou toute clé `{% asset %}`) absente du manifeste d'assets
+- clé `{path}.js` (ou toute clé `{% asset %}`) absente du manifeste d'assets
   (→ retour à l'Étape 1) ;
 - **une entrée de `deps` absente du manifeste** (bibliothèque non
   déclarée, `root` incorrect, faute de frappe dans le chemin — même classe
@@ -1071,20 +1067,13 @@ suit pas une convention unique selon le pipeline d'origine de l'asset.
 | `verbatim.rs` / `libraries.rs` | Chemin canonique physique | `{% asset favicons/logo.svg %}` |
 | `sprites.rs` | Chemin canonique **construit** (`sprites/{nom}.svg`) | `{% asset sprites/utils.svg %}` |
 | `webmanifest.rs` | Nom logique **fixe**, unique dans tout le projet | `{% asset manifest.webmanifest %}` |
-| `scripts.rs` — **point d'entrée** `[scripts.components]`/`[scripts.capabilities.*]` | **Nom symbolique choisi dans `theme.toml`** + `.js` — **pas** le chemin physique | `{% asset mon-script.js %}`, même si le fichier réel est `scripts/mon-script.js` |
-| `scripts.rs` — module transitif (importé relativement, jamais nommé dans `theme.toml`) | Chemin canonique physique | `{% asset scripts/mon-script/navigation.js %}` |
+| `scripts.rs` — **point d'entrée** `[scripts.components]`/`[scripts.capabilities.*]` | Chemin canonique physique | `{% asset scripts/mon-script.js %}` |
+| `scripts.rs` — module transitif (importé relativement, jamais nommé dans `theme.toml`) | Chemin canonique physique | `{% asset scripts/navigation.js %}` |
 
-Concrètement : `{% asset styles/print.css %}` fonctionne parce que
-`styles.rs` clé ses entrées par leur chemin réel — mais
-`{% asset scripts/mon-script.js %}` échouerait (clé absente), alors que
-`{% asset mon-script.js %}` (le nom `theme.toml`, pas le chemin) est la
-forme correcte pour un point d'entrée `[scripts.components]`/
-`[scripts.capabilities.*]`. Cette double convention semble hériter du fait
-que `scripts.rs` clé un point d'entrée par son **nom logique de
-configuration**, jamais par son chemin — à la différence de tous les
-autres pipelines de ce crate.
+Concrètement, à part `webmanifest.rs`, tous les autres pipelines de ce
+crate utilisent le chemin canonique physique : `{% asset styles/print.css %}`,
+`{% asset scripts/mon-script.js %}`, etc.
 
-**À traiter dans une passe dédiée, pas maintenant** : soit unifier sur le
-chemin physique partout (romprait la rétrocompatibilité des templates
-existants utilisant déjà `{% asset nom.js %}`), soit documenter cette
-distinction comme définitive et volontaire. Aucune décision prise ici.
+---
+
+_Document révisé le 31 août 2026_

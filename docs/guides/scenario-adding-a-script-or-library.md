@@ -38,10 +38,8 @@ un component est plus simple.
    [scripts.components]
    mon-script = "scripts/mon-script.js"
    ```
-3. Utilisez-le dans le template concerné avec `{% asset mon-script.js %}`
-   — c'est le **nom que vous avez choisi** ci-dessus (`mon-script`) suivi
-   de `.js`, pas forcément le chemin réel du fichier (vérifiez la syntaxe
-   exacte de la balise avec un dev si besoin).
+3. Utilisez-le dans le template concerné avec `{% asset scripts/mon-script.js %}`
+   — c'est le **chemin relatif du fichier**, sans le `/` racine.
 4. Relancez la commande de build des assets (demandez-la si vous ne
    l'avez pas) et rechargez la page.
 
@@ -163,7 +161,7 @@ capabilities partagent la même dépendance (voir plus bas).
 
 ## Que dois-je écrire dans mon `.marius` ?
 
-- **Component** : la balise `{% asset nom.js %}` (Recette A).
+- **Component** : la balise `{% asset scripts/mon-script.js %}` (Recette A).
 - **Capability** : rien de spécial — juste la classe marqueur (`class=
   "mon-marqueur"`), soit dans le contenu, soit en dur dans le template.
 - **`deps`** : littéralement rien — ni balise, ni classe supplémentaire.
