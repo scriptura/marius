@@ -1,15 +1,73 @@
 # Styles Marius (.mcss) — guide frontend
 
 Ce guide décrit ce que vous pouvez écrire dans un fichier de style Marius
-(`.mcss`) en plus du CSS standard. C'est du CSS normal, avec trois
-extensions en plus. Chacune est retirée du fichier avant qu'il n'arrive au
-navigateur : ce que vous écrivez ici n'existe que pendant le build.
+(`.mcss`) en plus du CSS standard.
+
+Deux familles de choses à distinguer :
+
+- **`@import` et `@layer`** sont du CSS natif — le pipeline se charge juste
+  de fusionner vos fichiers en un seul, décrit dans la première section
+  ci-dessous.
+- **Variables, boucles et mixins** sont trois extensions propres à Marius,
+  qui n'existent pas en CSS standard. Chacune est retirée du fichier avant
+  qu'il n'arrive au navigateur : ce que vous écrivez avec `$`, `@for` ou
+  `@mixin`/`@include` n'existe que pendant le build.
 
 Règle générale à connaître avant tout le reste : **toute directive mal
 écrite ou toute référence qui n'existe pas fait planter le build**, avec un
 message d'erreur qui dit précisément quoi et où. Il n'y a pas de mode
 dégradé silencieux — si le build passe, c'est que tout ce que vous avez
 écrit est correct.
+
+## Assembler plusieurs fichiers — `@import`
+
+Un projet Marius n'a jamais qu'un seul fichier CSS en sortie. Le fichier
+d'entrée (typiquement `main.mcss`) importe les autres avec `@import`, et le
+pipeline fusionne tout en un unique fichier final — vous n'écrivez jamais
+plusieurs `<link>` pour votre CSS, et vous n'avez pas à vous soucier de
+l'ordre de chargement réseau.
+
+```css
+@layer tokens, base, layout, transitions, components, helpers;
+
+@import "media.mcss";
+@import "variable.mcss";
+@import "font.mcss" layer(tokens);
+@import "base.mcss" layer(base);
+@import "typography.mcss" layer(base);
+@import "layout.mcss" layer(layout);
+@import "grid.mcss" layer(layout);
+@import "column.mcss" layer(layout);
+@import "transition.mcss" layer(transitions);
+@import "navigation.mcss" layer(components);
+@import "breadcrumb.mcss" layer(components);
+```
+
+Ce que ça donne, dans l'ordre :
+
+- **Un chemin d'`@import` est relatif au fichier qui importe**, jamais à la
+  racine du projet.
+- Les `$variables` et `@mixin` déclarés dans un fichier importé sont
+  utilisables dans tout le graphe (fichier qui importe, ou importé par un
+  import du même fichier) — c'est déjà mentionné plus bas pour les
+  variables et les mixins, la mécanique est la même dans les deux cas.
+- **`@layer nom1, nom2, ...;` en tête de fichier** fixe l'ordre de priorité
+  des couches en cascade : la couche citée en dernier gagne en cas de
+  conflit, indépendamment de l'ordre dans lequel les règles sont ensuite
+  écrites ou importées. Dans l'exemple, `helpers` a la priorité la plus
+  forte, `tokens` la plus faible.
+- **`@import "fichier.mcss" layer(nom);`** rattache tout le contenu du
+  fichier importé à cette couche, comme si son contenu était enveloppé dans
+  un `@layer nom { ... }`. C'est ce qui permet de ranger `layout.mcss`,
+  `grid.mcss` et `column.mcss` dans la même couche `layout` sans dépendre
+  de l'ordre des `@import`.
+- **Un `@import` sans `layer(...)` reste hors de toute couche** — dans
+  l'exemple, `media.mcss` et `variable.mcss`. Attention, ce n'est pas un
+  simple "pas de priorité particulière" : dans les couches CSS natives, le
+  contenu hors couche gagne toujours sur le contenu à l'intérieur d'une
+  couche, quel que soit l'ordre d'écriture. N'importez sans `layer(...)`
+  que ce qui doit effectivement primer sur tout le reste (variables,
+  media queries qui n'ont pas leur mot à dire dans la cascade, etc.).
 
 ## Variables — `$nom`
 

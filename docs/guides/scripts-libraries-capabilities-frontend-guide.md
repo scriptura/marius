@@ -1,10 +1,5 @@
 # Guide — Scripts, bibliothèques vendorées et capacités frontend conditionnelles
 
-> Renommé depuis `js-deps-capacites-frontend-guide.md` — l'ancien titre ne
-> couvrait que la branche `js_deps`/capacités. Ce guide couvre désormais les
-> mécanismes disponibles pour amener du JS au client, et comment ils
-> s'articulent entre eux.
-
 Références :
 - `HANDOFF-js-deps-capacites-frontend-v2.md` — implémentation d'origine du
   système de capacités conditionnelles (§6 de ce guide).

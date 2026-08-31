@@ -959,8 +959,3 @@ ils ne constituent pas une chaîne de dépendances de lecture.
 
 _Créé le 7 juillet 2026._
 _Mis à jour le 25 août 2026_
-
-*Mis à jour après l'introduction de la fusion incrémentale CoW/Sweep Merge
-(Phases 4.2/4.3) : correction du modèle `store.bin → pack HTML`, description
-du `DeltaBatch`, de `P::fetch_batch`, de `merge_sweep`, du swap atomique et
-du provisioning initial.*
