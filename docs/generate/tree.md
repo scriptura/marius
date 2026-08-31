@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-08-30 00:16:59
+**Généré le:** 2026-08-31 07:07:35
 
 ## Racine du Workspace
 
@@ -202,6 +202,9 @@
 ├── generate
 │   └── tree.md
 ├── graveyard-of-documentations
+│   ├── ADDENDUM-modules-placeholder-static-pages.md
+│   ├── HANDOFF-js-deps-capacites-frontend-v2.md
+│   ├── enquete.md
 │   ├── manifest-reactive-projection-OLD.md
 │   ├── static-usage-driven-selection-pipeline-v0_2_1.md
 │   └── static-usage-driven-selection-pipeline-v3.md
@@ -214,10 +217,8 @@
 │   ├── scripts-librairies-capacites-frontend-guide.md
 │   └── terminal-memo-cmd.md
 ├── handoffs
-│   ├── ADDENDUM-modules-placeholder-static-pages.md
-│   ├── HANDOFF-js-deps-capacites-frontend-v2.md
+│   ├── HANDOFF-scripts-architecture-reprise.md
 │   ├── SUIVI-js-deps-points-en-attente.md
-│   ├── enquete.md
 │   ├── handoff-cartographie-hyper(ADR-011).md
 │   ├── note-post-phase-5.3-generate-main.md
 │   └── risks.md
@@ -289,6 +290,6 @@
 │       └── provisioning-projection-specification.md
 └── memento.md
 
-20 directories, 87 files
+20 directories, 88 files
 ```
 
