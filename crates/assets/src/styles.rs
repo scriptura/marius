@@ -16,8 +16,9 @@
 //! ## Dialecte Étendu (Zero-Sass)
 //!
 //! Le pipeline implémente un visiteur d'AST `lightningcss` natif pour résoudre un dialecte minimaliste
-//! (variables `$vars`, boucles `@for`) sans subir l'empreinte mémoire ni l'opacité d'un préprocesseur
-//! externe lourd. La résolution des directives `url()` est interceptée et couplée au registre d'assets.
+//! (variables `$vars`, boucles `@for`, mixins `@mixin`/`@include` sans paramètres) sans subir l'empreinte
+//! mémoire ni l'opacité d'un préprocesseur externe lourd. La résolution des directives `url()` est
+//! interceptée et couplée au registre d'assets.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -234,6 +235,28 @@ impl<'i> Visitor<'i> for CssUrlVisitor<'_> {
 /// `read()`) rend toute synchronisation runtime inutile.
 type VariableRegistry = HashMap<String, String>;
 
+/// Définition d'un mixin (`@mixin nom { corps }`) — `body` est le texte brut
+/// entre les accolades (règles CSS imbriquées incluses telles quelles,
+/// jamais réinterprétées ici), `declared_in` est conservé uniquement pour
+/// signaler l'emplacement d'une redéfinition.
+///
+/// Pas de scoping par import dans ce dialecte, même limitation que
+/// `VariableRegistry` ci-dessus : un nom de mixin est donc unique dans TOUT
+/// le graphe `@import`, pas "dernier gagnant" comme pour `$vars` — les corps
+/// pourraient diverger entre deux déclarations homonymes, un écrasement
+/// silencieux serait plus risqué qu'utile ici. Toute redéfinition est une
+/// erreur dure (`MvarError::DuplicateMixin`), détectée dès la Passe A.
+#[derive(Debug, Clone)]
+struct MixinDef {
+    body: String,
+    declared_in: PathBuf,
+}
+
+/// Registre des mixins `nom -> définition`, construit par la Passe A et
+/// figé (lecture seule) pendant toute la Passe B — même cycle de vie que
+/// `VariableRegistry`.
+type MixinRegistry = HashMap<String, MixinDef>;
+
 #[derive(Debug)]
 enum MvarError {
     Io(std::io::Error),
@@ -259,6 +282,44 @@ enum MvarError {
     /// `$variables`/`@for`, donc toujours la première erreur possible sur
     /// un fichier donné.
     Comment(CssCommentError),
+    /// `@include <nom>;` référence un mixin absent du registre — échec dur,
+    /// même politique que `UndefinedVariable` : pas de passthrough silencieux
+    /// d'une directive non résolue vers le CSS final (elle ferait de toute
+    /// façon planter `lightningcss`).
+    UnknownMixin {
+        name: String,
+        file: PathBuf,
+        suggestion: Option<String>,
+    },
+    /// Syntaxe `@mixin`/`@include` malformée (nom absent, accolade ou `;`
+    /// manquante...). `detail` porte déjà le message complet, positionné au
+    /// point d'échec.
+    MalformedMixin {
+        file: PathBuf,
+        detail: String,
+    },
+    /// Profondeur d'expansion `@include` imbriqués dépassée (`MAX_INCLUDE_DEPTH`,
+    /// voir plus bas). Techniquement, la garde couvre deux symptômes
+    /// identiques (une récursion qui ne termine jamais) : une imbrication
+    /// volontaire excessive et un cycle A→B→A entre mixins. Mais la raison
+    /// d'être de la limite n'est pas seulement technique : c'est un choix
+    /// de design assumé pour Marius — un mixin qui en inclut un autre qui
+    /// en inclut un autre (etc.) au-delà de 3 niveaux devient illisible et
+    /// difficile à maintenir dans une feuille de style. La limite force à
+    /// aplatir ou restructurer plutôt qu'à empiler.
+    MixinRecursionLimit {
+        name: String,
+        file: PathBuf,
+    },
+    /// Même nom de mixin déclaré dans deux fichiers du graphe `@import` — pas
+    /// de scoping par import dans ce dialecte (cf. `MixinDef`), donc pas de
+    /// "dernier gagnant" silencieux possible ici : erreur dure avec les deux
+    /// emplacements pour un diagnostic actionnable.
+    DuplicateMixin {
+        name: String,
+        first_file: PathBuf,
+        redefined_in: PathBuf,
+    },
 }
 
 impl fmt::Display for MvarError {
@@ -286,6 +347,51 @@ impl fmt::Display for MvarError {
             }
             MvarError::ForLoop(e) => write!(f, "{e}"),
             MvarError::Comment(e) => write!(f, "{e}"),
+            MvarError::UnknownMixin {
+                name,
+                file,
+                suggestion,
+            } => {
+                write!(
+                    f,
+                    "styles (mixins) : @include {name} référence un mixin non déclaré (fichier {})",
+                    file.display()
+                )?;
+                match suggestion {
+                    Some(hint) => write!(f, " — {hint}"),
+                    None => write!(
+                        f,
+                        " — aucun mixin proche dans le registre ; vérifiez l'orthographe \
+                         et la présence de la déclaration `@mixin {name} {{ ... }}`."
+                    ),
+                }
+            }
+            MvarError::MalformedMixin { file, detail } => {
+                write!(f, "styles (mixins) : {} : {detail}", file.display())
+            }
+            MvarError::MixinRecursionLimit { name, file } => write!(
+                f,
+                "styles (mixins) : profondeur d'expansion @include dépassée (max \
+                 {MAX_INCLUDE_DEPTH} niveaux) en résolvant '{name}' (fichier {}) — \
+                 soit un cycle entre mixins, soit une imbrication réellement trop \
+                 profonde ; dans les deux cas, un design CSS pour Marius ne doit pas \
+                 se perdre dans des mixins empilés sur plus de {MAX_INCLUDE_DEPTH} \
+                 niveaux : aplatissez ou restructurez les mixins concernés plutôt \
+                 que d'ajouter un niveau d'@include supplémentaire",
+                file.display()
+            ),
+            MvarError::DuplicateMixin {
+                name,
+                first_file,
+                redefined_in,
+            } => write!(
+                f,
+                "styles (mixins) : @mixin {name} déclaré deux fois — d'abord dans {}, \
+                 puis redéfini dans {} (pas de scoping par import dans ce dialecte, \
+                 chaque nom de mixin doit être unique dans tout le graphe)",
+                first_file.display(),
+                redefined_in.display()
+            ),
         }
     }
 }
@@ -319,6 +425,26 @@ fn suggest_variable(name: &str, registry: &VariableRegistry) -> Option<String> {
         .filter(|(_, dist)| *dist <= 2)
         .min_by_key(|(_, dist)| *dist)
         .map(|(k, _)| format!("vouliez-vous dire ${k} ?"))
+}
+
+/// Suggestion pour un `@include <nom>` non résolu — même heuristique à deux
+/// niveaux de confiance que `suggest_variable` ci-dessus (casse différente en
+/// priorité, distance de Levenshtein bornée à 2 sinon), adaptée au dialecte
+/// des mixins (pas de préfixe `$`).
+fn suggest_mixin(name: &str, registry: &MixinRegistry) -> Option<String> {
+    if let Some(exact_ci) = registry.keys().find(|k| k.eq_ignore_ascii_case(name)) {
+        return Some(format!(
+            "la casse ne correspond pas : le registre contient {exact_ci}, pas {name} \
+             (la casse est sensible, comportement assumé)"
+        ));
+    }
+
+    registry
+        .keys()
+        .map(|k| (k, levenshtein(name, k)))
+        .filter(|(_, dist)| *dist <= 2)
+        .min_by_key(|(_, dist)| *dist)
+        .map(|(k, _)| format!("vouliez-vous dire @include {k} ?"))
 }
 
 /// Distance de Levenshtein — classique, deux lignes de tableau roulées
@@ -495,16 +621,20 @@ fn strip_css_comments(input: &str) -> Result<String, CssCommentError> {
 /// une seule ligne. Aucun `.mcss` réel ne contredit cette hypothèse au
 /// moment de l'écriture (cf. Handoff §1 : aucun fichier de test n'utilise
 /// encore de variables).
-fn build_variable_registry(entry: &Path) -> Result<VariableRegistry, Box<dyn std::error::Error>> {
-    let mut registry = VariableRegistry::new();
+fn build_registries(
+    entry: &Path,
+) -> Result<(VariableRegistry, MixinRegistry), Box<dyn std::error::Error>> {
+    let mut var_registry = VariableRegistry::new();
+    let mut mixin_registry = MixinRegistry::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
-    walk_variable_graph(entry, &mut registry, &mut visited)?;
-    Ok(registry)
+    walk_variable_graph(entry, &mut var_registry, &mut mixin_registry, &mut visited)?;
+    Ok((var_registry, mixin_registry))
 }
 
 fn walk_variable_graph(
     path: &Path,
     registry: &mut VariableRegistry,
+    mixin_registry: &mut MixinRegistry,
     visited: &mut HashSet<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Clé de dédoublonnage canonique — un même partial importé deux fois
@@ -530,6 +660,7 @@ fn walk_variable_graph(
         .map_err(|e| format!("styles (variables) : {} : {e}", path.display()))?;
 
     extract_declarations(&text, registry);
+    extract_mixin_declarations(&text, mixin_registry, path)?;
 
     for import_rel in extract_import_targets(&text) {
         // Même règle de résolution que `FileProvider::resolve` (spec :
@@ -538,7 +669,7 @@ fn walk_variable_graph(
         // accès à `Bundler`, mais doit rester cohérente avec sa
         // convention de résolution de chemin.
         let import_path = path.with_file_name(&import_rel);
-        walk_variable_graph(&import_path, registry, visited)?;
+        walk_variable_graph(&import_path, registry, mixin_registry, visited)?;
     }
 
     Ok(())
@@ -658,6 +789,81 @@ fn extract_import_targets(text: &str) -> Vec<String> {
     targets
 }
 
+/// Extrait les définitions `@mixin nom { corps }` d'un texte source (Passe
+/// A, lecture seule). Scan par octets, comptage d'accolades pour isoler le
+/// corps — pas une extraction ligne-à-ligne comme `extract_declarations` :
+/// le corps d'un mixin contient des règles CSS imbriquées avec leurs
+/// propres `{`/`}` (cf. `range.mcss`, fourni en session), aucune frontière
+/// de ligne fiable n'existe ici.
+///
+/// Hypothèse de grammaire posée explicitement (confirmée par `range.mcss`) :
+/// un `@mixin` est déclaré au niveau racine du fichier, jamais imbriqué dans
+/// une règle ou dans un `@for` — aucun cas fourni ne contredit cette
+/// hypothèse à ce stade.
+///
+/// Erreur dure sur toute redéfinition d'un nom déjà présent dans le
+/// registre — voir le commentaire sur `MixinDef` : pas de "dernier gagnant"
+/// silencieux possible pour un mixin, contrairement à `extract_declarations`
+/// pour les `$variables`.
+fn extract_mixin_declarations(
+    text: &str,
+    registry: &mut MixinRegistry,
+    file: &Path,
+) -> Result<(), MvarError> {
+    let bytes = text.as_bytes();
+    let mut cursor = 0usize;
+
+    while let Some(rel) = text[cursor..].find("@mixin") {
+        let mixin_start = cursor + rel;
+
+        let mut i = mixin_start + "@mixin".len();
+        i = skip_ws(bytes, i);
+
+        let (name, next) = parse_ident(text, i).ok_or_else(|| MvarError::MalformedMixin {
+            file: file.to_path_buf(),
+            detail: format!("nom de mixin attendu après '@mixin' (position {i})"),
+        })?;
+        i = skip_ws(bytes, next);
+
+        i = expect_byte(bytes, i, b'{').ok_or_else(|| MvarError::MalformedMixin {
+            file: file.to_path_buf(),
+            detail: format!("'{{' attendu pour ouvrir le corps du mixin '{name}' (position {i})"),
+        })?;
+
+        // Même convention que `expand_for_loops` : `i` pointe déjà juste
+        // après la '{' consommée par `expect_byte` (qui retourne `pos + 1`),
+        // donc `body_start` désigne le premier octet du corps, pas
+        // l'accolade elle-même — cohérent avec l'appel identique plus bas
+        // dans ce fichier.
+        let body_start = i;
+        let body_end =
+            find_matching_brace(bytes, body_start).ok_or_else(|| MvarError::MalformedMixin {
+                file: file.to_path_buf(),
+                detail: format!("accolade fermante manquante pour le mixin '{name}'"),
+            })?;
+        let body = text[body_start..body_end].to_string();
+
+        if let Some(existing) = registry.get(&name) {
+            return Err(MvarError::DuplicateMixin {
+                name,
+                first_file: existing.declared_in.clone(),
+                redefined_in: file.to_path_buf(),
+            });
+        }
+        registry.insert(
+            name,
+            MixinDef {
+                body,
+                declared_in: file.to_path_buf(),
+            },
+        );
+
+        cursor = body_end + 1;
+    }
+
+    Ok(())
+}
+
 /// Substitue chaque `$nom` par sa valeur résolue et purge les lignes de
 /// déclaration (grammaire CSS fermée, §10.3 de la spec — un token `$nom`
 /// non substitué ferait échouer `lightningcss` de toute façon ; le purger
@@ -729,6 +935,140 @@ fn substitute_line(
         }
     }
 
+    Ok(out)
+}
+
+// =============================================================================
+// Phase 3 (mixins) — Purge `@mixin` / expansion `@include` (Passe B).
+//
+// Le registre est déjà figé par la Passe A (`extract_mixin_declarations`,
+// voir plus haut) avant que `Bundler` ne lise quoi que ce soit — même piège
+// d'ordre inter-fichiers que pour les `$variables` (un mixin défini dans un
+// partial importé, utilisé dans le fichier d'entrée). Le point d'ancrage
+// Passe B reste unique (`MvarProvider::read`), ordre à l'intérieur :
+//
+//   1. strip_css_comments      — déjà en place, donnée morte éliminée avant
+//                                 tout le reste.
+//   2. strip_mixin_definitions — retire les blocs `@mixin { ... }` du texte
+//                                 (grammaire non reconnue par lightningcss),
+//                                 le corps est déjà capturé dans le registre.
+//   3. expand_includes         — remplace chaque `@include <nom>;` par le
+//                                 corps enregistré, récursivement si ce
+//                                 corps contient lui-même un `@include`.
+//   4. expand_for_loops        — inchangé, permet d'utiliser `@include` à
+//                                 l'intérieur d'un `@for` (ou l'inverse).
+//   5. substitute_and_purge    — inchangé, résout les `$vars` en dernier :
+//                                 celles présentes dans un corps de mixin
+//                                 sont donc évaluées dans le contexte
+//                                 d'injection, pas dans celui de déclaration.
+// =============================================================================
+
+/// Limite de profondeur d'expansion `@include` imbriqués. Techniquement,
+/// elle couvre à la fois une imbrication volontaire excessive et un cycle
+/// A→B→A entre mixins (les deux cas produisant le même symptôme : une
+/// récursion qui ne terminerait jamais sans cette garde) — mais ce n'est pas
+/// qu'une garde anti-cycle. Fixée à 3 par choix de design assumé pour
+/// Marius : au-delà, un mixin qui en inclut un autre qui en inclut un autre
+/// devient une chaîne d'indirections que personne ne veut suivre pour
+/// comprendre une règle CSS. La limite est volontairement stricte pour
+/// forcer à aplatir ou restructurer plutôt qu'à empiler.
+const MAX_INCLUDE_DEPTH: u32 = 3;
+
+/// Purge Passe B — retire les blocs `@mixin nom { ... }` du flux texte avant
+/// qu'il n'atteigne `lightningcss`. Même scan que `extract_mixin_declarations`
+/// (Passe A), réappliqué ici sur le texte réellement soumis au bundler ; le
+/// corps n'est cette fois pas conservé, seulement effacé — il a déjà été
+/// capturé dans le `MixinRegistry` au moment de la Passe A.
+fn strip_mixin_definitions(text: &str, file: &Path) -> Result<String, MvarError> {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+
+    while let Some(rel) = text[cursor..].find("@mixin") {
+        let mixin_start = cursor + rel;
+        out.push_str(&text[cursor..mixin_start]);
+
+        let mut i = mixin_start + "@mixin".len();
+        i = skip_ws(bytes, i);
+        let (name, next) = parse_ident(text, i).ok_or_else(|| MvarError::MalformedMixin {
+            file: file.to_path_buf(),
+            detail: format!("nom de mixin attendu après '@mixin' (position {i})"),
+        })?;
+        i = skip_ws(bytes, next);
+        i = expect_byte(bytes, i, b'{').ok_or_else(|| MvarError::MalformedMixin {
+            file: file.to_path_buf(),
+            detail: format!("'{{' attendu pour ouvrir le corps du mixin '{name}' (position {i})"),
+        })?;
+
+        let body_start = i;
+        let body_end =
+            find_matching_brace(bytes, body_start).ok_or_else(|| MvarError::MalformedMixin {
+                file: file.to_path_buf(),
+                detail: format!("accolade fermante manquante pour le mixin '{name}'"),
+            })?;
+
+        cursor = body_end + 1; // juste après la '}' fermante — le bloc entier disparaît
+    }
+
+    out.push_str(&text[cursor..]);
+    Ok(out)
+}
+
+/// Expansion Passe B des `@include <nom>;` — remplace chaque directive par
+/// le corps du mixin enregistré. Récursif : si le corps contient lui-même un
+/// `@include`, il est entièrement résolu AVANT d'être splicé dans le texte
+/// englobant — même principe que `expand_for_loops` (le corps isolé est
+/// réexaminé une seule fois, jamais après duplication/insertion).
+///
+/// `depth` compte les niveaux de nesting mixin-dans-mixin, pas le nombre de
+/// directives `@include` séquentielles au même niveau (celles-ci sont
+/// indépendantes, aucune ne fait progresser la profondeur). Appel initial
+/// depuis `MvarProvider::read` avec `depth = 0`.
+fn expand_includes(
+    text: &str,
+    mixins: &MixinRegistry,
+    file: &Path,
+    depth: u32,
+) -> Result<String, MvarError> {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+
+    while let Some(rel) = text[cursor..].find("@include") {
+        let include_start = cursor + rel;
+        out.push_str(&text[cursor..include_start]);
+
+        let mut i = include_start + "@include".len();
+        i = skip_ws(bytes, i);
+        let (name, next) = parse_ident(text, i).ok_or_else(|| MvarError::MalformedMixin {
+            file: file.to_path_buf(),
+            detail: format!("nom de mixin attendu après '@include' (position {i})"),
+        })?;
+        i = skip_ws(bytes, next);
+        i = expect_byte(bytes, i, b';').ok_or_else(|| MvarError::MalformedMixin {
+            file: file.to_path_buf(),
+            detail: format!("';' attendu après '@include {name}' (position {i})"),
+        })?;
+
+        let def = mixins.get(&name).ok_or_else(|| MvarError::UnknownMixin {
+            name: name.clone(),
+            file: file.to_path_buf(),
+            suggestion: suggest_mixin(&name, mixins),
+        })?;
+
+        if depth >= MAX_INCLUDE_DEPTH {
+            return Err(MvarError::MixinRecursionLimit {
+                name: name.clone(),
+                file: file.to_path_buf(),
+            });
+        }
+        let expanded_body = expand_includes(&def.body, mixins, file, depth + 1)?;
+        out.push_str(&expanded_body);
+
+        cursor = i;
+    }
+
+    out.push_str(&text[cursor..]);
     Ok(out)
 }
 
@@ -1024,6 +1364,7 @@ fn substitute_loop_variable(body: &str, var_name: &str, value: i64) -> String {
 /// `Drop` de `MvarProvider`, jamais retirés du `Vec` entre-temps.
 struct MvarProvider {
     registry: VariableRegistry,
+    mixins: MixinRegistry,
     outputs: Mutex<Vec<*mut String>>,
     // §1.A — contenu de remplacement pour le fichier d'entrée exclusivement
     // (chemin canonique + texte avec `@charset` déjà extrait par
@@ -1037,9 +1378,14 @@ struct MvarProvider {
 }
 
 impl MvarProvider {
-    fn new(registry: VariableRegistry, entry_override: Option<(PathBuf, String)>) -> Self {
+    fn new(
+        registry: VariableRegistry,
+        mixins: MixinRegistry,
+        entry_override: Option<(PathBuf, String)>,
+    ) -> Self {
         MvarProvider {
             registry,
+            mixins,
             outputs: Mutex::new(Vec::new()),
             entry_override,
         }
@@ -1071,14 +1417,20 @@ impl SourceProvider for MvarProvider {
             Some((entry, content)) if entry == file => content.clone(),
             _ => fs::read_to_string(file)?,
         };
-        // Ordre impératif, trois étapes : purge des commentaires D'ABORD
+        // Ordre impératif, cinq étapes : purge des commentaires D'ABORD
         // (donnée morte éliminée avant que quoi que ce soit d'autre ne la
-        // voie — voir "Phase 3 (préambule)" plus haut), déroulage des @for
-        // ENSUITE (élimine $i / $(i) sans toucher aux $vars globales),
-        // résolution du registre global EN DERNIER (voir "Phase 3
-        // (suite)" plus haut).
+        // voie — voir "Phase 3 (préambule)" plus haut), purge des blocs
+        // `@mixin` puis expansion des `@include` (voir "Phase 3 (mixins)"
+        // plus haut — le registre est déjà figé par la Passe A), déroulage
+        // des `@for` ENSUITE (élimine $i / $(i) sans toucher aux $vars
+        // globales, permet un `@include` à l'intérieur d'une boucle),
+        // résolution du registre `$vars` global EN DERNIER (voir "Phase 3
+        // (suite)" plus haut) — pour que les `$vars` présentes dans un corps
+        // de mixin soient évaluées dans le contexte d'injection.
         let stripped = strip_css_comments(&raw).map_err(MvarError::Comment)?;
-        let unrolled = expand_for_loops(&stripped).map_err(MvarError::ForLoop)?;
+        let mixins_purged = strip_mixin_definitions(&stripped, file)?;
+        let includes_expanded = expand_includes(&mixins_purged, &self.mixins, file, 0)?;
+        let unrolled = expand_for_loops(&includes_expanded).map_err(MvarError::ForLoop)?;
         let transformed = substitute_and_purge(&unrolled, &self.registry, file)?;
         let ptr = Box::into_raw(Box::new(transformed));
         self.outputs.lock().unwrap().push(ptr);
@@ -1174,19 +1526,22 @@ fn extract_charset(text: &str) -> (Option<String>, String) {
 /// visiteur déjà en place — la seule différence est la portée
 /// (`in_font_face` retiré), pas le moment.
 ///
-/// Pré-passe lexicale des commentaires, des variables `$` et des boucles
-/// `@for` (Phase 3) : dans `MvarProvider::read`, `strip_css_comments`
-/// d'abord (donnée morte éliminée avant tout le reste — un `$var`
-/// indéfinie ou un `@for` malformé À L'INTÉRIEUR d'un commentaire ne doit
-/// jamais faire échouer le build), puis `expand_for_loops` (élimine
-/// `@for`, local à chaque fichier, pas de piège d'ordre), puis résolution
-/// des `$nom` globaux via le `VariableRegistry` construit en amont par
-/// `build_variable_registry` (walk textuel du graphe `@import`, AVANT que
-/// `Bundler` ne lise quoi que ce soit — piège d'ordre inter-fichiers,
-/// celui-là bien réel, évité par cette séparation ; cette Passe A
-/// applique elle aussi `strip_css_comments` en premier, même raison). Voir
-/// les blocs de commentaires "Phase 3" plus haut dans ce fichier pour le
-/// raisonnement complet.
+/// Pré-passe lexicale des commentaires, des mixins `@mixin`/`@include`, des
+/// variables `$` et des boucles `@for` (Phase 3) : dans `MvarProvider::read`,
+/// `strip_css_comments` d'abord (donnée morte éliminée avant tout le reste —
+/// un `$var` indéfinie, un `@mixin` ou un `@for` malformé À L'INTÉRIEUR d'un
+/// commentaire ne doit jamais faire échouer le build), puis
+/// `strip_mixin_definitions` + `expand_includes` (purge des blocs `@mixin`,
+/// puis substitution des `@include` par le registre déjà figé), puis
+/// `expand_for_loops` (élimine `@for`, local à chaque fichier, pas de piège
+/// d'ordre), puis résolution des `$nom` globaux via le `VariableRegistry`
+/// construit en amont par `build_registries` (walk textuel du graphe
+/// `@import`, AVANT que `Bundler` ne lise quoi que ce soit — piège d'ordre
+/// inter-fichiers, celui-là bien réel, qui vaut aussi bien pour les
+/// `$variables` que pour les mixins, évité par cette séparation ; cette
+/// Passe A applique elle aussi `strip_css_comments` en premier, même
+/// raison). Voir les blocs de commentaires "Phase 3" plus haut dans ce
+/// fichier pour le raisonnement complet.
 ///
 /// Note de version — confirmé par compilation réelle (retour de session,
 /// `lightningcss = "=1.0.0-alpha.71"`) : `ParserOptions` se passe à
@@ -1204,7 +1559,7 @@ fn transform_css(
     // lise ne serait-ce que le fichier d'entrée (cf. commentaire Phase 3
     // ci-dessus — piège d'ordre si cette étape était fusionnée avec la
     // lecture individuelle de chaque fichier).
-    let var_registry = build_variable_registry(entry_path)?;
+    let (var_registry, mixin_registry) = build_registries(entry_path)?;
 
     // §1.A — extraction du `@charset` du fichier d'entrée AVANT tout
     // passage dans `Bundler`/`lightningcss`. Cause confirmée par lecture
@@ -1229,7 +1584,7 @@ fn transform_css(
     // Passe B — `Bundler` s'exécute normalement, mais chaque lecture de
     // fichier passe par `MvarProvider` : substitution + purge transparentes,
     // `Bundler` ne voit jamais un seul token `$`.
-    let provider = MvarProvider::new(var_registry, entry_override);
+    let provider = MvarProvider::new(var_registry, mixin_registry, entry_override);
     let parser_options = ParserOptions::default();
     let mut bundler = Bundler::new(&provider, None, parser_options);
     let mut stylesheet = bundler.bundle(entry_path).map_err(|e| {
@@ -1564,6 +1919,253 @@ mod tests {
         assert_eq!(
             expand_for_loops(".foo { color: red; }").unwrap(),
             ".foo { color: red; }"
+        );
+    }
+
+    // ── extract_mixin_declarations / strip_mixin_definitions / expand_includes
+    // (Phase 3, @mixin / @include) ───────────────────────────────────────────
+
+    fn mixin_registry_with(pairs: &[(&str, &str)]) -> MixinRegistry {
+        pairs
+            .iter()
+            .map(|(name, body)| {
+                (
+                    name.to_string(),
+                    MixinDef {
+                        body: body.to_string(),
+                        declared_in: PathBuf::from("test.mcss"),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Cas exact de `range.mcss` : le corps d'un mixin contient une règle
+    /// CSS "plate" (pas de nesting ici), mais la fonction doit rester
+    /// correcte même en présence d'accolades imbriquées dans le corps —
+    /// couvert par le test suivant.
+    #[test]
+    fn extract_mixin_declarations_captures_simple_body() {
+        let text = "@mixin range-block-thumb {\n  pointer-events: auto;\n}\n";
+        let mut registry = MixinRegistry::new();
+        extract_mixin_declarations(text, &mut registry, Path::new("range.mcss")).unwrap();
+        let def = registry.get("range-block-thumb").expect("mixin attendu");
+        assert_eq!(def.body, "\n  pointer-events: auto;\n");
+    }
+
+    /// Comptage d'accolades, pas de recherche de la première `}` : un corps
+    /// de mixin contenant une règle imbriquée ne doit pas être tronqué
+    /// prématurément.
+    #[test]
+    fn extract_mixin_declarations_body_with_nested_braces_is_captured_whole() {
+        let text = "@mixin card { & .inner { color: red; } }";
+        let mut registry = MixinRegistry::new();
+        extract_mixin_declarations(text, &mut registry, Path::new("test.mcss")).unwrap();
+        let def = registry.get("card").expect("mixin attendu");
+        assert_eq!(def.body, " & .inner { color: red; } ");
+    }
+
+    #[test]
+    fn extract_mixin_declarations_two_mixins_are_both_captured() {
+        let text = "@mixin a { color: red; }\n@mixin b { color: blue; }";
+        let mut registry = MixinRegistry::new();
+        extract_mixin_declarations(text, &mut registry, Path::new("test.mcss")).unwrap();
+        assert_eq!(registry.len(), 2);
+        assert!(registry.contains_key("a"));
+        assert!(registry.contains_key("b"));
+    }
+
+    /// Décision de session : pas de scoping par import pour les mixins —
+    /// un nom redéfini où que ce soit dans le graphe est une erreur dure,
+    /// jamais un écrasement silencieux.
+    #[test]
+    fn extract_mixin_declarations_duplicate_name_is_hard_error() {
+        let text = "@mixin a { color: red; }\n@mixin a { color: blue; }";
+        let mut registry = MixinRegistry::new();
+        let err =
+            extract_mixin_declarations(text, &mut registry, Path::new("test.mcss")).unwrap_err();
+        assert!(matches!(err, MvarError::DuplicateMixin { name, .. } if name == "a"));
+    }
+
+    #[test]
+    fn extract_mixin_declarations_missing_name_is_malformed() {
+        let text = "@mixin { color: red; }";
+        let mut registry = MixinRegistry::new();
+        let err =
+            extract_mixin_declarations(text, &mut registry, Path::new("test.mcss")).unwrap_err();
+        assert!(matches!(err, MvarError::MalformedMixin { .. }));
+    }
+
+    #[test]
+    fn extract_mixin_declarations_unclosed_brace_is_malformed() {
+        let text = "@mixin a { color: red;";
+        let mut registry = MixinRegistry::new();
+        let err =
+            extract_mixin_declarations(text, &mut registry, Path::new("test.mcss")).unwrap_err();
+        assert!(matches!(err, MvarError::MalformedMixin { .. }));
+    }
+
+    #[test]
+    fn extract_mixin_declarations_text_without_mixin_leaves_registry_empty() {
+        let mut registry = MixinRegistry::new();
+        extract_mixin_declarations(
+            ".foo { color: red; }",
+            &mut registry,
+            Path::new("test.mcss"),
+        )
+        .unwrap();
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn strip_mixin_definitions_removes_block_keeps_surrounding_text() {
+        let text = "before\n@mixin a { color: red; }\nafter";
+        let out = strip_mixin_definitions(text, Path::new("test.mcss")).unwrap();
+        assert_eq!(out, "before\n\nafter");
+    }
+
+    #[test]
+    fn strip_mixin_definitions_removes_nested_braces_entirely() {
+        let text = ".x {} @mixin card { & .inner { color: red; } } .y {}";
+        let out = strip_mixin_definitions(text, Path::new("test.mcss")).unwrap();
+        assert_eq!(out, ".x {}  .y {}");
+    }
+
+    #[test]
+    fn strip_mixin_definitions_text_without_mixin_passes_through_unchanged() {
+        let text = ".foo { color: red; }";
+        assert_eq!(
+            strip_mixin_definitions(text, Path::new("test.mcss")).unwrap(),
+            text
+        );
+    }
+
+    #[test]
+    fn expand_includes_replaces_directive_with_registered_body() {
+        let registry = mixin_registry_with(&[("thumb", " color: red; ")]);
+        let out = expand_includes(
+            "& .a { @include thumb; }",
+            &registry,
+            Path::new("test.mcss"),
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, "& .a {  color: red;  }");
+    }
+
+    #[test]
+    fn expand_includes_unknown_mixin_is_hard_error() {
+        let registry = MixinRegistry::new();
+        let err =
+            expand_includes("@include ghost;", &registry, Path::new("test.mcss"), 0).unwrap_err();
+        assert!(matches!(err, MvarError::UnknownMixin { name, .. } if name == "ghost"));
+    }
+
+    #[test]
+    fn expand_includes_missing_semicolon_is_malformed() {
+        let registry = mixin_registry_with(&[("thumb", "color: red;")]);
+        let err =
+            expand_includes("@include thumb", &registry, Path::new("test.mcss"), 0).unwrap_err();
+        assert!(matches!(err, MvarError::MalformedMixin { .. }));
+    }
+
+    /// Cas exact de `range.mcss` : plusieurs `@include` séquentiels et
+    /// indépendants au même niveau — aucun ne doit faire progresser la
+    /// profondeur de récursion des autres.
+    #[test]
+    fn expand_includes_sequential_includes_are_independent() {
+        let registry = mixin_registry_with(&[("a", "1"), ("b", "2")]);
+        let out = expand_includes(
+            "@include a; @include b;",
+            &registry,
+            Path::new("test.mcss"),
+            0,
+        )
+        .unwrap();
+        // Le ';' de chaque directive `@include` est un terminateur de syntaxe
+        // consommé par le scan, pas un caractère littéral réémis — seul le
+        // corps enregistré (ici "1" et "2", sans ';' propre) apparaît en
+        // sortie.
+        assert_eq!(out, "1 2");
+    }
+
+    /// Un mixin dont le corps contient lui-même un `@include` doit être
+    /// résolu récursivement AVANT d'être splicé dans le texte englobant.
+    #[test]
+    fn expand_includes_nested_include_is_expanded_recursively() {
+        let registry =
+            mixin_registry_with(&[("outer", "@include inner;"), ("inner", "color: red;")]);
+        let out = expand_includes("@include outer;", &registry, Path::new("test.mcss"), 0).unwrap();
+        assert_eq!(out, "color: red;");
+    }
+
+    /// Cycle A -> B -> A : la profondeur augmente indéfiniment sans la
+    /// garde, `MAX_INCLUDE_DEPTH` doit interrompre avec une erreur explicite
+    /// plutôt qu'une récursion infinie.
+    #[test]
+    fn expand_includes_cycle_is_a_hard_error_not_infinite_recursion() {
+        let registry = mixin_registry_with(&[("a", "@include b;"), ("b", "@include a;")]);
+        let err = expand_includes("@include a;", &registry, Path::new("test.mcss"), 0).unwrap_err();
+        assert!(matches!(err, MvarError::MixinRecursionLimit { .. }));
+    }
+
+    /// Arbitrage de session : 3 niveaux de mixin-dans-mixin restent
+    /// acceptables (a inclut b, b inclut c, c ne contient plus d'@include) —
+    /// la limite ne doit pas gêner un usage raisonnable, seulement une
+    /// chaîne qui va au-delà.
+    #[test]
+    fn expand_includes_three_levels_of_nesting_succeeds() {
+        let registry =
+            mixin_registry_with(&[("a", "@include b;"), ("b", "@include c;"), ("c", "final")]);
+        let out = expand_includes("@include a;", &registry, Path::new("test.mcss"), 0).unwrap();
+        assert_eq!(out, "final");
+    }
+
+    /// Arbitrage de session (suite) : une chaîne d'un niveau de plus (a → b
+    /// → c → d, sans cycle) doit échouer précisément à ce 4e niveau, pas
+    /// avant, pas jamais. C'est le cas nominal que la limite `= 3` cible
+    /// vraiment : ni un cycle, ni une imbrication déraisonnable, juste une
+    /// chaîne de mixins un peu trop longue — le genre de design qu'on veut
+    /// justement décourager pour Marius (voir le commentaire sur
+    /// `MAX_INCLUDE_DEPTH` et `MvarError::MixinRecursionLimit`).
+    #[test]
+    fn expand_includes_fourth_level_of_nesting_is_recursion_limit_error() {
+        let registry = mixin_registry_with(&[
+            ("a", "@include b;"),
+            ("b", "@include c;"),
+            ("c", "@include d;"),
+            ("d", "final"),
+        ]);
+        let err = expand_includes("@include a;", &registry, Path::new("test.mcss"), 0).unwrap_err();
+        assert!(matches!(
+            err,
+            MvarError::MixinRecursionLimit { ref name, .. } if name == "d"
+        ));
+    }
+
+    /// Le message renvoyé à l'utilisateur ne doit pas s'arrêter au symptôme
+    /// technique ("profondeur dépassée") : il doit porter le pourquoi —
+    /// c'est un choix de design pour la lisibilité des feuilles de style
+    /// Marius, pas seulement une garde anti-boucle-infinie.
+    #[test]
+    fn expand_includes_recursion_limit_error_message_explains_the_design_rationale() {
+        let registry = mixin_registry_with(&[("a", "@include b;"), ("b", "@include a;")]);
+        let err = expand_includes("@include a;", &registry, Path::new("test.mcss"), 0).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("design CSS") && message.contains("aplatissez"),
+            "le message d'erreur devrait expliquer pourquoi la limite existe, pas seulement \
+             constater qu'elle est dépassée : {message}"
+        );
+    }
+
+    #[test]
+    fn expand_includes_text_without_include_passes_through_unchanged() {
+        let registry = MixinRegistry::new();
+        let text = ".foo { color: red; }";
+        assert_eq!(
+            expand_includes(text, &registry, Path::new("test.mcss"), 0).unwrap(),
+            text
         );
     }
 }
