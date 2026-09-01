@@ -89,6 +89,31 @@ $primary-color: #3366ff;
   immédiatement. Le message vous propose une correction si le nom
   ressemble à une variable existante (faute de frappe, casse différente).
 
+### La valeur est du texte libre, pas juste une couleur ou un nombre
+
+Une variable n'est pas typée : sa valeur est remplacée telle quelle,
+caractère pour caractère, partout où son nom apparaît. Ça inclut des
+symboles de comparaison — utile pour nommer des conditions de media query
+plutôt que de les recopier à chaque fois :
+
+```css
+/* media.mcss */
+$from-m: (width > 70em);
+$from-s-to-m: (50em < width <= 70em);
+```
+
+```css
+/* utilisation ailleurs dans le projet */
+@media ($from-m) {
+  .sidebar { display: block; }
+}
+```
+
+Après résolution, `@media $from-m { ... }` devient `@media (width > 70em)
+{ ... }`. Les parenthèses font partie de la valeur de la variable, pas une
+syntaxe spéciale du dialecte — c'est ce qui rend le résultat directement
+valide en `@media`.
+
 ## Boucles — `@for`
 
 Pour générer une série de règles répétitives :
@@ -162,3 +187,4 @@ Ce qu'il faut savoir sur les mixins :
 ---
 
 _Document créé le 31 août 2026_
+_Révisé le 2 septembre 2026_
