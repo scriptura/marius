@@ -1,6 +1,7 @@
 // crates/forge/db-forge/src/introspect.rs
 
 //! # marius-db-forge - introspect
+//!
 //! Requêtes SQLx d'introspection pg_catalog / information_schema / pg_stats.
 
 use sqlx::Row as _;
@@ -15,8 +16,8 @@ use marius_fragment_forge::{EscapePolicy, VarlenField};
 /// Colonnes dans l'ordre physique du heap (attnum ASC).
 ///
 /// ORDER BY attnum est l'invariant de Symétrie Mécanique : il garantit que
-/// l'ordre des champs dans {Name}StorageRow (#[repr(C)]) correspond exactement
-/// à l'ordre des colonnes dans le heap tuple PostgreSQL.
+/// l'ordre des champs dans {Name}StorageRow (#[repr(C)]) correspond à l'ordre
+/// des attributs de la relation PostgreSQL.
 pub async fn fetch_columns(
     pool: &sqlx::PgPool,
     schema: &str,

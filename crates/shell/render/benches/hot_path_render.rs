@@ -82,11 +82,11 @@ fn record_worst_case() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
     let aggressive = r#"<html> & "Marius" & 'Engine'</html>"#.repeat(6);
 
     let storage = ContentCoreStorageRow {
-        walsn: 0,
+        walsn: u64::MAX,
         published_at: i64::MIN,
         created_at: i64::MIN,
         modified_at: i64::MIN,
-        js_deps: 0,
+        js_deps: -1,
         document_id: i32::MIN,
         author_entity_id: i32::MIN,
         status: i16::MIN,
@@ -267,9 +267,11 @@ fn large_html_body() -> String {
 /// dans buf par construction (CONTRAT-implementation-projection-segmentee.md).
 fn record_segmented_large() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
     let storage = ContentCoreStorageRow {
+        walsn: 0,
         published_at: 1_700_000_000_000_000i64,
         created_at: 1_700_000_000_000_000i64,
         modified_at: 1_700_000_000_000_000i64,
+        js_deps: 0,
         document_id: 7i32,
         author_entity_id: 3i32,
         status: 1i16,

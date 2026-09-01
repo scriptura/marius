@@ -31,7 +31,12 @@ pub fn write_store_struct(out: &mut String, schema: &str, table: &str, columns: 
     writeln!(
         out,
         "/// Struct de stockage en mémoire contiguë pour {schema}.{table}.\n\
-         /// #[repr(C)] : layout bit-à-bit aligné sur le heap tuple PostgreSQL.\n\
+        /// #[repr(C)] : layout C déterministe des champs fixed-length.\n\
+        ///\n\
+        /// L'ordre des champs suit attnum ASC, conformément à l'ordre des attributs\n\
+        /// PostgreSQL. Le layout de cette struct n'inclut ni le header du heap tuple,\n\
+        /// ni le null bitmap PostgreSQL : StorageRow représente uniquement les valeurs\n\
+        /// fixed-length extraites du tuple.\n\
          /// Champs fixed-length uniquement. Nullable → sentinel (0 ou -1 selon type).\n\
          /// Varlena exclues : portées par VarlenOwned.\n\
          ///\n\
@@ -52,6 +57,7 @@ pub fn write_store_struct(out: &mut String, schema: &str, table: &str, columns: 
 
     for col in columns {
         let m = map_type(&col.sql_type);
+
         if m.is_fixed {
             let null_marker = if col.is_notnull { "" } else { " [sentinel]" };
             let pad = if col.name.len() < 20 {
@@ -60,7 +66,6 @@ pub fn write_store_struct(out: &mut String, schema: &str, table: &str, columns: 
                 String::new()
             };
 
-            // INTEGRATION PHASE 1.4 : bool n'est pas Pod-safe (un bit à 0x02 est invalide), substitution par u8
             let emit_type = if m.store_type == "bool" {
                 "u8"
             } else {
@@ -73,8 +78,12 @@ pub fn write_store_struct(out: &mut String, schema: &str, table: &str, columns: 
                 col.name, emit_type, pad, col.attnum, m.size_bytes, null_marker,
             )
             .unwrap();
-            layout_bytes += m.size_bytes;
+
             max_align = max_align.max(m.alignment);
+
+            // Simule le placement d'un champ selon #[repr(C)].
+            layout_bytes = layout_bytes.div_ceil(m.alignment) * m.alignment;
+            layout_bytes += m.size_bytes;
         } else {
             writeln!(
                 out,
@@ -85,8 +94,7 @@ pub fn write_store_struct(out: &mut String, schema: &str, table: &str, columns: 
         }
     }
 
-    // INTEGRATION PHASE 1.4 : Calcul et insertion du tail padding explicite
-    let padded_size = layout_bytes.div_ceil(max_align.max(1)) * max_align.max(1);
+    let padded_size = layout_bytes.div_ceil(max_align) * max_align;
     let tail_pad = padded_size - layout_bytes;
     if tail_pad > 0 {
         writeln!(
