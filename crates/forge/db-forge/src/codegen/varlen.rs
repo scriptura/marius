@@ -1,6 +1,7 @@
 // crates/forge/db-forge/src/codegen/varlen.rs
-//
+
 //! # marius-db-forge - varlen
+//!
 //! Génération de {Name}VarlenOwned.
 
 use std::fmt::Write as _;

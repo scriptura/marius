@@ -1,6 +1,7 @@
 // crates/forge/db-forge/src/codegen/mod.rs
-//
+
 //! # marius-db-forge - mod
+//!
 //! Génération des artefacts Rust par table.
 
 pub mod collector;

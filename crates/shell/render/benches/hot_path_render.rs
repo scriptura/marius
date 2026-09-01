@@ -1,22 +1,24 @@
 // crates/shell/render/benches/hot_path_render.rs
-// Micro-benchmarks Divan — pipeline de rendu Marius (timing pur).
-//
-// Ce binaire ne contient AUCUN allocateur instrumenté.
-// L'allocateur système est utilisé tel quel : les mesures de débit
-// (GB/s, items/s) ne subissent aucune perturbation liée à l'instrumentation.
-//
-// Pour la certification zéro-allocation, utiliser le binaire séparé :
-//   cargo bench -p marius-render --bench hot_path_certify
-//
-// ─── Granularités mesurées ────────────────────────────────────────────────
-//
-//   render/single/*           : coût d'un render() unique, buffer isolé.
-//   render/sequential/nominal : pipeline batch réel, données courtes.
-//   render/sequential/worst_case : pipeline batch réel, escape HTML saturé.
-//
-// ─── Exécution ────────────────────────────────────────────────────────────
-//
-//   cargo bench -p marius-render --bench hot_path_render
+
+//! # marius-render - hot_path_render
+//!
+//! bench de rendu du chemin critique
+//! Rendu zéro-allocation du pipeline de rendu Marius.
+//!
+//! Ce binaire ne contient AUCUN allocateur instrumenté.
+//! L'allocateur système est utilisé tel quel : les mesures de débit
+//! (GB/s, items/s) ne subissent aucune perturbation liée à l'instrumentation.
+//!
+//! Pour la certification zéro-allocation, utiliser le binaire séparé :
+//!   cargo bench -p marius-render --bench hot_path_certify
+//!
+//! ## Granularités mesurées :
+//!   render/single/*              : coût d'un render() unique, buffer isolé.
+//!   render/sequential/nominal    : pipeline batch réel, données courtes.
+//!   render/sequential/worst_case : pipeline batch réel, escape HTML saturé.
+//!
+//! ## Exécution :
+//! `cargo bench -p marius-render --bench hot_path_render`
 
 use divan::counter::{BytesCount, ItemsCount};
 use divan::{Bencher, black_box};
@@ -42,9 +44,11 @@ fn main() {
 /// Ratio de remplissage attendu : ~5-15% de TOTAL_CAP (conforme ADR-003).
 fn record_nominal() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
     let storage = ContentCoreStorageRow {
+        walsn: 0,
         published_at: 1_700_000_000_000_000i64,
         created_at: 1_700_000_000_000_000i64,
         modified_at: 1_700_000_000_000_000i64,
+        js_deps: 0,
         document_id: 42i32,
         author_entity_id: 7i32,
         status: 1i16,
@@ -78,9 +82,11 @@ fn record_worst_case() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
     let aggressive = r#"<html> & "Marius" & 'Engine'</html>"#.repeat(6);
 
     let storage = ContentCoreStorageRow {
+        walsn: 0,
         published_at: i64::MIN,
         created_at: i64::MIN,
         modified_at: i64::MIN,
+        js_deps: 0,
         document_id: i32::MIN,
         author_entity_id: i32::MIN,
         status: i16::MIN,

@@ -1,5 +1,5 @@
 // crates/forge/db-forge/src/codegen/mapping.rs
-//
+
 //! # marius-db-forge - mapping
 //!
 //! Mapping SQL → Rust : types, layout, sentinels.

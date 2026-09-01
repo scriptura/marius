@@ -1,6 +1,6 @@
 // crates/forge/db-forge/src/registry.rs
-//
-//! # marius-db-forge
+
+//! # marius-db-forge - registry
 //!
 //! `fetch_component_list()` lit `meta.containment_intent` + `meta.component_varlena_join`
 //! (Pivot 1). Ordre : `component_id ASC, join_slot_idx ASC` (déterminisme **INV-8**).

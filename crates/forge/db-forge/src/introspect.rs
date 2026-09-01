@@ -1,5 +1,5 @@
 // crates/forge/db-forge/src/introspect.rs
-//
+
 //! # marius-db-forge - introspect
 //! Requêtes SQLx d'introspection pg_catalog / information_schema / pg_stats.
 

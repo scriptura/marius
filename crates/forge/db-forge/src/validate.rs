@@ -1,5 +1,5 @@
 // crates/forge/db-forge/src/validate.rs
-//
+
 //! # marius-db-forge - validate
 //!
 //! Validation AOT de la densité mémoire (`intent_density_bytes`).

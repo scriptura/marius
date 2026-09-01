@@ -1,9 +1,6 @@
 # Archive : La Genèse du Paradigme de la Forge
 
 **Date :** Mai 2026
-
-**Auteur :** Architecte Marius
-
 **Objet :** Justification du passage d'une architecture logicielle à une architecture de fabrication.
 
 ---

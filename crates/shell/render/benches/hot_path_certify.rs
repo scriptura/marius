@@ -1,18 +1,20 @@
 // crates/shell/render/benches/hot_path_certify.rs
-// Certification zéro-allocation du pipeline de rendu Marius.
-//
-// Ce binaire déclare CountingAlloc comme allocateur global.
-// Chaque appel à alloc() incrémente un compteur atomique.
-// L'invariant certifié : render_batch_pure() n'alloue PAS pendant son exécution
-// une fois le buffer unique pré-chauffé (O(1) allocation initiale attendue).
-//
-// Ce binaire est intentionnellement séparé de hot_path_render pour garantir
-// que les mesures de timing ne subissent aucune perturbation liée aux
-// deux fetch_add atomiques par allocation introduits par CountingAlloc.
-//
-// ─── Exécution ────────────────────────────────────────────────────────────
-//
-//   cargo bench -p marius-render --bench hot_path_certify
+
+//! # marius-render - hot_path_certify
+//! bench de certification du chemin critique
+//! Certification zéro-allocation du pipeline de rendu Marius.
+//!
+//! Ce binaire déclare CountingAlloc comme allocateur global.
+//! Chaque appel à alloc() incrémente un compteur atomique.
+//! L'invariant certifié : render_batch_pure() n'alloue PAS pendant son exécution
+//! une fois le buffer unique pré-chauffé (O(1) allocation initiale attendue).
+//!
+//! Ce binaire est intentionnellement séparé de hot_path_render pour garantir
+//! que les mesures de timing ne subissent aucune perturbation liée aux
+//! deux fetch_add atomiques par allocation introduits par CountingAlloc.
+//!
+//! ## Exécution :
+//! `cargo bench -p marius-render --bench hot_path_certify`
 
 mod counting_alloc;
 use counting_alloc::CountingAlloc;
@@ -130,9 +132,11 @@ fn large_html_body() -> String {
 /// implementation-projection-segmentee.md.
 fn record_segmented_large() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
     let storage = ContentCoreStorageRow {
+        walsn: 0,
         published_at: 1_700_000_000_000_000i64,
         created_at: 1_700_000_000_000_000i64,
         modified_at: 1_700_000_000_000_000i64,
+        js_deps: 0,
         document_id: 7i32,
         author_entity_id: 3i32,
         status: 1i16,

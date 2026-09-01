@@ -1,6 +1,7 @@
 // crates/forge/db-forge/src/codegen/row.rs
-//
+
 //! # marius-db-forge - row
+//!
 //! Génération de {Name}Row : struct de désérialisation sqlx.
 
 use std::fmt::Write as _;

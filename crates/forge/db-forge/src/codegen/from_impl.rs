@@ -1,6 +1,7 @@
 // crates/forge/db-forge/src/codegen/from_impl.rs
-//
+
 //! # marius-db-forge - from_impl
+//!
 //! Génération de From<{Name}Row> for {Name}StorageRow.
 
 use std::fmt::Write as _;

@@ -1,5 +1,7 @@
 # Commandes d'installation sur Ubuntu
 
+## Build base de données
+
 ```shell
 # DDL, initialisation de la base de données
 # À lancer depuis la racine du dossier 'db'
@@ -10,7 +12,6 @@ Alternative connexion :
 ```shell
 psql "postgresql://postgres:loki@localhost/postgres" -f db/master_init.sql
 ```
-
 
 ```shell
 # On injecte des données de test dans la base 'marius' déjà créée
@@ -29,6 +30,30 @@ sudo -u postgres psql -p 5433 -d marius -c "ANALYZE;"
 sudo -u postgres psql -p 5433 -d marius -c "SELECT * FROM meta.v_master_health_audit;"
 ```
 
+## Build de base
+
+```shell
+cargo fmt
+```
+
+```shell
+cargo build
+```
+
+```shell
+cargo clippy
+```
+
+```shell
+cargo test
+```
+
+```shell
+cargo check --all-targets --all-features
+```
+
+## Build des assets statiques
+
 ```shell
 # Si changement des assets
 cargo run --release --bin marius-assets -- ./assets/default
@@ -37,6 +62,9 @@ cargo run --release --bin marius-assets -- ./assets/default
 ```shell
 # Compiler
 cargo run --bin marius-dump
+```
+
+## Démarrage serveur
 
 ```shell
 # Lancer le serveur
