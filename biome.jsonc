@@ -1,0 +1,10 @@
+{
+	"files": {
+		"ignore": [
+			// Neutralise le parser CSS de Biome sur le DSL maison (mcss) pour empêcher l'échec du build
+			"**/*.mcss",
+			// Exclut les assets statiques et binaires du pipeline d'analyse AST
+			"assets/**/styles/**"
+		]
+	}
+}

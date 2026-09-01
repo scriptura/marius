@@ -31,6 +31,8 @@
 */
 
 /* Variables MCSS */
+
+/* Vecteurs ascendants (Mobile First) */
 $from-xs: (width > 35em);
 $from-s: (width > 50em);
 $from-m: (width > 70em);

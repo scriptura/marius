@@ -35,13 +35,12 @@
 
   $demoColorDeg: 15;
   $demoColorDeviation: 7;
+
   @for $i from 1 to 15 {
     & > :nth-child($(i)n) {
-      background-color: hsl(
-        calc($i * $demoColorDeviation - $demoColorDeviation + $demoColorDeg),
-        100%,
-        50%
-      );
+      background-color: hsl(calc($i * $demoColorDeviation - $demoColorDeviation + $demoColorDeg),
+          100%,
+          50%);
     }
   }
 
@@ -49,6 +48,7 @@
     background-color: var(--colorG27);
   }
 }
+
 .demo-counter > * {
   counter-increment: div;
 
@@ -89,11 +89,9 @@
     width: 100%;
     max-width: 20em;
     aspect-ratio: 1/1;
-    background-image: linear-gradient(
-      -135deg,
-      var(--colorA005),
-      transparent 50%
-    );
+    background-image: linear-gradient(-135deg,
+        var(--colorA005),
+        transparent 50%);
     background-repeat: no-repeat;
     background-position: 100% 0%;
     pointer-events: none;
@@ -112,22 +110,27 @@
     background-color: var(--color1);
     border-radius: var(--r2);
     transition: all 0.3s ease-in-out;
+
     &:hover {
       background-color: var(--color5);
+
       & * {
         color: var(--colorW);
       }
     }
   }
+
   & svg {
     font-size: 2em;
   }
+
   & rt {
     font-size: 0.8em;
     text-align: center;
     color: var(--colorG38);
   }
 }
+
 /*
 $size-s: 30em;
 $size-m: 48em;

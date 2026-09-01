@@ -40,13 +40,13 @@
   }
 }
 
-@container grid (width <= 35em) {
+@container grid ($to-xs) {
   .XS-column2 {
     column-count: 2;
   }
 }
 
-@container grid (width > 35em) {
+@container grid ($from-xs) {
   .column2,
   .column3,
   .column4,
@@ -60,7 +60,7 @@
   }
 }
 
-@container grid (width > 50em) {
+@container grid ($from-s) {
   .column3,
   .column4 {
     column-count: 3;
@@ -76,7 +76,7 @@
   }
 }
 
-@container grid (width > 70em) {
+@container grid ($from-m) {
   .column4 {
     column-count: 4;
   }
