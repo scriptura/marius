@@ -61,14 +61,14 @@
   margin-block-start: var(--spacing-lg);
 }
 
-@container grid (width <= 35em) {
+@container grid ($to-xs) {
   .xs-grid-auto {
     /* @todo Valeur arbitraire à redéfinir. */
     grid-template-columns: repeat(auto-fit, minmax(var(--xs-size-column, 11em), 1fr));
   }
 }
 
-@container grid (width > 35em) {
+@container grid ($from-xs) {
   .grid2,
   .grid3,
   .grid4 {
@@ -76,20 +76,20 @@
   }
 }
 
-@container grid (width > 50em) {
+@container grid ($from-s) {
   .grid3,
   .grid4 {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
-@container grid (width > 70em) {
+@container grid ($from-m) {
   .grid4 {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
-@container grid (width > 35em) {
+@container grid ($from-xs) {
   /* @todo En attendant avec impatience le support de "grid-column: span minmax(1, 2)" */
   .c2,
   .c3,
@@ -106,20 +106,20 @@
   }
 }
 
-@container grid (width > 50em) {
+@container grid ($from-s) {
   .c3,
   .c4 {
     grid-column: span 3;
   }
 }
 
-@container grid (width > 70em) {
+@container grid ($from-m) {
   .c4 {
     grid-column: span 4;
   }
 }
 
-@container grid (35em < width <= 50em) {
+@container grid ($from-xs-to-s) {
   .s-c1 {
     grid-column: span 1;
   }
@@ -129,7 +129,7 @@
   }
 }
 
-@container grid (50em < width <= 70em) {
+@container grid ($from-s-to-m) {
   .m-c1 {
     grid-column: span 1;
   }
@@ -151,13 +151,13 @@
   grid-row: span 4;
 }
 
-@container grid (width > 35em) {
+@container grid ($from-xs) {
   :root .xs-grid2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-@container grid (35em < width <= 50em) {
+@container grid ($from-xs-to-s) {
   :root .s-grid1 {
     grid-template-columns: repeat(1, minmax(0, 1fr));
   }
@@ -167,7 +167,7 @@
   }
 }
 
-@container grid (50em < width <= 70em) {
+@container grid ($from-s-to-m) {
   :root .m-grid1 {
     grid-template-columns: repeat(1, minmax(0, 1fr));
   }
@@ -185,7 +185,7 @@
   }
 }
 
-@container grid (70em < width <= 92em) {
+@container grid ($from-m-to-l) {
   :root .l-grid1 {
     grid-template-columns: repeat(1, minmax(0, 1fr));
   }
@@ -203,7 +203,7 @@
   }
 }
 
-@container grid (width > 92em) {
+@container grid ($from-l) {
   :root .xl-grid2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -240,19 +240,19 @@
   order: var(--o, -1);
 }
 
-@container grid (width <= 35em) {
+@container grid ($to-xs) {
   .xs-order {
     order: var(--o, -1);
   }
 }
 
-@container grid (35em < width <= 50em) {
+@container grid ($from-xs-to-s) {
   .s-order {
     order: var(--o, -1);
   }
 }
 
-@container grid (50em < width <= 70em) {
+@container grid ($from-s-to-m) {
   .m-order {
     order: var(--o, -1);
   }
