@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-08-31 22:19:16
+**Généré le:** 2026-09-01 23:04:17
 
 ## Racine du Workspace
 
@@ -233,7 +233,7 @@
 │   ├── runtime-lifecycle-guide.md
 │   ├── scenario-adding-a-script-or-library.md
 │   ├── scenario-adding-varlena-field.md
-│   ├── scripts-libraries-capabilities-frontend-guide.md
+│   ├── scripts-libraries-capabilities-frontend-guide-v2.md
 │   ├── styles-mcss-guide.md
 │   └── terminal-memo-cmd.md
 ├── handoffs
@@ -264,29 +264,29 @@
 │   ├── towards-total-physical-symmetry.md
 │   └── trade-off.md
 ├── reflexivity
+│   ├── genesis-of-the-forge-paradigm.md
 │   ├── when-architecture-ceases-to-be-a-plan-and-becomes-an-instrument-of-discovery.md
 │   └── why-marius-could-only-emerge-outside-the-tech-world.md
-├── specifications
-│   ├── dependances-mode-page
-│   │   ├── core-system-blueprint.md
-│   │   ├── doc1-parser-mode-page.md
-│   │   ├── doc2-linker-lowering.md
-│   │   ├── doc3-orchestration-build-rs.md
-│   │   ├── graphe-dependances-mode-page.md
-│   │   └── mode-page-implementation-roadmap.md
-│   ├── db-forge-roadmap.md
-│   ├── db-forge-specification.md
-│   ├── marius-assets-roadmap.md
-│   ├── marius-assets-specification.md
-│   ├── marius-compilateur-projections-html-roadmap.md
-│   ├── marius-compilateur-projections-html-specification.md
-│   ├── marius-merge-rcu-specification-roadmap.md
-│   ├── marius-render-shell-roadmap.md
-│   ├── marius-render-shell-specification.md
-│   ├── orchestration-main-roadmap.md
-│   ├── orchestration-main-specification.md
-│   └── provisioning-projection-specification.md
-└── memento.md
+└── specifications
+    ├── dependances-mode-page
+    │   ├── core-system-blueprint.md
+    │   ├── doc1-parser-mode-page.md
+    │   ├── doc2-linker-lowering.md
+    │   ├── doc3-orchestration-build-rs.md
+    │   ├── graphe-dependances-mode-page.md
+    │   └── mode-page-implementation-roadmap.md
+    ├── db-forge-roadmap.md
+    ├── db-forge-specification.md
+    ├── marius-assets-roadmap.md
+    ├── marius-assets-specification.md
+    ├── marius-compilateur-projections-html-roadmap.md
+    ├── marius-compilateur-projections-html-specification.md
+    ├── marius-merge-rcu-specification-roadmap.md
+    ├── marius-render-shell-roadmap.md
+    ├── marius-render-shell-specification.md
+    ├── orchestration-main-roadmap.md
+    ├── orchestration-main-specification.md
+    └── provisioning-projection-specification.md
 
 17 directories, 89 files
 ```

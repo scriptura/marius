@@ -28,8 +28,8 @@ use marius_db_forge::{
 };
 
 use marius_fragment_forge::{
-    AssetLookup, FlatPageToken, PageArena, SchemaIndex, TemplateMetrics, VarlenField,
-    collect_blocks, collect_static_refs, detect_extends, extract_static_class_tokens,
+    AssetLookup, FlatPageToken, PageArena, SchemaIndex, StaticMarkerFacts, TemplateMetrics,
+    VarlenField, collect_blocks, collect_static_refs, detect_extends, extract_static_marker_facts,
     generate_aot_snippet, generate_segmented_snippet, hoist_and_dedupe_scripts, link, lower,
     parse_page_tokens, parse_tokens, relative_path_for_include_str, resolve_and_measure, scan,
     splice_hoisted_scripts, validate_ast,
@@ -65,9 +65,11 @@ const MODULES_PLACEHOLDER: &str = "<!-- MARIUS_MODULES -->";
 /// depuis `crates/marius-assets/src/config.rs` plutôt que partagée : même
 /// interdiction de couplage de types Rust entre `marius-assets` et les
 /// crates de la Forge que pour `suggest_asset_key`/`levenshtein` ci-dessus
-/// (Roadmap `marius-assets` §2.1). `markers` est déserialisé pour validation
-/// (non-vide) mais n'entre dans aucun codegen ici — sa consommation est
-/// exclusivement SQL (`compute_js_deps`, chantier séparé).
+/// (Roadmap `marius-assets` §2.1). `markers` est désérialisé brut ici
+/// (`Vec<String>`) puis parsé en `MarkerPredicate` par `parse_marker` dans
+/// `validate_capabilities` — seule sa consommation DYNAMIQUE (bitset
+/// `content.core.js_deps`) reste exclusivement SQL (`compute_js_deps`,
+/// chantier séparé, non touché ici).
 #[derive(Deserialize)]
 struct CapabilityConfig {
     entry: String,
@@ -99,19 +101,152 @@ struct ThemeTomlScriptsOnly {
     scripts: ScriptsSection,
 }
 
+/// Représentation interne d'un marker après parsing AOT — sous-ensemble
+/// fermé inspiré des sélecteurs CSS (session « généralisation markers »),
+/// quatre formes atomiques, jamais de combinator ni de sélecteur composé.
+/// Chaque variante est un test de présence isolé, jamais combinable entre
+/// elles au sein d'un même marker.
+///
+/// Breaking change assumé : l'ancienne syntaxe bare implicite (`markers =
+/// ["carousel-embed"]` interprété comme une classe) n'existe plus. Un bare
+/// token est désormais TOUJOURS `Element` — aucune whitelist HTML, la
+/// responsabilité du nom pertinent appartient à l'intégrateur.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MarkerPredicate {
+    /// `.nom` — présence de la classe `nom`.
+    Class(String),
+    /// `#nom` — présence de l'id `nom`.
+    Id(String),
+    /// `[data-nom]` — présence de l'attribut `data-nom`, valeur jamais
+    /// considérée. Restreint aux attributs `data-*` : `class`/`id`
+    /// possèdent déjà leurs formes dédiées, aucun besoin d'un attribut
+    /// générique (`[href]`, `[role]`, ...) à ce stade.
+    Attribute(String),
+    /// Bare token — présence d'un élément `<nom>` littéral. Aucune
+    /// whitelist : un custom element est accepté à égalité avec un élément
+    /// HTML standard.
+    Element(String),
+}
+
+/// Parse un marker brut (`theme.toml`) vers sa forme typée — échec dur,
+/// jamais un repli implicite vers une forme par défaut. Appelé une seule
+/// fois par marker, dans `validate_capabilities`, jamais recalculé plus
+/// tard (même discipline que la résolution `entry`/`deps`).
+///
+/// Grammaire volontairement minimale et fermée — voir doc de
+/// `MarkerPredicate` pour le périmètre exact. Combinators, sélecteurs
+/// composés, pseudo-classes/pseudo-éléments et comparateurs de valeur
+/// d'attribut sont HORS PÉRIMÈTRE et rejetés ici avec un message explicite,
+/// jamais silencieusement ignorés ou réinterprétés.
+fn parse_marker(raw: &str) -> Result<MarkerPredicate, String> {
+    if raw.is_empty() {
+        return Err("marker vide".to_string());
+    }
+    if raw.chars().any(|c| c.is_whitespace()) {
+        return Err(format!(
+            "marker {raw:?} : espace interne interdit — une forme atomique ne peut jamais en \
+             contenir (rejette notamment tout sélecteur composé du type \"main .tabs\")"
+        ));
+    }
+
+    if let Some(rest) = raw.strip_prefix('.') {
+        return parse_marker_ident_body(raw, rest, "Class").map(MarkerPredicate::Class);
+    }
+    if let Some(rest) = raw.strip_prefix('#') {
+        return parse_marker_ident_body(raw, rest, "Id").map(MarkerPredicate::Id);
+    }
+    if raw.starts_with('[') {
+        let inner = raw
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .ok_or_else(|| {
+                format!(
+                    "marker {raw:?} : forme [data-*] malformée — crochet fermant absent, ou \
+                     contenu après ']'"
+                )
+            })?;
+        if inner.contains('=') {
+            return Err(format!(
+                "marker {raw:?} : valeur d'attribut non supportée — un marker [data-*] teste \
+                 uniquement la présence de l'attribut, jamais sa valeur (comparateurs =, ^=, $=, \
+                 *=, ~=, |= tous hors périmètre)"
+            ));
+        }
+        if !inner.starts_with("data-") || inner.len() == "data-".len() {
+            return Err(format!(
+                "marker {raw:?} : seuls les attributs 'data-*' non vides sont supportés — \
+                 'class'/'id' possèdent déjà leurs formes dédiées ('.'/'#'), aucun attribut \
+                 générique n'est accepté ici"
+            ));
+        }
+        let suffix = &inner["data-".len()..];
+        if !suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!(
+                "marker {raw:?} : nom d'attribut data-* invalide — lettres, chiffres, '-', '_' \
+                 uniquement après 'data-'"
+            ));
+        }
+        return Ok(MarkerPredicate::Attribute(inner.to_string()));
+    }
+    if raw.ends_with(']') {
+        return Err(format!(
+            "marker {raw:?} : ']' rencontré sans '[' correspondant en tête"
+        ));
+    }
+
+    if !raw.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return Err(format!(
+            "marker {raw:?} : aucune forme reconnue — formes valides : '.classe', '#id', \
+             '[data-*]', ou un nom d'élément commençant par une lettre (combinators, sélecteurs \
+             composés et pseudo-classes/éléments hors périmètre)"
+        ));
+    }
+    if raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        Ok(MarkerPredicate::Element(raw.to_string()))
+    } else {
+        Err(format!(
+            "marker {raw:?} : nom d'élément invalide — caractères autorisés après la lettre \
+             initiale : lettres, chiffres, '-'"
+        ))
+    }
+}
+
+/// Corps partagé du parsing pour `.classe` et `#id` — même charset, même
+/// contrainte de non-vacuité, seul le nom du prédicat change dans les
+/// messages d'erreur.
+fn parse_marker_ident_body(raw: &str, rest: &str, kind: &str) -> Result<String, String> {
+    if rest.is_empty() {
+        return Err(format!("marker {raw:?} : {kind} vide après le préfixe"));
+    }
+    if !rest
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "marker {raw:?} : {kind} contient un caractère non autorisé — lettres, chiffres, \
+             '-', '_' uniquement"
+        ));
+    }
+    Ok(rest.to_string())
+}
+
 /// Une capacité entièrement validée et résolue — bit, activation, URL,
 /// marqueurs — prête pour le lowering par template. Calculée UNE SEULE FOIS
 /// pour tout le build (`validate_capabilities`), jamais recalculée par
 /// template : c'est `lower_modules_for_template` qui la croise, à chaque
-/// appel, avec le HTML statique du template en cours.
+/// appel, avec les faits statiques du template en cours.
 struct CapabilityInfo {
     bit: i64,
     activation: String,
     url: String,
-    /// Marqueurs de classe déclenchant cette capacité — nécessaires ici
-    /// pour le scan statique (comparés à `extract_static_class_tokens`),
-    /// pas seulement pour la validation de non-vacuité.
-    markers: Vec<String>,
+    /// Marqueurs déjà PARSÉS (`parse_marker`, une seule fois ici) —
+    /// nécessaires pour le scan statique (comparés aux quatre ensembles de
+    /// `StaticMarkerFacts`), pas seulement pour la validation de
+    /// non-vacuité. Jamais une chaîne brute au-delà de cette structure.
+    markers: Vec<MarkerPredicate>,
     /// Dépendances de chargement déjà résolues (clé canonique, URL hachée,
     /// mode de chargement) — résolution faite UNE SEULE FOIS ici, jamais
     /// recalculée par template (même discipline que `url` ci-dessus).
@@ -579,6 +714,26 @@ fn validate_capabilities(
             continue;
         }
 
+        // Parsing AOT de chaque marker brut vers sa forme typée
+        // (`MarkerPredicate`) — échec dur et explicite par marker malformé,
+        // jamais un repli implicite. Tous les markers d'une capacité sont
+        // validés avant de continuer, pour remonter d'un coup toutes les
+        // erreurs de syntaxe plutôt que de s'arrêter à la première.
+        let mut parsed_markers: Vec<MarkerPredicate> = Vec::with_capacity(cap.markers.len());
+        let mut marker_error = false;
+        for raw_marker in &cap.markers {
+            match parse_marker(raw_marker) {
+                Ok(predicate) => parsed_markers.push(predicate),
+                Err(message) => {
+                    marker_error = true;
+                    errors.push(format!("[scripts.capabilities.{name}].markers : {message}"));
+                }
+            }
+        }
+        if marker_error {
+            continue;
+        }
+
         // Identité canonique (SPEC-canonical-asset-identity.md) : la clé
         // manifeste d'un point d'entrée est son chemin THÈME-RELATIF réel
         // (`cap.entry`, ex. "scripts/map.js"), jamais un nom symbolique
@@ -642,7 +797,7 @@ fn validate_capabilities(
                 bit,
                 activation: cap.activation.clone(),
                 url,
-                markers: cap.markers.clone(),
+                markers: parsed_markers,
                 deps,
             },
         ));
@@ -660,37 +815,45 @@ fn validate_capabilities(
 
 /// Lowering `ModulesPlaceholder` POUR UN TEMPLATE DONNÉ — jamais un calcul
 /// global (contrairement à `validate_capabilities`). Croise la table
-/// canonique des capacités avec les classes détectées statiquement dans CE
-/// template (`extract_static_class_tokens`, fragment-forge, appliquée sur
-/// le flux déjà fusionné parent+enfant) et la présence ou non d'un
-/// `record` dans le générateur appelant.
+/// canonique des capacités avec les quatre catégories de faits statiques
+/// extraites de CE template (`extract_static_marker_facts`, fragment-forge,
+/// appliquée sur le flux déjà fusionné parent+enfant) et la présence ou non
+/// d'un `record` dans le générateur appelant.
 ///
 /// INVARIANT GARANTI PAR CONSTRUCTION (addendum HANDOFF-js-deps-capacites-
 /// frontend-v2.md, « MARIUS_MODULES agrège deux sources ») : pour chaque
 /// capacité et chaque template, cette fonction produit AU PLUS UNE émission
 /// — jamais un test `if record.js_deps & BIT != 0 { ... }` en plus d'une
 /// émission déjà inconditionnelle. La présence statique domine
-/// systématiquement le besoin dynamique :
-///   - marqueur présent dans le HTML statique du template → émission
-///     inconditionnelle (`bit: None`, constant folding AOT — Forge sait
-///     déjà, à la compilation, que ce template en a besoin, quel que soit
-///     le record) ;
-///   - marqueur absent statiquement, `has_record = true` → émission
-///     conditionnelle (`bit: Some(BIT)`) — le besoin dépend du contenu
-///     éditorial de CE record précis, décidé à l'écriture par
+/// systématiquement le besoin dynamique, quelle que soit la FORME du
+/// marqueur qui a matché (`Class`/`Id`/`Attribute`/`Element` traités à
+/// parfaite égalité ici) :
+///   - au moins un marqueur de la capacité matche un fait statique du
+///     template → émission inconditionnelle (`bit: None`, constant folding
+///     AOT — Forge sait déjà, à la compilation, que ce template en a
+///     besoin, quel que soit le record) ;
+///   - aucun marqueur ne matche statiquement, `has_record = true` →
+///     émission conditionnelle (`bit: Some(BIT)`) — le besoin dépend du
+///     contenu éditorial de CE record précis, décidé à l'écriture par
 ///     `content.compute_js_deps` ;
-///   - marqueur absent statiquement, `has_record = false` (`STATIC_PAGES`)
-///     → rien : ni test possible (pas de record), ni besoin structurel
-///     (sinon il serait présent statiquement dans le template).
+///   - aucun marqueur ne matche statiquement, `has_record = false`
+///     (`STATIC_PAGES`) → rien : ni test possible (pas de record), ni
+///     besoin structurel (sinon il serait présent statiquement dans le
+///     template).
 fn lower_modules_for_template(
     capabilities: &[(String, CapabilityInfo)],
-    static_classes: &std::collections::HashSet<String>,
+    facts: &StaticMarkerFacts,
     has_record: bool,
 ) -> Vec<ModuleEmission> {
     let mut out = Vec::new();
 
     for (_, cap) in capabilities {
-        let static_hit = cap.markers.iter().any(|m| static_classes.contains(m));
+        let static_hit = cap.markers.iter().any(|m| match m {
+            MarkerPredicate::Class(name) => facts.classes.contains(name),
+            MarkerPredicate::Id(name) => facts.ids.contains(name),
+            MarkerPredicate::Attribute(name) => facts.data_attributes.contains(name),
+            MarkerPredicate::Element(name) => facts.elements.contains(name),
+        });
 
         if static_hit {
             out.push(ModuleEmission {
@@ -1016,7 +1179,16 @@ mod tests_module_grouping {
                 bit,
                 activation: activation.to_string(),
                 url: url.to_string(),
-                markers: markers.iter().map(|s| s.to_string()).collect(),
+                // `parse_marker` est la même fonction utilisée par
+                // `validate_capabilities` — un marker de test invalide doit
+                // planter la construction de la fixture, jamais être
+                // silencieusement ignoré ou réinterprété.
+                markers: markers
+                    .iter()
+                    .map(|s| {
+                        parse_marker(s).unwrap_or_else(|e| panic!("fixture de test invalide : {e}"))
+                    })
+                    .collect(),
                 deps: deps.to_vec(),
             },
         )
@@ -1030,13 +1202,40 @@ mod tests_module_grouping {
         }
     }
 
+    /// Faits statiques vides — aucun marqueur, quelle que soit sa forme, ne
+    /// matche dans le template. Remplace l'ancien
+    /// `std::collections::HashSet::new()` nu, désormais insuffisant : la
+    /// signature de `lower_modules_for_template` porte les quatre
+    /// catégories, jamais une seule.
+    fn empty_facts() -> StaticMarkerFacts {
+        StaticMarkerFacts {
+            classes: std::collections::HashSet::new(),
+            ids: std::collections::HashSet::new(),
+            data_attributes: std::collections::HashSet::new(),
+            elements: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Faits statiques ne renseignant QUE des classes — la forme la plus
+    /// fréquente dans ce module de tests (héritée de l'ancien modèle
+    /// `static_classes`). `ids`/`data_attributes`/`elements` restent vides,
+    /// jamais peuplés par erreur avec des noms de classe.
+    fn facts_with_classes(classes: &[&str]) -> StaticMarkerFacts {
+        StaticMarkerFacts {
+            classes: classes.iter().map(|s| s.to_string()).collect(),
+            ids: std::collections::HashSet::new(),
+            data_attributes: std::collections::HashSet::new(),
+            elements: std::collections::HashSet::new(),
+        }
+    }
+
     // ── lower_modules_for_template + render_modules_as_rust (Mode Page) ────
 
     #[test]
     fn zero_capability_emits_no_script() {
         let capabilities: Vec<(String, CapabilityInfo)> = vec![];
-        let static_classes = std::collections::HashSet::new();
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let static_facts = empty_facts();
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         let lowering = render_modules_as_rust(&emissions);
 
         assert!(emissions.is_empty());
@@ -1051,10 +1250,10 @@ mod tests_module_grouping {
             2,
             "initMapsSystem",
             "/scripts/map.HASH.js",
-            &["map"],
+            &[".map"],
         )];
-        let static_classes = std::collections::HashSet::new(); // aucun marqueur statique
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let static_facts = empty_facts(); // aucun marqueur statique
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         assert_eq!(emissions.len(), 1);
         assert_eq!(emissions[0].bit, Some(2));
 
@@ -1073,12 +1272,11 @@ mod tests_module_grouping {
             8,
             "boot",
             "/scripts/line-mark.HASH.js",
-            &["add-line-marks"],
+            &[".add-line-marks"],
         )];
-        let mut static_classes = std::collections::HashSet::new();
-        static_classes.insert("add-line-marks".to_string());
+        let static_facts = facts_with_classes(&["add-line-marks"]);
 
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         assert_eq!(emissions.len(), 1);
         assert_eq!(emissions[0].bit, None);
 
@@ -1098,13 +1296,19 @@ mod tests_module_grouping {
                 8,
                 "boot",
                 "/scripts/line-mark.HASH.js",
-                &["add-line-marks"],
+                &[".add-line-marks"],
             ),
-            cap("map", 2, "initMapsSystem", "/scripts/map.HASH.js", &["map"]),
+            cap(
+                "map",
+                2,
+                "initMapsSystem",
+                "/scripts/map.HASH.js",
+                &[".map"],
+            ),
         ];
         // Aucun marqueur statique — les deux restent dynamiques.
-        let static_classes = std::collections::HashSet::new();
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let static_facts = empty_facts();
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         assert_eq!(emissions.len(), 2);
 
         let lowering = render_modules_as_rust(&emissions);
@@ -1125,12 +1329,12 @@ mod tests_module_grouping {
     #[test]
     fn aliases_are_sequential_and_distinct() {
         let capabilities = vec![
-            cap("a", 1, "initA", "/scripts/a.js", &["a-marker"]),
-            cap("b", 2, "initB", "/scripts/b.js", &["b-marker"]),
-            cap("c", 4, "initC", "/scripts/c.js", &["c-marker"]),
+            cap("a", 1, "initA", "/scripts/a.js", &[".a-marker"]),
+            cap("b", 2, "initB", "/scripts/b.js", &[".b-marker"]),
+            cap("c", 4, "initC", "/scripts/c.js", &[".c-marker"]),
         ];
-        let static_classes = std::collections::HashSet::new();
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let static_facts = empty_facts();
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         let lowering = render_modules_as_rust(&emissions);
 
         for i in 0..3 {
@@ -1147,12 +1351,12 @@ mod tests_module_grouping {
                 1,
                 "initAlpha",
                 "/scripts/alpha.js",
-                &["alpha-marker"],
+                &[".alpha-marker"],
             ),
-            cap("beta", 2, "initBeta", "/scripts/beta.js", &["beta-marker"]),
+            cap("beta", 2, "initBeta", "/scripts/beta.js", &[".beta-marker"]),
         ];
-        let static_classes = std::collections::HashSet::new();
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let static_facts = empty_facts();
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         let lowering = render_modules_as_rust(&emissions);
 
         let pos_alpha = lowering.snippet.find("initAlpha").unwrap();
@@ -1172,15 +1376,15 @@ mod tests_module_grouping {
                 8,
                 "boot",
                 "/scripts/line-mark.js",
-                &["add-line-marks"],
+                &[".add-line-marks"],
             ),
-            cap("map", 2, "initMapsSystem", "/scripts/map.js", &["map"]),
+            cap("map", 2, "initMapsSystem", "/scripts/map.js", &[".map"]),
         ];
-        let mut static_classes = std::collections::HashSet::new();
-        static_classes.insert("add-line-marks".to_string()); // line-mark : détecté statiquement
-        // "map" reste dynamique (absent de static_classes).
+        let static_facts = facts_with_classes(&["add-line-marks"]);
+        // line-mark : détecté statiquement
+        // "map" reste dynamique (absent de static_facts.classes).
 
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         assert_eq!(emissions[0].bit, None); // line-mark
         assert_eq!(emissions[1].bit, Some(2)); // map
 
@@ -1215,16 +1419,14 @@ mod tests_module_grouping {
                 8,
                 "boot",
                 "/scripts/line-mark.js",
-                &["add-line-marks"],
+                &[".add-line-marks"],
             ),
-            cap("map", 2, "initMapsSystem", "/scripts/map.js", &["map"]),
+            cap("map", 2, "initMapsSystem", "/scripts/map.js", &[".map"]),
         ];
-        let mut static_classes = std::collections::HashSet::new();
-        static_classes.insert("add-line-marks".to_string());
-        static_classes.insert("map".to_string());
+        let static_facts = facts_with_classes(&["add-line-marks", "map"]);
 
         // has_record = false : comportement STATIC_PAGES réel.
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, false);
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, false);
         assert_eq!(emissions.len(), 2);
         assert!(emissions.iter().all(|e| e.bit.is_none()));
 
@@ -1261,15 +1463,15 @@ mod tests_module_grouping {
             2,
             "bootstrap",
             "/scripts/map.HASH.js",
-            &["map"],
+            &[".map"],
             &[dep(
                 "libraries/deckgl/deckgl.js",
                 "/libraries/deckgl.HASH.js",
                 false,
             )],
         )];
-        let static_classes = std::collections::HashSet::new();
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let static_facts = empty_facts();
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         let lowering = render_modules_as_rust(&emissions);
 
         // Ordre : dépendance AVANT le <script type="module"> de l'entry.
@@ -1309,11 +1511,11 @@ mod tests_module_grouping {
             4,
             "boot",
             "/scripts/foo.HASH.js",
-            &["foo"],
+            &[".foo"],
             &[dep("libraries/bar/bar.js", "/libraries/bar.HASH.js", true)],
         )];
-        let static_classes = std::collections::HashSet::new();
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let static_facts = empty_facts();
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         let lowering = render_modules_as_rust(&emissions);
 
         assert!(
@@ -1352,7 +1554,7 @@ mod tests_module_grouping {
                 2,
                 "bootMap",
                 "/scripts/map.HASH.js",
-                &["map"],
+                &[".map"],
                 &[shared.clone()],
             ),
             cap_with_deps(
@@ -1360,12 +1562,12 @@ mod tests_module_grouping {
                 4,
                 "bootTerrain",
                 "/scripts/terrain.HASH.js",
-                &["terrain"],
+                &[".terrain"],
                 &[shared],
             ),
         ];
-        let static_classes = std::collections::HashSet::new();
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let static_facts = empty_facts();
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         assert_eq!(emissions.len(), 2);
 
         let lowering = render_modules_as_rust(&emissions);
@@ -1392,14 +1594,14 @@ mod tests_module_grouping {
             2,
             "bootMap",
             "/scripts/map.HASH.js",
-            &["map"],
+            &[".map"],
             &[
                 dep("libraries/a/a.js", "/libraries/a.HASH.js", true),
                 dep("libraries/b/b.js", "/libraries/b.HASH.js", false),
             ],
         )];
-        let static_classes = std::collections::HashSet::new();
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let static_facts = empty_facts();
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         let lowering = render_modules_as_rust(&emissions);
 
         assert_eq!(lowering.snippet.matches("libraries/a.HASH.js").count(), 1);
@@ -1431,11 +1633,11 @@ mod tests_module_grouping {
             2,
             "bootMap",
             "/scripts/map.HASH.js",
-            &["map"],
+            &[".map"],
             &[same.clone(), same],
         )];
-        let static_classes = std::collections::HashSet::new();
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let static_facts = empty_facts();
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         let lowering = render_modules_as_rust(&emissions);
 
         assert_eq!(
@@ -1458,7 +1660,7 @@ mod tests_module_grouping {
                 2,
                 "bootMap",
                 "/scripts/map.HASH.js",
-                &["map"],
+                &[".map"],
                 &[shared.clone()],
             ),
             cap_with_deps(
@@ -1466,14 +1668,14 @@ mod tests_module_grouping {
                 4,
                 "bootTerrain",
                 "/scripts/terrain.HASH.js",
-                &["terrain-static"],
+                &[".terrain-static"],
                 &[shared],
             ),
         ];
-        let mut static_classes = std::collections::HashSet::new();
-        static_classes.insert("terrain-static".to_string()); // capacité statique
+        let static_facts = facts_with_classes(&["terrain-static"]);
+        // capacité statique
 
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         let lowering = render_modules_as_rust(&emissions);
 
         // La dépendance partagée devient inconditionnelle — domination par
@@ -1500,10 +1702,10 @@ mod tests_module_grouping {
             2,
             "initMapsSystem",
             "/scripts/map.HASH.js",
-            &["map"],
+            &[".map"],
         )];
-        let static_classes = std::collections::HashSet::new();
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, true);
+        let static_facts = empty_facts();
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
         let lowering = render_modules_as_rust(&emissions);
 
         assert_eq!(lowering.snippet.matches("<script").count(), 1);
@@ -1523,7 +1725,7 @@ mod tests_module_grouping {
                 2,
                 "bootMap",
                 "/scripts/map.HASH.js",
-                &["map"],
+                &[".map"],
                 &[shared.clone()],
             ),
             cap_with_deps(
@@ -1531,17 +1733,15 @@ mod tests_module_grouping {
                 4,
                 "bootTerrain",
                 "/scripts/terrain.HASH.js",
-                &["terrain"],
+                &[".terrain"],
                 &[shared],
             ),
         ];
-        let mut static_classes = std::collections::HashSet::new();
-        static_classes.insert("map".to_string());
-        static_classes.insert("terrain".to_string());
+        let static_facts = facts_with_classes(&["map", "terrain"]);
 
         // STATIC_PAGES : has_record = false, comme les autres tests de ce
         // fichier pour ce pipeline.
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, false);
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, false);
         let html = render_modules_as_static_html(&emissions);
 
         assert_eq!(
@@ -1574,17 +1774,16 @@ mod tests_module_grouping {
             2,
             "bootstrap",
             "/scripts/map.HASH.js",
-            &["map"],
+            &[".map"],
             &[dep(
                 "libraries/deckgl/deckgl.js",
                 "/libraries/deckgl.HASH.js",
                 false, // UMD/classique — [libraries.deckgl].module = false
             )],
         )];
-        let mut static_classes = std::collections::HashSet::new();
-        static_classes.insert("map".to_string());
+        let static_facts = facts_with_classes(&["map"]);
 
-        let emissions = lower_modules_for_template(&capabilities, &static_classes, false);
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, false);
         let html = render_modules_as_static_html(&emissions);
 
         assert_eq!(
@@ -2175,8 +2374,8 @@ fn resolve_page_template<'src>(
     // concerne ce template) est un cas normal qui se traduit par un token
     // présent, mais lowerisant vers zéro octet — jamais une raison de
     // sauter le splice.
-    let static_classes = extract_static_class_tokens(&tokens);
-    let emissions = lower_modules_for_template(capabilities, &static_classes, true);
+    let static_facts = extract_static_marker_facts(&tokens);
+    let emissions = lower_modules_for_template(capabilities, &static_facts, true);
     let modules_lowering = render_modules_as_rust(&emissions);
 
     let mut tokens = match split_static_at_marker(tokens, MODULES_PLACEHOLDER) {
@@ -2440,8 +2639,8 @@ fn resolve_static_page(
     // STATIQUE, elle, parfaitement calculable même sans `record`. Si
     // `base.marius`/`offline.marius` contient un marqueur en dur, il DOIT
     // s'émettre ici aussi.
-    let static_classes = extract_static_class_tokens(&tokens);
-    let emissions = lower_modules_for_template(capabilities, &static_classes, false);
+    let static_facts = extract_static_marker_facts(&tokens);
+    let emissions = lower_modules_for_template(capabilities, &static_facts, false);
     let static_html_modules = render_modules_as_static_html(&emissions);
     // Longueur du HTML déjà construit ci-dessus — jamais recalculée
     // séparément : un seul <script> regroupé désormais (pas une somme par
@@ -3461,7 +3660,7 @@ mod tests_validate_capabilities_deps {
             r#"
 [scripts.capabilities.map]
 entry = "scripts/map.js"
-markers = ["map"]
+markers = [".map"]
 activation = "bootstrap"
 deps = ["libraries/deckgl/deckgl.js"]
 "#,
@@ -3502,7 +3701,7 @@ deps = ["libraries/deckgl/deckgl.js"]
             r#"
 [scripts.capabilities.foo]
 entry = "scripts/foo.js"
-markers = ["foo"]
+markers = [".foo"]
 activation = "boot"
 deps = ["libraries/bar/bar.js"]
 "#,
@@ -3538,7 +3737,7 @@ deps = ["libraries/bar/bar.js"]
             r#"
 [scripts.capabilities.the-map-feature]
 entry = "scripts/map.js"
-markers = ["map"]
+markers = [".map"]
 activation = "bootstrap"
 "#,
         );
@@ -3569,7 +3768,7 @@ activation = "bootstrap"
             r#"
 [scripts.capabilities.map]
 entry = "scripts/map.js"
-markers = ["map"]
+markers = [".map"]
 activation = "bootstrap"
 "#,
         );
@@ -3596,7 +3795,7 @@ activation = "bootstrap"
             r#"
 [scripts.capabilities.map]
 entry = "scripts/map.js"
-markers = ["map"]
+markers = [".map"]
 activation = "bootstrap"
 deps = ["libraries/deckgl/deckgl.js"]
 "#,
@@ -3630,7 +3829,7 @@ deps = ["libraries/deckgl/deckgl.js"]
             r#"
 [scripts.capabilities.map]
 entry = "scripts/map.js"
-markers = ["map"]
+markers = [".map"]
 activation = "bootstrap"
 deps = ["/libraries/deckgl/deckgl.js"]
 "#,
@@ -3656,5 +3855,274 @@ deps = ["/libraries/deckgl/deckgl.js"]
         assert!(!result[0].1.deps[0].module);
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Breaking change de session : un marker bare (`"map"`, sans préfixe)
+    /// n'est plus une classe implicite — il DOIT parser comme `Element` et
+    /// valider avec succès end-to-end, jamais échouer et jamais retomber
+    /// sur `Class`. Non-régression directe de la décision « aucune
+    /// rétrocompatibilité de la syntaxe historique ».
+    #[test]
+    fn bare_marker_validates_as_element_never_as_implicit_class() {
+        let (base, manifest_dir) = sandbox("bare-marker-element");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.map]
+entry = "scripts/map.js"
+markers = ["map"]
+activation = "bootstrap"
+"#,
+        );
+        write_registry(&base, "map = 2\n");
+
+        let mut assets = HashMap::new();
+        assets.insert("scripts/map.js".to_string(), asset("/scripts/map.HASH.js"));
+
+        let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].1.markers,
+            vec![MarkerPredicate::Element("map".to_string())],
+            "un marker bare doit toujours devenir Element, jamais Class par défaut implicite"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Les quatre formes reconnues doivent toutes parser correctement
+    /// lorsqu'elles proviennent réellement d'un `theme.toml` désérialisé
+    /// (pas seulement via `parse_marker` appelé directement en unitaire) —
+    /// verrouille l'intégration TOML → validate_capabilities →
+    /// MarkerPredicate de bout en bout.
+    #[test]
+    fn all_four_marker_forms_parse_end_to_end() {
+        let (base, manifest_dir) = sandbox("four-forms");
+        write_theme_toml(
+            &base,
+            r##"
+[scripts.capabilities.widget]
+entry = "scripts/widget.js"
+markers = [".tabs", "#menu", "[data-component]", "main"]
+activation = "boot"
+"##,
+        );
+        write_registry(&base, "widget = 1\n");
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            "scripts/widget.js".to_string(),
+            asset("/scripts/widget.HASH.js"),
+        );
+
+        let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new()).unwrap();
+        assert_eq!(
+            result[0].1.markers,
+            vec![
+                MarkerPredicate::Class("tabs".to_string()),
+                MarkerPredicate::Id("menu".to_string()),
+                MarkerPredicate::Attribute("data-component".to_string()),
+                MarkerPredicate::Element("main".to_string()),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Un marker malformé (valeur d'attribut, hors périmètre) doit faire
+    /// échouer `validate_capabilities` de bout en bout — jamais un repli
+    /// silencieux vers une capacité sans ce marker, ni une interprétation
+    /// partielle.
+    #[test]
+    fn attribute_marker_with_value_is_a_hard_error_end_to_end() {
+        let (base, manifest_dir) = sandbox("attr-value-rejected");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.gallery]
+entry = "scripts/gallery.js"
+markers = ["[data-component=\"gallery\"]"]
+activation = "boot"
+"#,
+        );
+        write_registry(&base, "gallery = 1\n");
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            "scripts/gallery.js".to_string(),
+            asset("/scripts/gallery.HASH.js"),
+        );
+
+        let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new());
+        assert!(
+            result.is_err(),
+            "un marker [data-*=\"valeur\"] doit faire échouer le build — présence uniquement, \
+             jamais de comparaison de valeur"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(test)]
+mod tests_parse_marker {
+    use super::{MarkerPredicate, parse_marker};
+
+    #[test]
+    fn class_form() {
+        assert_eq!(
+            parse_marker(".tabs"),
+            Ok(MarkerPredicate::Class("tabs".to_string()))
+        );
+    }
+
+    #[test]
+    fn id_form() {
+        assert_eq!(
+            parse_marker("#menu"),
+            Ok(MarkerPredicate::Id("menu".to_string()))
+        );
+    }
+
+    #[test]
+    fn data_attribute_form() {
+        assert_eq!(
+            parse_marker("[data-component]"),
+            Ok(MarkerPredicate::Attribute("data-component".to_string()))
+        );
+    }
+
+    #[test]
+    fn element_form_bare_token() {
+        assert_eq!(
+            parse_marker("main"),
+            Ok(MarkerPredicate::Element("main".to_string()))
+        );
+    }
+
+    #[test]
+    fn custom_element_name_is_accepted_without_whitelist() {
+        // Aucune whitelist HTML — un custom element est accepté à égalité
+        // avec un élément standard, seule la forme est vérifiée.
+        assert_eq!(
+            parse_marker("my-widget"),
+            Ok(MarkerPredicate::Element("my-widget".to_string()))
+        );
+    }
+
+    #[test]
+    fn breaking_change_bare_token_is_never_implicit_class() {
+        // Décision de session : l'ancienne rétrocompatibilité implicite
+        // (bare token = classe) n'existe plus.
+        assert_ne!(
+            parse_marker("tabs").unwrap(),
+            MarkerPredicate::Class("tabs".to_string())
+        );
+        assert_eq!(
+            parse_marker("tabs").unwrap(),
+            MarkerPredicate::Element("tabs".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_marker_is_rejected() {
+        assert!(parse_marker("").is_err());
+    }
+
+    #[test]
+    fn empty_class_is_rejected() {
+        assert!(parse_marker(".").is_err());
+    }
+
+    #[test]
+    fn empty_id_is_rejected() {
+        assert!(parse_marker("#").is_err());
+    }
+
+    #[test]
+    fn internal_whitespace_is_rejected() {
+        assert!(parse_marker("main .tabs").is_err());
+    }
+
+    #[test]
+    fn attribute_value_is_rejected() {
+        assert!(parse_marker(r#"[data-component="gallery"]"#).is_err());
+    }
+
+    #[test]
+    fn attribute_value_comparators_are_all_rejected() {
+        for marker in [
+            r#"[data-x="y"]"#,
+            r#"[data-x^="y"]"#,
+            r#"[data-x$="y"]"#,
+            r#"[data-x*="y"]"#,
+            r#"[data-x~="y"]"#,
+            r#"[data-x|="y"]"#,
+        ] {
+            assert!(
+                parse_marker(marker).is_err(),
+                "attendu une erreur pour {marker:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_data_attribute_is_rejected() {
+        // 'class'/'id' possèdent déjà leurs formes dédiées ; aucun attribut
+        // générique n'est accepté ('[href]', '[role]', '[aria-hidden]', ...).
+        for marker in ["[href]", "[role]", "[aria-hidden]", "[class]", "[id]"] {
+            assert!(
+                parse_marker(marker).is_err(),
+                "attendu une erreur pour {marker:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unbalanced_bracket_is_rejected() {
+        assert!(parse_marker("[data-x").is_err());
+        assert!(parse_marker("data-x]").is_err());
+    }
+
+    #[test]
+    fn unknown_prefix_is_rejected() {
+        for marker in [":not(x)", "*", ">tabs", "~tabs", "+tabs"] {
+            assert!(
+                parse_marker(marker).is_err(),
+                "attendu une erreur pour {marker:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compound_selector_forms_are_rejected() {
+        for marker in ["main.tabs", ".tabs#active", "main>tabs"] {
+            assert!(
+                parse_marker(marker).is_err(),
+                "attendu une erreur pour {marker:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pseudo_class_forms_are_rejected() {
+        for marker in [":first-child", ":not(.tabs)", "::before"] {
+            assert!(
+                parse_marker(marker).is_err(),
+                "attendu une erreur pour {marker:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn element_starting_with_digit_or_hyphen_is_rejected() {
+        assert!(parse_marker("1widget").is_err());
+        assert!(parse_marker("-widget").is_err());
+    }
+
+    #[test]
+    fn class_and_id_reject_dot_or_hash_inside_body() {
+        assert!(parse_marker(".tabs.active").is_err());
+        assert!(parse_marker("#menu#top").is_err());
     }
 }
