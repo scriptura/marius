@@ -83,6 +83,24 @@ struct CapabilityConfig {
     /// (chargement de script), l'autre un bitset runtime.
     #[serde(default)]
     deps: Vec<String>,
+    /// Déclare si cette capacité peut être activée dynamiquement à partir
+    /// de `record.js_deps` (bitset produit par `content.compute_js_deps`,
+    /// SQL) — jamais une propriété intrinsèque de toute capacité. `true`
+    /// exige une entrée active dans `scripts_registry.lock` ; `false`
+    /// (défaut) interdit toute entrée pour cette capacité, quelle qu'elle
+    /// soit (`validate_capabilities`, chantier « découplage registry »).
+    ///
+    /// Orthogonal à `markers`/`activation`/`deps` : ne change ni le
+    /// comportement du scan statique (`extract_static_marker_facts`), ni
+    /// celui de `deps` — seulement l'obligation (ou l'interdiction) d'un
+    /// bit `js_deps`. Défaut `false` délibéré : la paire d'invariants
+    /// symétrique de `validate_capabilities` (bit manquant si `true` sans
+    /// registre ; entrée orpheline ou mal flaguée si `false` avec
+    /// registre) fait échouer le build bruyamment dans les deux sens d'un
+    /// oubli — aucun chemin silencieux ne masque une incohérence
+    /// architecturale, contrairement à un défaut qui aurait été `true`.
+    #[serde(default)]
+    content_driven: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -239,7 +257,14 @@ fn parse_marker_ident_body(raw: &str, rest: &str, kind: &str) -> Result<String, 
 /// template : c'est `lower_modules_for_template` qui la croise, à chaque
 /// appel, avec les faits statiques du template en cours.
 struct CapabilityInfo {
-    bit: i64,
+    /// `Some(bit)` uniquement si `content_driven = true` (bit résolu
+    /// contre `scripts_registry.lock`) — `None` pour toute capacité
+    /// `content_driven = false` (défaut). Jamais une propriété
+    /// intrinsèque de toute capacité : `lower_modules_for_template` ne le
+    /// consulte que dans sa branche dynamique, jamais dans la branche
+    /// statique (`bit: None` de `ModuleEmission`, indépendant de ce
+    /// champ).
+    bit: Option<i64>,
     activation: String,
     url: String,
     /// Marqueurs déjà PARSÉS (`parse_marker`, une seule fois ici) —
@@ -604,29 +629,46 @@ fn validate_capabilities(
 
     let capabilities = &theme.scripts.capabilities;
 
-    let registry_path = scripts_registry_path(manifest_dir);
-    println!("cargo:rerun-if-changed={}", registry_path.display());
-
     if capabilities.is_empty() {
         // Rien à valider — scripts_registry.lock peut même ne pas exister
         // tant qu'aucune capacité ne l'exige.
         return Ok(Vec::new());
     }
 
-    let raw_registry = std::fs::read_to_string(&registry_path).map_err(|e| {
-        println!(
-            "cargo:error=DB-Forge : {} capacité(s) déclarée(s) dans [scripts.capabilities] \
-             mais scripts_registry.lock introuvable ({}) : {e}",
-            capabilities.len(),
-            registry_path.display()
-        );
-    })?;
-    let registry: HashMap<String, i64> = toml::from_str(&raw_registry).map_err(|e| {
-        println!(
-            "cargo:error=DB-Forge : scripts_registry.lock malformé ({}) : {e}",
-            registry_path.display()
-        );
-    })?;
+    // Le registre n'est requis QUE si au moins une capacité est
+    // `content_driven = true` — une capacité `content_driven = false`
+    // (défaut) n'a structurellement aucun besoin de bit, donc aucun besoin
+    // que ce fichier existe même. `scripts_registry.lock` n'est donc plus
+    // une dépendance systématique de [scripts.capabilities], contrairement
+    // à avant le découplage.
+    let needs_registry = capabilities.values().any(|c| c.content_driven);
+
+    let registry_path = scripts_registry_path(manifest_dir);
+    println!("cargo:rerun-if-changed={}", registry_path.display());
+
+    let registry: HashMap<String, i64> = match std::fs::read_to_string(&registry_path) {
+        Ok(raw) => toml::from_str(&raw).map_err(|e| {
+            println!(
+                "cargo:error=DB-Forge : scripts_registry.lock malformé ({}) : {e}",
+                registry_path.display()
+            );
+        })?,
+        Err(e) => {
+            if needs_registry {
+                println!(
+                    "cargo:error=DB-Forge : {} capacité(s) content_driven = true déclarée(s) \
+                     dans [scripts.capabilities] mais scripts_registry.lock introuvable ({}) : \
+                     {e}",
+                    capabilities.values().filter(|c| c.content_driven).count(),
+                    registry_path.display()
+                );
+                return Err(());
+            }
+            // Aucune capacité content-driven — l'absence du fichier n'est
+            // pas une erreur, un registre vide est équivalent.
+            HashMap::new()
+        }
+    };
 
     let mut errors: Vec<String> = Vec::new();
 
@@ -640,22 +682,38 @@ fn validate_capabilities(
         .map(|(k, v)| (k.as_str(), *v))
         .collect();
 
-    // ── Bijection theme.toml capacités ↔ registre actif ─────────────────
-    for name in capabilities.keys() {
-        if !active_registry.contains_key(name.as_str()) {
+    // ── Bijection : capacités content_driven = true ↔ registre actif ────
+    // Scope volontairement restreint au sous-ensemble content-driven —
+    // une capacité `content_driven = false` n'entre JAMAIS dans cette
+    // bijection, dans aucun des deux sens.
+    for (name, cap) in capabilities {
+        if cap.content_driven && !active_registry.contains_key(name.as_str()) {
             errors.push(format!(
-                "capacité '{name}' déclarée dans [scripts.capabilities] mais absente de \
-                 scripts_registry.lock — attribution de bit manquante"
+                "capacité '{name}' déclarée content_driven = true dans [scripts.capabilities] \
+                 mais absente de scripts_registry.lock — attribution de bit manquante"
             ));
         }
     }
     for name in active_registry.keys() {
-        if !capabilities.contains_key(*name) {
-            errors.push(format!(
-                "bit '{name}' présent dans scripts_registry.lock (actif) mais aucune capacité \
-                 correspondante dans [scripts.capabilities] de theme.toml — capacité retirée \
-                 sans préfixe '_retired_', ou registre en avance sur la configuration"
-            ));
+        match capabilities.get(*name) {
+            None => {
+                errors.push(format!(
+                    "bit '{name}' présent dans scripts_registry.lock (actif) mais aucune \
+                     capacité correspondante dans [scripts.capabilities] de theme.toml — \
+                     capacité retirée sans préfixe '_retired_', ou registre en avance sur la \
+                     configuration"
+                ));
+            }
+            Some(cap) if !cap.content_driven => {
+                errors.push(format!(
+                    "bit '{name}' présent dans scripts_registry.lock (actif) mais \
+                     [scripts.capabilities.{name}].content_driven n'est pas 'true' — une \
+                     capacité non content-driven ne doit jamais posséder d'entrée registry \
+                     (retirez l'entrée, ou déclarez explicitement content_driven = true si \
+                     cette capacité doit réellement être pilotée par record.js_deps)"
+                ));
+            }
+            Some(_) => {}
         }
     }
 
@@ -694,7 +752,14 @@ fn validate_capabilities(
 
     for name in names {
         let cap = &capabilities[name];
-        let bit = active_registry[name.as_str()];
+        // Sûr : si `cap.content_driven`, la bijection ci-dessus garantit
+        // déjà une entrée (sinon `errors` serait non vide et la fonction
+        // aurait déjà retourné `Err(())` avant d'atteindre cette boucle).
+        let bit = if cap.content_driven {
+            Some(active_registry[name.as_str()])
+        } else {
+            None
+        };
 
         if !is_valid_identifier(&cap.activation) {
             errors.push(format!(
@@ -832,14 +897,17 @@ fn validate_capabilities(
 ///     template → émission inconditionnelle (`bit: None`, constant folding
 ///     AOT — Forge sait déjà, à la compilation, que ce template en a
 ///     besoin, quel que soit le record) ;
-///   - aucun marqueur ne matche statiquement, `has_record = true` →
-///     émission conditionnelle (`bit: Some(BIT)`) — le besoin dépend du
-///     contenu éditorial de CE record précis, décidé à l'écriture par
-///     `content.compute_js_deps` ;
-///   - aucun marqueur ne matche statiquement, `has_record = false`
-///     (`STATIC_PAGES`) → rien : ni test possible (pas de record), ni
-///     besoin structurel (sinon il serait présent statiquement dans le
-///     template).
+///   - aucun marqueur ne matche statiquement, `cap.bit` est `Some(_)`
+///     (`content_driven = true`, résolu par `validate_capabilities`) et
+///     `has_record = true` → émission conditionnelle (`bit: Some(BIT)`) —
+///     le besoin dépend du contenu éditorial de CE record précis, décidé
+///     à l'écriture par `content.compute_js_deps` ;
+///   - aucun marqueur ne matche statiquement ET (`cap.bit` est `None`,
+///     `content_driven = false`, OU `has_record = false`, `STATIC_PAGES`)
+///     → rien : une capacité non content-driven ne peut structurellement
+///     jamais dépendre de `record.js_deps`, quel que soit `has_record` ;
+///     et un appelant sans `record` ne peut de toute façon jamais tester
+///     un bit, quel que soit `cap.bit`.
 fn lower_modules_for_template(
     capabilities: &[(String, CapabilityInfo)],
     facts: &StaticMarkerFacts,
@@ -862,16 +930,26 @@ fn lower_modules_for_template(
                 bit: None,
                 deps: cap.deps.clone(),
             });
-        } else if has_record {
-            out.push(ModuleEmission {
-                activation: cap.activation.clone(),
-                url: cap.url.clone(),
-                bit: Some(cap.bit),
-                deps: cap.deps.clone(),
-            });
+        } else if let Some(bit) = cap.bit {
+            // `cap.bit` n'est `Some(_)` que pour une capacité
+            // `content_driven = true` (résolution dans
+            // `validate_capabilities`) — une capacité `content_driven =
+            // false` n'entre jamais dans cette branche, quel que soit
+            // `has_record`.
+            if has_record {
+                out.push(ModuleEmission {
+                    activation: cap.activation.clone(),
+                    url: cap.url.clone(),
+                    bit: Some(bit),
+                    deps: cap.deps.clone(),
+                });
+            }
+            // else : STATIC_PAGES — pas de record possible, rien à
+            // émettre, même pour une capacité content-driven.
         }
-        // else : STATIC_PAGES, marqueur absent statiquement — rien à
-        // émettre pour cette capacité sur ce template (doc ci-dessus).
+        // else : cap.bit == None (content_driven = false) et marqueur
+        // absent statiquement — rien à émettre pour cette capacité sur ce
+        // template, quel que soit has_record (doc ci-dessus).
     }
 
     out
@@ -1155,6 +1233,10 @@ fn render_modules_as_static_html(emissions: &[ModuleEmission]) -> String {
 mod tests_module_grouping {
     use super::*;
 
+    /// Capacité `content_driven = true` — `bit` toujours résolu
+    /// (`Some(bit)`), pour les tests exerçant la branche dynamique du
+    /// lowering (comportement historique de ce helper, avant
+    /// l'introduction de `content_driven`).
     fn cap(
         name: &str,
         bit: i64,
@@ -1176,7 +1258,7 @@ mod tests_module_grouping {
         (
             name.to_string(),
             CapabilityInfo {
-                bit,
+                bit: Some(bit),
                 activation: activation.to_string(),
                 url: url.to_string(),
                 // `parse_marker` est la même fonction utilisée par
@@ -1190,6 +1272,32 @@ mod tests_module_grouping {
                     })
                     .collect(),
                 deps: deps.to_vec(),
+            },
+        )
+    }
+
+    /// Capacité `content_driven = false` — `bit: None`, jamais résolu,
+    /// quel que soit `has_record` au lowering. Vérifie le comportement
+    /// introduit par le découplage `content_driven`/`scripts_registry.lock`.
+    fn cap_static_only(
+        name: &str,
+        activation: &str,
+        url: &str,
+        markers: &[&str],
+    ) -> (String, CapabilityInfo) {
+        (
+            name.to_string(),
+            CapabilityInfo {
+                bit: None,
+                activation: activation.to_string(),
+                url: url.to_string(),
+                markers: markers
+                    .iter()
+                    .map(|s| {
+                        parse_marker(s).unwrap_or_else(|e| panic!("fixture de test invalide : {e}"))
+                    })
+                    .collect(),
+                deps: Vec::new(),
             },
         )
     }
@@ -1791,6 +1899,70 @@ mod tests_module_grouping {
             "<script src=\"/libraries/deckgl.HASH.js\" defer></script>\
              <script type=\"module\">import{bootstrap as _0}from\"/scripts/map.HASH.js\";_0();</script>"
         );
+    }
+
+    /// `content_driven = false` (`cap.bit == None`) : aucune émission ne
+    /// doit jamais apparaître dans la branche dynamique, MÊME si
+    /// `has_record = true` — le comportement introduit par le découplage
+    /// `content_driven`/`scripts_registry.lock`. Avant ce découplage,
+    /// cette capacité aurait été émise avec `bit: Some(cap.bit)`.
+    #[test]
+    fn content_driven_false_never_emits_dynamically_even_with_record() {
+        let capabilities = vec![cap_static_only(
+            "navigation",
+            "initNavigation",
+            "/scripts/navigation.HASH.js",
+            &[".cmd-nav"],
+        )];
+        // Marqueur absent statiquement de CE template précis.
+        let static_facts = empty_facts();
+
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
+
+        assert!(
+            emissions.is_empty(),
+            "une capacité content_driven = false ne doit jamais dépendre de record.js_deps"
+        );
+    }
+
+    /// Même capacité `content_driven = false`, mais son marqueur EST
+    /// présent statiquement dans ce template — l'émission inconditionnelle
+    /// (`bit: None`) reste intacte, `cap.bit == None` n'a jamais empêché
+    /// la branche statique, qui ne le consulte jamais de toute façon.
+    #[test]
+    fn content_driven_false_still_emits_unconditionally_on_static_hit() {
+        let capabilities = vec![cap_static_only(
+            "navigation",
+            "initNavigation",
+            "/scripts/navigation.HASH.js",
+            &[".cmd-nav"],
+        )];
+        let static_facts = facts_with_classes(&["cmd-nav"]);
+
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, true);
+
+        assert_eq!(emissions.len(), 1);
+        assert_eq!(emissions[0].bit, None);
+    }
+
+    /// Symétrique de `content_driven_false_never_emits_dynamically_even_with_record` :
+    /// sur `STATIC_PAGES` (`has_record = false`), une capacité
+    /// `content_driven = false` sans hit statique n'émet toujours rien —
+    /// comportement inchangé par rapport à avant l'introduction de
+    /// `content_driven` (déjà vrai pour toute capacité dans ce cas).
+    #[test]
+    fn content_driven_false_emits_nothing_on_static_pages_without_hit() {
+        let capabilities = vec![cap_static_only(
+            "navigation",
+            "initNavigation",
+            "/scripts/navigation.HASH.js",
+            &[".cmd-nav"],
+        )];
+        let static_facts = empty_facts();
+
+        let emissions = lower_modules_for_template(&capabilities, &static_facts, false);
+
+        assert!(emissions.is_empty());
     }
 }
 
@@ -3662,6 +3834,7 @@ mod tests_validate_capabilities_deps {
 entry = "scripts/map.js"
 markers = [".map"]
 activation = "bootstrap"
+content_driven = true
 deps = ["libraries/deckgl/deckgl.js"]
 "#,
         );
@@ -3703,6 +3876,7 @@ deps = ["libraries/deckgl/deckgl.js"]
 entry = "scripts/foo.js"
 markers = [".foo"]
 activation = "boot"
+content_driven = true
 deps = ["libraries/bar/bar.js"]
 "#,
         );
@@ -3739,6 +3913,7 @@ deps = ["libraries/bar/bar.js"]
 entry = "scripts/map.js"
 markers = [".map"]
 activation = "bootstrap"
+content_driven = true
 "#,
         );
         write_registry(&base, "the-map-feature = 2\n");
@@ -3770,6 +3945,7 @@ activation = "bootstrap"
 entry = "scripts/map.js"
 markers = [".map"]
 activation = "bootstrap"
+content_driven = true
 "#,
         );
         write_registry(&base, "map = 2\n");
@@ -3797,6 +3973,7 @@ activation = "bootstrap"
 entry = "scripts/map.js"
 markers = [".map"]
 activation = "bootstrap"
+content_driven = true
 deps = ["libraries/deckgl/deckgl.js"]
 "#,
         );
@@ -3831,6 +4008,7 @@ deps = ["libraries/deckgl/deckgl.js"]
 entry = "scripts/map.js"
 markers = [".map"]
 activation = "bootstrap"
+content_driven = true
 deps = ["/libraries/deckgl/deckgl.js"]
 "#,
         );
@@ -3872,6 +4050,7 @@ deps = ["/libraries/deckgl/deckgl.js"]
 entry = "scripts/map.js"
 markers = ["map"]
 activation = "bootstrap"
+content_driven = true
 "#,
         );
         write_registry(&base, "map = 2\n");
@@ -3905,6 +4084,7 @@ activation = "bootstrap"
 entry = "scripts/widget.js"
 markers = [".tabs", "#menu", "[data-component]", "main"]
 activation = "boot"
+content_driven = true
 "##,
         );
         write_registry(&base, "widget = 1\n");
@@ -3943,6 +4123,7 @@ activation = "boot"
 entry = "scripts/gallery.js"
 markers = ["[data-component=\"gallery\"]"]
 activation = "boot"
+content_driven = true
 "#,
         );
         write_registry(&base, "gallery = 1\n");
@@ -3959,6 +4140,189 @@ activation = "boot"
             "un marker [data-*=\"valeur\"] doit faire échouer le build — présence uniquement, \
              jamais de comparaison de valeur"
         );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `content_driven` absent du TOML → défaut `false` (`#[serde(default)]`)
+    /// — aucune entrée registry requise, `scripts_registry.lock` peut même
+    /// être absent du disque. Cas `navigation`/`scroll-to-top` du chantier
+    /// de découplage.
+    #[test]
+    fn content_driven_defaults_to_false_and_needs_no_registry_file() {
+        let (base, manifest_dir) = sandbox("no-registry-needed");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.navigation]
+entry = "scripts/navigation.js"
+markers = [".cmd-nav"]
+activation = "initNavigation"
+"#,
+        );
+        // Aucun write_registry() ici — le fichier n'existe pas du tout sur
+        // le disque, et ça ne doit PAS être une erreur.
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            "scripts/navigation.js".to_string(),
+            asset("/scripts/navigation.HASH.js"),
+        );
+
+        let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].1.bit, None,
+            "content_driven = false (défaut) → bit toujours None, jamais résolu"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `content_driven = true` sans entrée registry correspondante → erreur
+    /// dure, quel que soit le contenu par ailleurs valide de la capacité.
+    #[test]
+    fn content_driven_true_without_registry_entry_is_a_hard_error() {
+        let (base, manifest_dir) = sandbox("content-driven-missing-bit");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.image-focus]
+entry = "scripts/image-focus.js"
+markers = [".figure-image-focus"]
+activation = "initImageFocus"
+content_driven = true
+"#,
+        );
+        // Registre présent mais sans l'entrée attendue.
+        write_registry(&base, "unrelated-capability = 1\n");
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            "scripts/image-focus.js".to_string(),
+            asset("/scripts/image-focus.HASH.js"),
+        );
+
+        let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new());
+        assert!(
+            result.is_err(),
+            "content_driven = true sans bit attribué doit échouer — attribution manquante"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `content_driven = false` (ou omis) AVEC une entrée registry existante
+    /// pour cette même capacité → erreur dure — invariant symétrique
+    /// nouvellement introduit par le découplage : une capacité non
+    /// content-driven ne doit jamais posséder de bit.
+    #[test]
+    fn content_driven_false_with_existing_registry_entry_is_a_hard_error() {
+        let (base, manifest_dir) = sandbox("false-with-orphan-bit");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.navigation]
+entry = "scripts/navigation.js"
+markers = [".cmd-nav"]
+activation = "initNavigation"
+"#,
+        );
+        // Entrée présente pour "navigation" alors que la capacité est
+        // content_driven = false (par défaut, omis ici).
+        write_registry(&base, "navigation = 1\n");
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            "scripts/navigation.js".to_string(),
+            asset("/scripts/navigation.HASH.js"),
+        );
+
+        let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new());
+        assert!(
+            result.is_err(),
+            "une capacité content_driven = false ne doit jamais posséder d'entrée registry, \
+             même si le bit qu'elle porterait serait par ailleurs valide"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Une entrée registry sans AUCUNE capacité correspondante dans
+    /// `theme.toml` reste une erreur — comportement inchangé par le
+    /// découplage (invariant 2, cas "aucune capacité de ce nom").
+    #[test]
+    fn registry_entry_without_any_matching_capability_is_a_hard_error() {
+        let (base, manifest_dir) = sandbox("orphan-registry-entry");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.image-focus]
+entry = "scripts/image-focus.js"
+markers = [".figure-image-focus"]
+activation = "initImageFocus"
+content_driven = true
+"#,
+        );
+        write_registry(&base, "image-focus = 1\nghost-capability = 2\n");
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            "scripts/image-focus.js".to_string(),
+            asset("/scripts/image-focus.HASH.js"),
+        );
+
+        let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new());
+        assert!(
+            result.is_err(),
+            "un bit actif sans aucune capacité déclarée du même nom doit échouer"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Deux capacités coexistent : l'une `content_driven = true` (bit
+    /// résolu), l'autre `content_driven = false` (bit `None`) — vérifie
+    /// que la bijection scope correctement chacune sans interférence
+    /// croisée, et que `scripts_registry.lock` peut être partiellement
+    /// peuplé (une seule des deux capacités y figure).
+    #[test]
+    fn mixed_content_driven_and_static_only_capabilities_coexist() {
+        let (base, manifest_dir) = sandbox("mixed-capabilities");
+        write_theme_toml(
+            &base,
+            r#"
+[scripts.capabilities.navigation]
+entry = "scripts/navigation.js"
+markers = [".cmd-nav"]
+activation = "initNavigation"
+
+[scripts.capabilities.image-focus]
+entry = "scripts/image-focus.js"
+markers = [".figure-image-focus"]
+activation = "initImageFocus"
+content_driven = true
+"#,
+        );
+        // Uniquement "image-focus" — "navigation" n'y figure jamais.
+        write_registry(&base, "image-focus = 1\n");
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            "scripts/navigation.js".to_string(),
+            asset("/scripts/navigation.HASH.js"),
+        );
+        assets.insert(
+            "scripts/image-focus.js".to_string(),
+            asset("/scripts/image-focus.HASH.js"),
+        );
+
+        let result = validate_capabilities(&manifest_dir, &assets, &HashSet::new()).unwrap();
+        assert_eq!(result.len(), 2);
+        let by_name: HashMap<&str, &CapabilityInfo> =
+            result.iter().map(|(n, c)| (n.as_str(), c)).collect();
+        assert_eq!(by_name["navigation"].bit, None);
+        assert_eq!(by_name["image-focus"].bit, Some(1));
 
         let _ = fs::remove_dir_all(&base);
     }

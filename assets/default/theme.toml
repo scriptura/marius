@@ -31,37 +31,44 @@ activation = "initScrollToTop"
 entry = "scripts/disclosure.js"
 markers = [".tabs", ".accordion"]
 activation = "initDisclosure"
+content_driven = true
 
 [scripts.capabilities.map]
 deps = ["libraries/deckgl/deckgl.js"]
 entry = "scripts/map.js"
 markers = [".map"]
 activation = "bootstrap"
+content_driven = true
 
 [scripts.capabilities.media-player]
 entry = "scripts/media-player.js"
 markers = [".media"]
 activation = "bootstrap"
+content_driven = true
 
 [scripts.capabilities.line-mark]
 entry = "scripts/line-mark.js"
 markers = [".add-line-marks"]
 activation = "boot"
+content_driven = true
 
 [scripts.capabilities.image-focus]
 entry = "scripts/image-focus.js"
 markers = [".figure-image-focus"]
 activation = "initImageFocus"
+content_driven = true
 
 [scripts.capabilities.youtube]
 entry = "scripts/youtube.js"
 markers = [".video-youtube"]
 activation = "bootstrap"
+content_driven = true
 
 [scripts.capabilities.range]
 entry = "scripts/range.js"
 markers = [".range", ".range-multithumb"]
 activation = "initSliders"
+content_driven = true
 
 [scripts.components]
 # Dictionnaire (HashMap) : Cible -> Dossier Source.

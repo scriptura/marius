@@ -5,6 +5,3 @@ line-mark = 8
 image-focus = 16
 range = 32
 youtube = 64
-
-navigation = 32768
-scroll-to-top = 65536
