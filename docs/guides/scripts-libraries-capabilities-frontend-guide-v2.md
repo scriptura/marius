@@ -359,9 +359,10 @@ runtime. Mais il y a en réalité **deux besoins bien distincts**, souvent
 confondus au premier abord :
 
 1. **Besoin structurel, connu à la compilation** — un `.marius` (layout ou
-   composant) porte un marqueur `class` **en dur, dans son propre HTML**
-   (`<pre class="add-line-marks">` écrit par le développeur du template).
-   Ce besoin est vrai pour **tous** les enregistrements rendus par ce
+   composant) porte un marqueur **en dur, dans son propre HTML** — une
+   classe (`<pre class="add-line-marks">`), un id, un attribut `data-*`, ou
+   un nom d'élément, selon la forme déclarée sur la capacité (§6.3.2). Ce
+   besoin est vrai pour **tous** les enregistrements rendus par ce
    template, sans exception — Forge le sait dès le build, avant même
    qu'aucune donnée n'existe.
 2. **Besoin éditorial, connu uniquement à l'écriture** — un éditeur écrit
@@ -390,24 +391,30 @@ Deux chemins, indépendants, qui convergent au même endroit du HTML final.
 
 ```
 ┌───────────────────────────────┐
-│  Un .marius porte un          │   <pre class="add-line-marks">
-│  marqueur en dur dans son     │   écrit directement dans le template,
-│  propre HTML                  │   jamais dans un {{ champ }}
+│  Un .marius porte un          │   <pre class="add-line-marks">, ou
+│  marqueur en dur dans son     │   <main id="x">, <div data-component>,
+│  propre HTML — classe, id,    │   selon la forme déclarée sur la
+│  attribut data-*, ou élément  │   capacité — écrit directement dans le
+│                               │   template, jamais dans un {{ champ }}
 └──────────┬────────────────────┘
            │ lu au build (cargo build), sur le flux DÉJÀ FUSIONNÉ
            │ parent+enfant (post-lower(), avant splice MARIUS_MODULES)
            ▼
 ┌───────────────────────────────┐
-│ extract_static_class_tokens() │   fragment-forge — scanne UNIQUEMENT les
-│ (fragment-forge)              │   FlatPageToken::Static, jamais Field/IfBool
+│ extract_static_marker_facts() │   fragment-forge — quatre extracteurs
+│ (fragment-forge)              │   indépendants (classes/ids/attributs
+│                               │   data-*/éléments), chacun scannant
+│                               │   UNIQUEMENT les FlatPageToken::Static,
+│                               │   jamais Field/IfBool
 └──────────┬────────────────────┘
            ▼
 ┌───────────────────────────────┐
-│ lower_modules_for_template()  │   Marqueur trouvé dans ce template →
-│ (build.rs)                    │   émission INCONDITIONNELLE (constant
-│                               │   folding : Forge sait déjà, à la
-│                               │   compilation, que CE template en a
-│                               │   besoin, quel que soit le record)
+│ lower_modules_for_template()  │   Marqueur trouvé (quelle que soit sa
+│ (build.rs)                    │   forme) dans ce template → émission
+│                               │   INCONDITIONNELLE (constant folding :
+│                               │   Forge sait déjà, à la compilation, que
+│                               │   CE template en a besoin, quel que soit
+│                               │   le record)
 └──────────┬────────────────────┘
            ▼
       buf.push_str(...);   ← jamais de test if, jamais de bit consulté
@@ -415,6 +422,13 @@ Deux chemins, indépendants, qui convergent au même endroit du HTML final.
 ```
 
 #### 6.2.2 Branche dynamique — détection à l'écriture, décision au rendu
+
+**Ne reconnaît que la forme `.classe`.** `compute_js_deps` (SQL) ne teste
+que des tokens `class` — un marqueur `#id`, `[data-*]` ou élément bare
+déclaré sur une capacité n'est jamais consulté ici, quelle que soit
+l'écriture du contenu éditorial. Une capacité qui ne porte aucun marqueur
+de forme `.classe` ne peut donc jamais être déclenchée par cette branche —
+seule la branche statique (§6.2.1) peut la déclencher, structurellement.
 
 ```
 ┌──────────────────────────────┐
@@ -481,15 +495,23 @@ jamais à lui. La même règle de domination s'applique séparément à toute
 fait **au build**, côté Rust, sur le HTML du template lui-même — jamais sur
 `content.body`. La détection dynamique (scan de `content.body`) se fait
 **une fois, à l'écriture**, côté SQL — jamais sur les fichiers `.marius`.
-Les deux définitions du marqueur (« un token exact d'un attribut `class` »)
-doivent rester identiques entre les deux implémentations, mais ce sont
-deux implémentations **indépendantes** — aucune ne dérive de l'autre, aucun
-code ni bibliothèque de parsing n'est partagé entre elles.
 
-Quatre fichiers doivent donc rester synchronisés à la main : `theme.toml`,
-`scripts_registry.lock`, le corps de `compute_js_deps()` (marqueur
-dynamique), et le HTML des `.marius` concernés (marqueur statique). Rien ne
-les régénère automatiquement les uns à partir des autres.
+Les deux implémentations sont **indépendantes** — aucune ne dérive de
+l'autre, aucun code ni bibliothèque de parsing n'est partagé entre elles —
+et **asymétriques par construction** : la branche statique reconnaît quatre
+formes de marqueur (`.classe`, `#id`, `[data-*]`, élément bare), la branche
+dynamique n'en reconnaît qu'une (`.classe`, comparaison exacte de token).
+Pour un marqueur de forme `.classe`, les deux définitions doivent rester
+identiques (même token de classe testé des deux côtés) ; pour les trois
+autres formes, seule la branche statique existe.
+
+Trois éléments doivent donc rester synchronisés à la main pour une
+capacité déclenchée dynamiquement : `theme.toml`, `scripts_registry.lock`,
+et le corps de `compute_js_deps()` (marqueur `.classe` dynamique). Le HTML
+des `.marius` concernés (marqueur statique, quelle que soit sa forme) est
+indépendant de cette synchronisation — c'est un scan générique, jamais une
+liste à maintenir manuellement. Rien ne régénère automatiquement ces
+éléments les uns à partir des autres.
 
 #### 6.2.4 Sérialisation finale — un seul `<script>` par page, jamais un par capacité
 
@@ -536,10 +558,12 @@ capacité (§6.2.1-§6.2.3) n'y participent pas et n'en sont pas affectés** :
 
 Exemple fil rouge : ajouter une capacité `carousel`, déclenchée soit par la
 classe `carousel-embed` posée par un éditeur dans le corps d'un article
-(branche dynamique), soit par un `.marius` qui la porte en dur dans son
-propre layout (branche statique) — via un module `carousel.js` exportant
-une fonction `boot`. Les étapes 6.3.1 à 6.3.3 sont **communes aux deux
-branches** ; l'étape 6.3.4 ne concerne que la branche dynamique.
+(branche dynamique — donc obligatoirement une forme `.classe`, §6.2.2),
+soit par un `.marius` qui la porte en dur dans son propre layout (branche
+statique, n'importe laquelle des quatre formes) — via un module
+`carousel.js` exportant une fonction `boot`. Les étapes 6.3.1 à 6.3.3 sont
+**communes aux deux branches** ; l'étape 6.3.4 ne concerne que la branche
+dynamique.
 
 #### 6.3.1 Le module JS
 
@@ -551,6 +575,18 @@ export function boot() {
   // ...
 }
 ```
+
+> **Invariant — une capacité possède un unique point d'activation
+> public.** `activation` désigne le symbole exporté que le runtime appelle
+> pour activer le module — jamais l'ensemble des exports du module. Le
+> module peut exporter d'autres fonctions (tests, API interne, sous-étapes)
+> sans que ces symboles constituent des activations Marius : **le nombre
+> d'exports ES d'un module n'est pas le nombre d'activations Marius**, et
+> aucun de ces exports additionnels n'a sa place dans `theme.toml`. Toute
+> orchestration entre plusieurs opérations internes (plusieurs sous-étapes
+> d'initialisation, écouteurs d'événements, réaction à une navigation
+> HTMX) appartient au module JavaScript lui-même, à l'intérieur de la
+> fonction d'activation — jamais au contrat `theme.toml`.
 
 Le nom de la fonction est libre — il sera référencé tel quel dans
 `theme.toml` (`activation`). Convention observée dans ce projet : `init` ou
@@ -572,19 +608,29 @@ activation = "boot"
 ```
 
 - `entry` : chemin du fichier JS, relatif au dossier du thème.
-- `markers` : liste des classes HTML qui déclenchent cette capacité. Peut
-  contenir plusieurs entrées (cf. `range`/`range-multithumb`, une seule
-  capacité, deux marqueurs qui activent le même bit). **Sert aux deux
-  branches** (§6.2) : c'est cette même liste que `lower_modules_for_template`
-  (build.rs) compare au HTML statique des `.marius` (§6.2.1) — mais elle
-  n'alimente **jamais mécaniquement** `compute_js_deps` (§6.2.2, SQL) :
-  ajouter un marqueur ici ne le fait pas apparaître comme par magie côté
-  SQL, il faut l'étape 6.3.4 séparément. Les deux listes doivent rester
-  synchronisées à la main.
-- `activation` : nom de la fonction exportée à appeler. **Doit être un
-  identifiant valide** (lettres/chiffres/underscore, ne commence pas par un
-  chiffre) — il est injecté tel quel dans le code Rust généré, jamais
-  échappé comme une chaîne.
+- `markers` : liste de marqueurs, quatre formes reconnues, sous-ensemble
+  fermé inspiré des sélecteurs CSS — jamais de combinator, jamais de
+  sélecteur composé, jamais de pseudo-classe/pseudo-élément :
+
+  | Syntaxe | Forme | Teste la présence de |
+  |---|---|---|
+  | `.nom` | classe | l'attribut `class="...nom..."` |
+  | `#nom` | id | l'attribut `id="nom"` |
+  | `[data-nom]` | attribut `data-*` | l'attribut `data-nom`, **valeur jamais considérée** |
+  | `nom` (bare, sans préfixe) | élément | la balise `<nom>` — aucune whitelist HTML, un custom element est accepté à égalité avec un élément standard |
+
+  Une capacité peut porter plusieurs marqueurs, y compris de formes
+  différentes (cf. `range`/`range-multithumb`, deux marqueurs `.classe`
+  qui activent la même capacité). **Sert aux deux branches, mais pas à
+  parts égales** (§6.2.3) : les quatre formes sont comparées au HTML
+  statique des `.marius` par `lower_modules_for_template` (§6.2.1) ; seule
+  la forme `.classe` alimente `compute_js_deps` (§6.2.2, SQL), et jamais
+  automatiquement — il faut l'étape 6.3.4 séparément.
+- `activation` : nom de la fonction exportée à appeler — **le point
+  d'activation public unique de la capacité** (voir l'invariant en
+  §6.3.1). **Doit être un identifiant valide** (lettres/chiffres/
+  underscore, ne commence pas par un chiffre) — il est injecté tel quel
+  dans le code Rust généré, jamais échappé comme une chaîne.
 - `deps` : optionnel, voir §4 en détail. Absent = comportement strictement
   identique à avant l'introduction de ce champ.
 
@@ -610,11 +656,14 @@ Règles strictes :
 #### 6.3.4 `compute_js_deps` — reconnaître le marqueur côté SQL (branche dynamique — §6.2.2)
 
 Nécessaire **uniquement si** la capacité doit pouvoir être déclenchée par du
-contenu éditorial (un éditeur pose la classe dans le corps d'un article).
-Si `carousel` ne doit jamais être déclenchée que par des `.marius` (§6.3.5),
-cette étape peut être sautée — mais alors le bit attribué en 6.3.3 ne sera
-jamais réellement testé au runtime : autant ne pas le prévoir du tout, ou
-le documenter comme réservé à l'usage statique.
+contenu éditorial (un éditeur pose la classe dans le corps d'un article) —
+et **uniquement possible** pour un marqueur de forme `.classe` (§6.2.2) :
+un marqueur `#id`, `[data-*]` ou élément bare n'a **aucune** contrepartie
+dans cette fonction, quelle que soit la capacité. Si `carousel` ne doit
+jamais être déclenchée que par des `.marius` (§6.3.5), cette étape peut
+être sautée — mais alors le bit attribué en 6.3.3 ne sera jamais réellement
+testé au runtime : autant ne pas le prévoir du tout, ou le documenter
+comme réservé à l'usage statique.
 
 Dans `db/05_content/02_systems.sql`, fonction `content.compute_js_deps` :
 ajouter un bloc `IF` avec le même bit que dans `scripts_registry.lock`.
@@ -629,17 +678,17 @@ END IF;
 uniquement. Jamais de sous-chaîne (`position()`/`LIKE`), jamais d'attribut
 `data-*`, jamais un autre motif HTML. La fonction découpe déjà tous les
 attributs `class="..."` du corps en tokens individuels (`v_classes`,
-`regexp_split_to_table` sur les espaces) — un nouveau marqueur se contente
-de tester son appartenance à cet ensemble, rien d'autre à toucher dans le
-corps de la fonction.
+`regexp_split_to_table` sur les espaces) — un nouveau marqueur `.classe` se
+contente de tester son appartenance à cet ensemble, rien d'autre à toucher
+dans le corps de la fonction.
 
 #### 6.3.5 Déclencher par un `.marius` (branche statique — §6.2.1)
 
 Rien à câbler séparément côté Rust — le scan statique
-(`extract_static_class_tokens`) est générique, il compare **automatiquement**
+(`extract_static_marker_facts`) est générique, il compare **automatiquement**
 le HTML de **chaque template** aux `markers` de **toutes** les capacités
-déclarées en 6.3.2. Il suffit d'écrire le marqueur directement dans le
-`.marius` concerné :
+déclarées en 6.3.2, quelle que soit leur forme. Il suffit d'écrire le
+marqueur directement dans le `.marius` concerné :
 
 ```html
 <pre class="carousel-embed">
@@ -654,7 +703,9 @@ compris sur les pages `STATIC_PAGES` (§9). Écrire `class="{{ some_field }}"`
 ne compte **jamais** comme un marqueur statique — seule une chaîne littérale
 dans le HTML du template est détectable ici, par construction (fragment-forge
 ne scanne que les tokens `FlatPageToken::Static`, jamais l'intérieur d'un
-`{{ champ }}`).
+`{{ champ }}`). Même contrainte pour les trois autres formes : un
+`id="{{ champ }}"`, un `data-nom="{{ champ }}"` ou une balise générée
+dynamiquement n'est jamais détectable statiquement.
 
 Si le même marqueur apparaît **à la fois** dans un `.marius` et dans le
 corps d'un enregistrement rendu par ce template, une seule émission est
@@ -749,7 +800,10 @@ référencée directement par un template) est également figée à cette étape
   absente de l'autre ;
 - bit invalide (pas une puissance de deux) ou dupliqué ;
 - `activation` qui n'est pas un identifiant valide ;
-- `markers` vide ;
+- `markers` vide, ou contenant un marqueur dont la syntaxe n'est pas
+  reconnue (combinator, sélecteur composé, pseudo-classe/pseudo-élément,
+  valeur d'attribut, préfixe inconnu — voir le tableau des quatre formes
+  en §6.3.2) ;
 - clé `{path}.js` (ou toute clé `{% asset %}`) absente du manifeste d'assets
   (→ retour à l'Étape 1) ;
 - **une entrée de `deps` absente du manifeste** (bibliothèque non
@@ -974,6 +1028,14 @@ différente selon le type de page :
   autre fichier de la même bibliothèque garde ce chemin intact après le
   build. Un 404 sur un chemin qui n'apparaît nulle part dans `theme.toml`
   ni dans aucun script du thème pointe généralement vers ce cas.
+- **Un marqueur `#id`, `[data-*]` ou élément bare posé dans du contenu
+  éditorial (`content.body`) n'active jamais une capacité.** Seule la
+  forme `.classe` est reconnue par `compute_js_deps` (§6.2.2/6.3.4). Si une
+  capacité déclarée avec, par exemple, `markers = ["main"]` (élément) ne se
+  déclenche jamais sur du contenu qui contient pourtant `<main>`, ce n'est
+  pas un bug — cette forme n'est structurellement testable qu'au niveau
+  d'un `.marius` (branche statique, §6.3.5), jamais au niveau d'un corps
+  éditorial.
 - **`deps` sur `[scripts.components]` n'existe pas.** `CapabilityConfig`
   seul porte ce champ ; `[scripts.components]` reste une simple table
   `nom → chemin` (§2). Un component qui a besoin d'un chargement garanti
@@ -983,8 +1045,8 @@ différente selon le type de page :
 ## 10. Constats d'architecture pour une prochaine passe (informationnel)
 
 Le point 10.1 ci-dessous a depuis été **tranché et implémenté** — ce n'est
-plus un simple constat, contrairement au point 10.2, qui lui reste une
-observation ouverte, sans décision prise.
+plus un simple constat, contrairement aux points 10.2 et 10.3, qui restent
+des observations ouvertes, sans décision prise.
 
 ### 10.1 `[static.verbatim]` interdit au JavaScript — décision actée
 
@@ -1074,6 +1136,24 @@ Concrètement, à part `webmanifest.rs`, tous les autres pipelines de ce
 crate utilisent le chemin canonique physique : `{% asset styles/print.css %}`,
 `{% asset scripts/mon-script.js %}`, etc.
 
+### 10.3 `markers` étendus — asymétrie statique/dynamique non résolue
+
+Observation factuelle, non corrigée : `markers` reconnaît quatre formes
+(`.classe`, `#id`, `[data-*]`, élément bare, §6.3.2) au niveau de la
+branche statique (`extract_static_marker_facts`/`lower_modules_for_template`),
+mais la branche dynamique (`compute_js_deps`, SQL) n'en reconnaît qu'une
+seule (`.classe`, §6.2.2/6.3.4). Une capacité déclarée uniquement avec des
+marqueurs `#id`/`[data-*]`/élément ne peut donc **jamais** être déclenchée
+par du contenu éditorial — seule la branche statique peut la déclencher.
+
+Ceci n'est pas un bug de l'implémentation actuelle — `compute_js_deps` n'a
+volontairement pas été modifiée dans le cadre de la généralisation de
+`markers` (chantier distinct, non traité à ce jour). C'est une limite
+réelle du système tel qu'il existe : si un besoin de déclenchement
+dynamique par `#id`, `[data-*]` ou élément se présente, il reste entier et
+non résolu.
+
 ---
 
-_Document révisé le 31 août 2026_
+_Document rédigé le 31 août 2026_
+_Révisé le 2 septembre 2026_

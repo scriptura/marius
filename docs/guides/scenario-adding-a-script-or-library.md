@@ -211,3 +211,8 @@ c'est toujours une des Recettes A à E ci-dessus — jamais `[static.verbatim]`.
   bien été régénérée côté serveur après le déploiement (§7 du guide
   technique) — c'est l'étape la plus souvent oubliée, et elle ne prévient
   jamais par une erreur.
+
+---
+
+_Document rédigé le 31 août 2026_
+_Révisé le 2 septembre 2026_
