@@ -75,26 +75,28 @@
   }
 
   & output {
+    --size: 5em;
+    --angle: 45deg;
     position: relative;
     margin: 0 auto 2em;
     text-align: center;
 
     &:not(.phylactery) {
-      --size: 5em;
       width: var(--size);
+      aspect-ratio: 1 / 1; /* Èvite un repaint/reflow à l'affichage */
       line-height: var(--size);
       vertical-align: middle;
 
       &::after {
+        content: '';
         position: absolute;
         z-index: -1;
         inset: 0;
         box-sizing: border-box;
-        content: '';
         background-color: var(--color);
         border-radius: 50% 50% 0 50%;
         box-shadow: 0 0.5rem 2rem var(--colorAB3);
-        transform: rotate(45deg);
+        transform: rotate(var(--angle));
       }
     }
   }
@@ -108,8 +110,8 @@
     box-shadow: 0 0.5rem 2rem var(--colorAB3);
 
     &::after {
-      position: absolute;
       content: '';
+      position: absolute;
       bottom: -1em;
       left: calc(50% - 1em);
       width: 2em;

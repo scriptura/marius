@@ -3,7 +3,7 @@
 Ce mémo est pour vous si vous voulez ajouter du JavaScript à une page — le
 vôtre, ou une bibliothèque récupérée ailleurs (npm, CDN téléchargé, etc.) —
 sans avoir besoin de comprendre comment tout ça fonctionne en coulisses.
-Pour les détails techniques : `scripts-librairies-capacites-frontend-guide.md`.
+Pour les détails techniques : `scripts-libraries-capabilities-frontend-guide-v2.md`.
 
 ## Une seule question à se poser
 
@@ -21,9 +21,9 @@ utile ?**
 Une seule vraie différence : **a-t-il une condition d'apparition ?**
 - Non, il doit juste être là quand le template l'inclut → **component**
   (Recette A).
-- Oui, il ne doit apparaître que si une classe précise est présente (posée
-  par un éditeur dans le contenu, ou en dur dans un template) →
-  **capability** (Recette B).
+- Oui, il ne doit apparaître que si un signal précis est présent (posé par
+  un éditeur dans le contenu, ou en dur dans un template) → **capability**
+  (Recette B).
 
 Une capability peut faire tout ce qu'un component fait, avec en plus cette
 condition — mais elle demande deux fichiers de configuration
@@ -52,12 +52,29 @@ bibliothèque, importez-la directement (Recette D).
 
 C'est ce qu'on appelle une « capability ». Deux ingrédients :
 
-- Une **classe HTML** qui signale le besoin — par exemple `class=
-  "carousel-embed"`, posée soit par un éditeur dans le contenu d'une page,
+- Un **signal HTML** qui déclenche le besoin — quatre formes possibles,
+  résumées ici, détaillées au §6.3.2 du guide technique :
+
+  | Vous écrivez | Ça repère | Exemple |
+  |---|---|---|
+  | `.mon-marqueur` | une classe HTML | `class="mon-marqueur"` |
+  | `#mon-marqueur` | un id HTML | `id="mon-marqueur"` |
+  | `[data-mon-marqueur]` | un attribut `data-*` (juste sa présence, jamais sa valeur) | `data-mon-marqueur` |
+  | `mon-element` (sans rien devant) | une balise avec ce nom | `<mon-element>` |
+
+  Ce signal peut être posé soit par un éditeur dans le contenu d'une page,
   soit directement dans un template si le besoin est systématique pour ce
   template.
-- Un **bit** attribué à cette classe côté base de données, pour que le
-  serveur sache quelle case tester.
+- Un **bit** attribué à ce signal côté base de données, pour que le
+  serveur sache quelle case tester — **uniquement nécessaire pour la forme
+  classe (`.mon-marqueur`), et uniquement si vous voulez qu'elle se
+  déclenche depuis le contenu d'une page** (pas seulement depuis un
+  template). Cela demande une ligne en plus dans `theme.toml`
+  (`content_driven = true`) que vous pouvez écrire vous-même, **et** un
+  bit ajouté côté base de données par un développeur backend — la seule
+  partie que vous ne pouvez pas faire seul(e). Les trois autres formes
+  (id, attribut, élément) ne peuvent être déclenchées que par un template,
+  jamais par le contenu d'une page — jamais de bit à demander pour elles.
 
 Étapes :
 
@@ -67,18 +84,53 @@ C'est ce qu'on appelle une « capability ». Deux ingrédients :
      // ...
    }
    ```
-2. Déclarez-le dans `theme.toml`, avec le nom de la classe qui doit le
-   déclencher (voir §6.3 du guide technique pour le détail exact des
-   fichiers à modifier).
-3. **Un développeur backend doit ajouter ce bit côté base de données** —
-   c'est la seule partie que vous ne pouvez pas faire seul(e).
-4. Une fois fait, posez la classe dans un contenu (déclenchement au cas
-   par cas) ou dans un template (déclenchement systématique pour ce
-   template).
+   Votre module peut exporter d'autres fonctions à côté de celle-ci (pour
+   vos propres besoins internes) — seule celle que vous déclarez à l'étape
+   suivante compte pour Marius. Une capability n'a jamais qu'un seul point
+   d'entrée public, même si son script fait beaucoup de choses en interne.
+2. Déclarez-le dans `theme.toml`, avec le signal qui doit le déclencher
+   (voir §6.3 du guide technique pour le détail exact des fichiers à
+   modifier).
+3. **Si vous utilisez la forme classe (`.mon-marqueur`) et que vous voulez
+   qu'elle se déclenche depuis le contenu d'une page**, ajoutez
+   `content_driven = true` dans la déclaration `theme.toml` de votre
+   capability (ça, vous pouvez le faire vous-même), **puis** demandez à un
+   développeur backend d'ajouter le bit correspondant côté base de données
+   — c'est la seule partie que vous ne pouvez pas faire seul(e). Si vous
+   utilisez une autre forme (id, attribut, élément), ou si la classe ne
+   doit se déclencher que depuis un template, sautez cette étape
+   entièrement — pas de `content_driven`, pas de bit à demander.
+4. Une fois fait, posez le signal dans un contenu (déclenchement au cas
+   par cas, classe uniquement, nécessite `content_driven = true`) ou dans
+   un template (déclenchement systématique pour ce template, les quatre
+   formes fonctionnent, `content_driven` n'a aucune importance).
 
-Rien à écrire dans votre `.marius` au-delà de la classe elle-même — la
-balise `<script>` de la capability est générée et injectée automatiquement
-partout où c'est nécessaire.
+Rien à écrire dans votre `.marius` au-delà du signal lui-même — la balise
+`<script>` de la capability est générée et injectée automatiquement partout
+où c'est nécessaire.
+
+Exemple complet, capability déclenchée par une classe posée dans le
+contenu d'un article :
+
+```toml
+[scripts.capabilities.carousel]
+entry = "scripts/carousel.js"
+markers = [".carousel-embed"]
+activation = "boot"
+content_driven = true
+```
+
+Si votre capability ne doit jamais se déclencher que depuis un template
+(les cas `navigation` ou `scroll-to-top`, par exemple), n'écrivez rien du
+tout — pas de ligne `content_driven` à ajouter, elle vaut `false` par
+défaut :
+
+```toml
+[scripts.capabilities.navigation]
+entry = "scripts/navigation.js"
+markers = [".site-navigation"]
+activation = "boot"
+```
 
 ## Recette C — déclarer une bibliothèque externe
 
@@ -146,7 +198,7 @@ possible pour une capability, pas pour un component) :
 ```toml
 [scripts.capabilities.ma-capacite]
 entry = "scripts/ma-capacite.js"
-markers = ["mon-marqueur"]
+markers = [".mon-marqueur"]
 activation = "boot"
 deps = ["libraries/ma-lib/ma-lib.js"]
 ```
@@ -162,9 +214,11 @@ capabilities partagent la même dépendance (voir plus bas).
 ## Que dois-je écrire dans mon `.marius` ?
 
 - **Component** : la balise `{% asset scripts/mon-script.js %}` (Recette A).
-- **Capability** : rien de spécial — juste la classe marqueur (`class=
-  "mon-marqueur"`), soit dans le contenu, soit en dur dans le template.
-- **`deps`** : littéralement rien — ni balise, ni classe supplémentaire.
+- **Capability** : rien de spécial — juste le signal marqueur, sous l'une
+  des quatre formes de la Recette B (`class="mon-marqueur"` pour la forme
+  classe, ou l'équivalent id/attribut/élément), soit dans le contenu, soit
+  en dur dans le template.
+- **`deps`** : littéralement rien — ni balise, ni signal supplémentaire.
   Une fois déclarée dans `theme.toml`, la dépendance est injectée
   automatiquement partout où la capability qui la consomme apparaît.
 
@@ -206,6 +260,18 @@ c'est toujours une des Recettes A à E ci-dessus — jamais `[static.verbatim]`.
 - **Le build échoue avec un message clair** (fichier introuvable,
   bibliothèque non déclarée, chemin incorrect, dépendance introuvable) →
   corrigez ce que le message indique, c'est fiable.
+- **Le build échoue en mentionnant `content_driven`** — soit votre
+  capability a `content_driven = true` mais aucun bit ne lui a encore été
+  attribué côté base de données (revenez à l'étape 3 de la Recette B),
+  soit l'inverse : un bit existe côté base de données pour une capability
+  qui n'a pas (ou plus) `content_driven = true` dans `theme.toml` — dans ce
+  second cas, demandez à un backend de vérifier si le bit doit être retiré
+  ou si `content_driven = true` a simplement été oublié.
+- **Votre capability ne se déclenche jamais depuis le contenu d'une page,
+  alors que la classe y est bien présente** → vérifiez que
+  `content_driven = true` est bien présent dans sa déclaration `theme.toml`
+  (Recette B, étape 3) — sans cette ligne, seul un template peut la
+  déclencher, jamais le contenu d'une page.
 - **Le build est vert, mais rien ne change à l'écran** → ce n'est presque
   jamais votre script. Demandez à un backend de vérifier que la page a
   bien été régénérée côté serveur après le déploiement (§7 du guide

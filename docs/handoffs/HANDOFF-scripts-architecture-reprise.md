@@ -205,63 +205,11 @@ totale et précède toute connaissance de l'usage réel de la capacité.
 
 ## 3. `markers` — modèle actuellement implémenté (🟢)
 
-- **Type** : `Vec<String>`, côté config (`config.rs:147`) et côté
-  `CapabilityInfo` (`build.rs`, champ `markers`).
-- **Lu par** : `lower_modules_for_template` (`build.rs:693`, comparaison
-  directe à un `HashSet<String>`) et, indépendamment, `compute_js_deps`
-  côté SQL (non relu cette session, décrit dans HANDOFF v2 comme
-  `IF v_tokens && ARRAY[...]`).
-- **Prédicat réellement évalué** : `cap.markers.iter().any(|m|
-  static_classes.contains(m))` — un simple test d'appartenance
-  ensembliste, aucune autre logique. `static_classes` est produit par
-  `extract_static_class_tokens` (`lib.rs:2703-2735`), qui ne reconnaît
-  **que** l'attribut `class="..."`/`class='...'` (regex ancrée sur
-  `class=` littéralement, jamais un autre nom d'attribut) et éclate sa
-  valeur sur les espaces.
-- **Abstraction actuelle** : **aucune**. `markers` est intrinsèquement lié
-  à la notion de classe HTML — pas une couche neutre au-dessus d'un
-  concept plus général de "prédicat de présence dans le HTML". Le nom du
-  champ (`markers`) est déjà plus générique que son implémentation
-  (`class` uniquement).
-- **Structures dépendantes de cette représentation** : `CapabilityInfo`
-  (Rust), `extract_static_class_tokens` (fragment-forge), la fonction SQL
-  `compute_js_deps`. Les trois supposent un token de classe exact,
-  jamais un `id`, un `data-*`, ou la présence d'un élément.
-
-### 🔴 Écart avec l'intention potentielle (id/data-*/présence d'élément)
-
-Aucune trace dans le code d'une abstraction en ce sens. Passer à un modèle
-plus général toucherait au minimum trois points indépendants qui devront
-rester synchronisés manuellement (déjà le cas aujourd'hui pour `class`) :
-la regex `lib.rs`, le prédicat `lower_modules_for_template`, et la
-fonction SQL — aucun partage de logique entre eux actuellement, donc
-aucune généralisation ne serait automatique.
+Fait.
 
 ## 4. `activation` — cardinalité actuellement implémentée (🟢)
 
-- **Type** : `String` unique, aucune structure `Vec` ni `Option` nulle
-  part (`config.rs:151`, `CapabilityInfo.activation: String`,
-  `ModuleEmission.activation: String`).
-- **Propagation** : `cap.activation.clone()` → `ModuleEmission.activation`
-  → un seul `import{X as _i}from"URL";` + un seul `_i();` par capacité
-  émise (`build.rs`, `render_modules_as_rust`/
-  `render_modules_as_static_html`).
-- **Contrainte de validité** : doit être un identifiant JS valide
-  (vérifié par `is_valid_identifier`, `build.rs:435`) — injecté tel quel
-  dans le code généré, jamais échappé comme chaîne.
-- **Invariant actuel** : une capacité = un import = un appel. Aucune
-  notion de plusieurs points d'activation pour une même capacité.
-
-### 🔴 Implication structurelle d'un passage à `activation = [...]`
-
-Toucherait au minimum : `CapabilityConfig.activation` (type),
-`CapabilityInfo.activation` (type), `ModuleEmission.activation` (type),
-et la boucle de génération dans les deux fonctions de rendu — qui devrait
-produire N imports + N appels par capacité au lieu d'un seul, avec un
-schéma de nommage d'alias à étendre (actuellement un compteur global `_i`
-par émission de capacité, jamais imbriqué). Le mécanisme de
-dédoublonnage/agrégation de `deps` (`aggregate_deps`) n'est en revanche
-pas concerné — il opère sur les dépendances, jamais sur les activations.
+Proposition rejetée.
 
 ## 5. Invariants à préserver
 

@@ -33,7 +33,7 @@ compilateur (`marius-assets`) pour tout résoudre :
 | Besoin | Section `theme.toml` | Condition de chargement |
 |---|---|---|
 | Script chargé sur des pages précises, décidé au moment d'écrire le template | `[scripts.components]` | Aucune — inclusion explicite via `{% asset %}` dans un `.marius` |
-| Script chargé selon un marqueur structurel (`.marius`) ou éditorial (`content.body`) | `[scripts.capabilities.*]` | Bit `js_deps` (dynamique) ou détection statique au build |
+| Script chargé selon un marqueur structurel (`.marius`, toujours) ou éditorial (`content.body`, uniquement si `content_driven = true`) | `[scripts.capabilities.*]` | Détection statique au build, et/ou bit `js_deps` (dynamique) |
 | Code tiers vendoré, importé **littéralement** par le texte ESM d'un script | `[libraries.*]` (`module = true`, défaut) | Jamais seul — un `import` écrit à la main dans le script consommateur (§3.2) |
 | Code tiers vendoré dont le **chargement** (pas l'import) doit précéder une capacité — notamment tout UMD/classique | `[libraries.*]` (`module = false` explicite) + `deps` sur la capacité consommatrice | Balise `<script>` distincte, injectée avant celle de la capacité — **jamais** un `import` (§4) |
 
@@ -369,7 +369,10 @@ confondus au premier abord :
    un article dont le corps contient `class="video-youtube"`. Ce besoin
    **varie d'un enregistrement à l'autre** (l'article A embarque une vidéo,
    l'article B non) — seul PostgreSQL, à l'écriture du corps, peut le
-   savoir.
+   savoir. **N'existe que pour une capacité déclarée `content_driven =
+   true`** (§6.3.2) — une capacité `content_driven = false` (défaut) n'a
+   structurellement aucun besoin éditorial de ce type, quel que soit son
+   contenu.
 
 Le compilateur AOT (`db-forge`) traite les deux, mais **jamais par le même
 mécanisme** : le premier par un scan statique du template lui-même
@@ -378,10 +381,15 @@ mécanisme** : le premier par un scan statique du template lui-même
 convergent au même endroit dans le HTML final (`<!-- MARIUS_MODULES -->`),
 sans jamais se mélanger en amont.
 
-Contrairement à un component (§2), une capacité est **toujours** un point
-d'entrée ESM candidat à un test conditionnel — jamais chargée
+Contrairement à un component (§2), une capacité `content_driven = true`
+est un point d'entrée ESM candidat à un test conditionnel — jamais chargée
 inconditionnellement sur toutes les pages qui incluent son layout, sauf
 dans le cas particulier où son marqueur est détecté statiquement (§6.2.1).
+Une capacité `content_driven = false` (défaut, cas de `navigation` ou
+`scroll-to-top`) n'est **jamais** candidate à un test conditionnel — elle
+n'est émise que si un marqueur la détecte statiquement, ou pas émise du
+tout pour ce template ; aucun bit `js_deps` n'existe pour elle, à aucun
+moment du pipeline.
 
 ### 6.2 Suivre la donnée — vue d'ensemble
 
@@ -465,8 +473,10 @@ seule la branche statique (§6.2.1) peut la déclencher, structurellement.
 ┌──────────────────────┐   ┌──────────────────────┐
 │ Émission statique    │   │ Émission dynamique   │
 │ (6.2.1, si marqueur  │   │ (6.2.2, si marqueur  │
-│  détecté dans le     │   │  absent du template  │
-│  template)           │   │  ET has_record=true) │
+│  détecté dans le     │   │  absent du template, │
+│  template)           │   │  content_driven =    │
+│                       │   │  true, ET            │
+│                       │   │  has_record=true)    │
 └──────────┬───────────┘   └──────────┬───────────┘
            │                          │
            └──────────────┬───────────┘
@@ -488,28 +498,38 @@ coup** : pour une capacité et un template donnés, il n'y a **au plus une**
 template, l'émission est inconditionnelle et le test `if record.js_deps &
 BIT != 0` n'est **même pas généré** pour cette capacité sur ce template —
 la présence statique domine toujours le besoin dynamique, elle ne s'ajoute
-jamais à lui. La même règle de domination s'applique séparément à toute
-`deps` consommée par cette capacité (§4.4).
+jamais à lui. Pour une capacité `content_driven = false`, ce test n'est
+**jamais généré non plus, quelle que soit la présence statique** : il n'y
+a structurellement aucun bit à tester (`CapabilityInfo.bit == None`, résolu
+une fois pour toutes par `validate_capabilities`, §6.3.2/6.3.3). La même
+règle de domination s'applique séparément à toute `deps` consommée par
+cette capacité (§4.4).
 
 **Point clé à retenir :** la détection statique (scan des `.marius`) se
 fait **au build**, côté Rust, sur le HTML du template lui-même — jamais sur
 `content.body`. La détection dynamique (scan de `content.body`) se fait
-**une fois, à l'écriture**, côté SQL — jamais sur les fichiers `.marius`.
+**une fois, à l'écriture**, côté SQL — jamais sur les fichiers `.marius` —
+et **n'existe que pour une capacité `content_driven = true`**.
 
 Les deux implémentations sont **indépendantes** — aucune ne dérive de
 l'autre, aucun code ni bibliothèque de parsing n'est partagé entre elles —
 et **asymétriques par construction** : la branche statique reconnaît quatre
 formes de marqueur (`.classe`, `#id`, `[data-*]`, élément bare), la branche
-dynamique n'en reconnaît qu'une (`.classe`, comparaison exacte de token).
-Pour un marqueur de forme `.classe`, les deux définitions doivent rester
-identiques (même token de classe testé des deux côtés) ; pour les trois
-autres formes, seule la branche statique existe.
+dynamique n'en reconnaît qu'une (`.classe`, comparaison exacte de token),
+et seulement pour une capacité `content_driven = true`. Pour un marqueur de
+forme `.classe` sur une capacité `content_driven = true`, les deux
+définitions doivent rester identiques (même token de classe testé des deux
+côtés) ; pour les trois autres formes, ou pour toute capacité
+`content_driven = false`, seule la branche statique existe.
 
 Trois éléments doivent donc rester synchronisés à la main pour une
-capacité déclenchée dynamiquement : `theme.toml`, `scripts_registry.lock`,
-et le corps de `compute_js_deps()` (marqueur `.classe` dynamique). Le HTML
-des `.marius` concernés (marqueur statique, quelle que soit sa forme) est
-indépendant de cette synchronisation — c'est un scan générique, jamais une
+capacité `content_driven = true` : `theme.toml`, `scripts_registry.lock`,
+et le corps de `compute_js_deps()` (marqueur `.classe` dynamique). Une
+capacité `content_driven = false` ne participe à AUCUNE de ces trois
+synchronisations — ni `scripts_registry.lock` (interdit d'y figurer, §6.3.3),
+ni `compute_js_deps` (jamais consultée). Le HTML des `.marius` concernés
+(marqueur statique, quelle que soit sa forme) est indépendant de cette
+synchronisation dans tous les cas — c'est un scan générique, jamais une
 liste à maintenir manuellement. Rien ne régénère automatiquement ces
 éléments les uns à partir des autres.
 
@@ -558,12 +578,13 @@ capacité (§6.2.1-§6.2.3) n'y participent pas et n'en sont pas affectés** :
 
 Exemple fil rouge : ajouter une capacité `carousel`, déclenchée soit par la
 classe `carousel-embed` posée par un éditeur dans le corps d'un article
-(branche dynamique — donc obligatoirement une forme `.classe`, §6.2.2),
-soit par un `.marius` qui la porte en dur dans son propre layout (branche
-statique, n'importe laquelle des quatre formes) — via un module
-`carousel.js` exportant une fonction `boot`. Les étapes 6.3.1 à 6.3.3 sont
-**communes aux deux branches** ; l'étape 6.3.4 ne concerne que la branche
-dynamique.
+(branche dynamique — donc obligatoirement une forme `.classe`, §6.2.2, et
+donc `content_driven = true`), soit par un `.marius` qui la porte en dur
+dans son propre layout (branche statique, n'importe laquelle des quatre
+formes, `content_driven` indifférent) — via un module `carousel.js`
+exportant une fonction `boot`. Les étapes 6.3.1 et 6.3.2 sont **communes à
+toute capacité** ; les étapes 6.3.3 et 6.3.4 ne concernent que les
+capacités `content_driven = true`.
 
 #### 6.3.1 Le module JS
 
@@ -604,6 +625,7 @@ Dans `assets/default/theme.toml`, sous `[scripts.capabilities]` :
 entry = "scripts/development/carousel.js"
 markers = ["carousel-embed"]
 activation = "boot"
+content_driven = true
 # deps = ["libraries/<nom>/<fichier>.js"]   # optionnel, voir §4
 ```
 
@@ -621,25 +643,45 @@ activation = "boot"
 
   Une capacité peut porter plusieurs marqueurs, y compris de formes
   différentes (cf. `range`/`range-multithumb`, deux marqueurs `.classe`
-  qui activent la même capacité). **Sert aux deux branches, mais pas à
-  parts égales** (§6.2.3) : les quatre formes sont comparées au HTML
-  statique des `.marius` par `lower_modules_for_template` (§6.2.1) ; seule
-  la forme `.classe` alimente `compute_js_deps` (§6.2.2, SQL), et jamais
-  automatiquement — il faut l'étape 6.3.4 séparément.
+  qui activent la même capacité). Toujours requis, quelle que soit la
+  valeur de `content_driven` — sans marqueur, une capacité ne peut jamais
+  être déclenchée, ni statiquement ni dynamiquement.
 - `activation` : nom de la fonction exportée à appeler — **le point
   d'activation public unique de la capacité** (voir l'invariant en
   §6.3.1). **Doit être un identifiant valide** (lettres/chiffres/
   underscore, ne commence pas par un chiffre) — il est injecté tel quel
   dans le code Rust généré, jamais échappé comme une chaîne.
+- `content_driven` : **booléen, optionnel, défaut `false`.** Déclare si
+  cette capacité peut être activée dynamiquement à partir de
+  `record.js_deps` — orthogonal à `markers`/`activation`/`deps`, ne change
+  ni le scan statique ni le chargement de dépendances, seulement
+  l'éligibilité au bit `js_deps` :
+
+  | Valeur | Signification | Conséquence sur `scripts_registry.lock` (§6.3.3) |
+  |---|---|---|
+  | `false` (défaut, ex. `navigation`, `scroll-to-top`) | Ne sera **jamais** testée contre `record.js_deps`, quel que soit le contenu du template | **Interdite** — toute entrée existante pour cette capacité fait échouer le build |
+  | `true` (ex. `carousel`, `image-focus`) | Peut être activée dynamiquement sur tout template où aucun marqueur ne matche statiquement | **Obligatoire** — bit manquant fait échouer le build |
+
+  Ne dit rien sur la présence de marqueurs `.classe` : c'est `markers`
+  seul qui détermine ce qui est réellement testable côté SQL (§6.3.4) —
+  une capacité `content_driven = true` sans aucun marqueur `.classe`
+  posséderait un bit qui n'est jamais positionné par aucun contenu (à
+  éviter, non détecté automatiquement par le build).
 - `deps` : optionnel, voir §4 en détail. Absent = comportement strictement
   identique à avant l'introduction de ce champ.
 
-#### 6.3.3 `scripts_registry.lock` — attribuer un bit
+#### 6.3.3 `scripts_registry.lock` — attribuer un bit (uniquement si `content_driven = true`)
 
-Fichier `assets/default/scripts_registry.lock`, à côté de `theme.toml`.
-**Manuel, append-only, jamais généré automatiquement.** Ajouter une ligne
-avec le **prochain bit libre** (prochaine puissance de deux jamais utilisée
-— vérifier les valeurs existantes dans le fichier avant d'écrire) :
+**Étape à sauter entièrement si la capacité est `content_driven = false`**
+(défaut) — dans ce cas, `scripts_registry.lock` n'a même pas besoin
+d'exister sur le disque pour que le build réussisse, tant qu'aucune autre
+capacité du thème n'en a besoin.
+
+Sinon, fichier `assets/default/scripts_registry.lock`, à côté de
+`theme.toml`. **Manuel, append-only, jamais généré automatiquement.**
+Ajouter une ligne avec le **prochain bit libre** (prochaine puissance de
+deux jamais utilisée — vérifier les valeurs existantes dans le fichier
+avant d'écrire) :
 
 ```
 carousel = 128
@@ -649,21 +691,27 @@ Règles strictes :
 - Un bit retiré n'est **jamais réattribué** à un nom différent. Pour retirer
   une capacité, renommer sa clé en `_retired_<nom>`, ne jamais supprimer la
   ligne.
-- Bijection stricte avec `theme.toml [scripts.capabilities]` : toute
-  capacité active dans l'un doit exister dans l'autre, sinon le build
-  échoue (`cargo:error`, volontaire — voir §7).
+- Bijection **scopée aux seules capacités `content_driven = true`** — une
+  capacité `content_driven = false` ne doit **jamais** apparaître ici, même
+  temporairement, même si elle en possédait un par le passé (voir §9,
+  piège dédié). Toute entrée active du registre doit correspondre à une
+  capacité existante **et** `content_driven = true` dans `theme.toml`,
+  sinon le build échoue (`cargo:error`, volontaire — voir §7).
 
-#### 6.3.4 `compute_js_deps` — reconnaître le marqueur côté SQL (branche dynamique — §6.2.2)
+#### 6.3.4 `compute_js_deps` — reconnaître le marqueur côté SQL (branche dynamique — §6.2.2, uniquement si `content_driven = true`)
 
-Nécessaire **uniquement si** la capacité doit pouvoir être déclenchée par du
-contenu éditorial (un éditeur pose la classe dans le corps d'un article) —
-et **uniquement possible** pour un marqueur de forme `.classe` (§6.2.2) :
-un marqueur `#id`, `[data-*]` ou élément bare n'a **aucune** contrepartie
-dans cette fonction, quelle que soit la capacité. Si `carousel` ne doit
-jamais être déclenchée que par des `.marius` (§6.3.5), cette étape peut
-être sautée — mais alors le bit attribué en 6.3.3 ne sera jamais réellement
-testé au runtime : autant ne pas le prévoir du tout, ou le documenter
-comme réservé à l'usage statique.
+**Nécessaire dès que `content_driven = true`** (§6.3.2) — sans cette étape,
+le bit attribué en 6.3.3 existe mais n'est **jamais réellement positionné**
+par aucun contenu : il reste `0` en permanence dans `record.js_deps`,
+rendant la capacité fonctionnellement inerte dans sa branche dynamique.
+**Uniquement possible** pour un marqueur de forme `.classe` (§6.2.2) : un
+marqueur `#id`, `[data-*]` ou élément bare n'a **aucune** contrepartie dans
+cette fonction, quelle que soit la capacité — une capacité
+`content_driven = true` dont aucun marqueur n'est de forme `.classe` reste
+inerte de la même façon, silencieusement (aucune vérification du build ne
+le détecte). Si `carousel` ne doit jamais être déclenchée que par des
+`.marius` (§6.3.5), laissez `content_driven = false` (défaut) — cette
+étape entière, et 6.3.3, ne s'appliquent alors pas.
 
 Dans `db/05_content/02_systems.sql`, fonction `content.compute_js_deps` :
 ajouter un bloc `IF` avec le même bit que dans `scripts_registry.lock`.
@@ -687,8 +735,11 @@ dans le corps de la fonction.
 Rien à câbler séparément côté Rust — le scan statique
 (`extract_static_marker_facts`) est générique, il compare **automatiquement**
 le HTML de **chaque template** aux `markers` de **toutes** les capacités
-déclarées en 6.3.2, quelle que soit leur forme. Il suffit d'écrire le
-marqueur directement dans le `.marius` concerné :
+déclarées en 6.3.2, quelle que soit leur forme, et **indépendamment de
+`content_driven`** — une capacité `content_driven = false` bénéficie de
+cette étape exactement comme une capacité `content_driven = true`, c'est
+même le seul mécanisme de déclenchement dont elle dispose. Il suffit
+d'écrire le marqueur directement dans le `.marius` concerné :
 
 ```html
 <pre class="carousel-embed">
@@ -708,9 +759,11 @@ ne scanne que les tokens `FlatPageToken::Static`, jamais l'intérieur d'un
 dynamiquement n'est jamais détectable statiquement.
 
 Si le même marqueur apparaît **à la fois** dans un `.marius` et dans le
-corps d'un enregistrement rendu par ce template, une seule émission est
-produite — la présence statique domine toujours, le test dynamique n'est
-même pas généré pour cette capacité sur ce template (§6.2.3).
+corps d'un enregistrement rendu par ce template (capacité forcément
+`content_driven = true` dans ce cas, sinon le second scénario n'existe
+simplement pas), une seule émission est produite — la présence statique
+domine toujours, le test dynamique n'est même pas généré pour cette
+capacité sur ce template (§6.2.3).
 
 ## 7. Compiler — l'ordre compte, chaque étape peut échouer isolément
 
@@ -762,8 +815,9 @@ Une `deps` (§4), elle, n'est **jamais** validée à cette étape — voir Étap
 ### Étape 2 — Recharger le schéma SQL (capacité, branche dynamique uniquement)
 
 Uniquement si `02_systems.sql` (ou tout autre fichier sous `db/`) a changé —
-**inutile pour un component ou une bibliothèque, et inutile si la capacité
-n'est déclenchée que statiquement (§6.3.5), sans passer par 6.3.4** :
+**inutile pour un component ou une bibliothèque, et inutile pour toute
+capacité `content_driven = false` (défaut) ou déclenchée uniquement
+statiquement (§6.3.5), sans passer par 6.3.4** :
 
 ```bash
 psql "$DATABASE_URL" -f db/master_init.sql
@@ -784,20 +838,27 @@ cargo build
 ```
 
 C'est ici que `validate_capabilities` (crates/core/schema/build.rs) lit
-`theme.toml` + `scripts_registry.lock` + `manifest.toml`, valide la
-bijection et les bits, **et résout entièrement `deps`** (§4.2 : chaque
-entrée, canonicalisée puis recherchée dans `manifest.toml`, croisée avec
-`classic_scripts` pour le mode de chargement) — puis
-`lower_modules_for_template`, appelée une fois par composant/page, scanne
-le HTML de chaque `.marius` (`.marius` fusionné parent+enfant) et génère
+`theme.toml` + `scripts_registry.lock` (ce dernier lu et exigé
+uniquement si au moins une capacité déclare `content_driven = true`) +
+`manifest.toml`, valide la bijection (scopée aux seules capacités
+`content_driven = true`, §6.3.3) et les bits, **et résout entièrement
+`deps`** (§4.2 : chaque entrée, canonicalisée puis recherchée dans
+`manifest.toml`, croisée avec `classic_scripts` pour le mode de
+chargement) — puis `lower_modules_for_template`, appelée une fois par
+composant/page, scanne le HTML de chaque `.marius` (`.marius` fusionné
+parent+enfant) et génère
 soit une émission inconditionnelle (marqueur détecté statiquement), soit un
 test `if record.js_deps & BIT != 0 { ... }` (marqueur absent statiquement),
 en agrégeant et dédupliquant les `deps` de toutes les capacités du
 template (§4.4). Toute résolution `{% asset %}` (component, bibliothèque
 référencée directement par un template) est également figée à cette étape.
 Échoue fort (jamais silencieusement) sur :
-- capacité présente dans un fichier (`theme.toml`/`scripts_registry.lock`),
-  absente de l'autre ;
+- capacité `content_driven = true` sans entrée correspondante dans
+  `scripts_registry.lock` (bit manquant) ;
+- entrée active de `scripts_registry.lock` sans capacité correspondante
+  dans `theme.toml`, **ou** correspondant à une capacité `content_driven =
+  false`/omis — une capacité non content-driven ne doit jamais posséder de
+  bit, même si le nom coïncide (§6.3.3) ;
 - bit invalide (pas une puissance de deux) ou dupliqué ;
 - `activation` qui n'est pas un identifiant valide ;
 - `markers` vide, ou contenant un marqueur dont la syntaxe n'est pas
@@ -1041,6 +1102,18 @@ différente selon le type de page :
   `nom → chemin` (§2). Un component qui a besoin d'un chargement garanti
   avant lui n'a, à ce jour, aucun mécanisme équivalent à `deps` — seul
   l'import direct ESM (§3.2) reste disponible pour lui.
+- **Une capacité `content_driven = true` sans aucun marqueur `.classe`
+  possède un bit qui n'est jamais positionné par aucun contenu.** Le build
+  ne détecte pas ce cas — `content_driven` et `markers` sont orthogonaux
+  (§6.3.2), rien ne vérifie leur cohérence mutuelle. Si un bit `js_deps`
+  ne s'allume jamais quel que soit le contenu éditorial, vérifier d'abord
+  qu'au moins un des `markers` de la capacité est bien de forme `.classe`.
+- **Retirer `content_driven = true` d'une capacité sans retirer son entrée
+  de `scripts_registry.lock` fait échouer le build**, immédiatement et
+  explicitement (§6.3.3/§7 Étape 3) — ce n'est pas un oubli à corriger
+  discrètement : soit la capacité redevient `content_driven = false` **et**
+  son entrée passe en `_retired_<nom>` (jamais supprimée, §6.3.3), soit
+  `content_driven = true` doit rester si le bit est encore utile ailleurs.
 
 ## 10. Constats d'architecture pour une prochaine passe (informationnel)
 
@@ -1142,9 +1215,11 @@ Observation factuelle, non corrigée : `markers` reconnaît quatre formes
 (`.classe`, `#id`, `[data-*]`, élément bare, §6.3.2) au niveau de la
 branche statique (`extract_static_marker_facts`/`lower_modules_for_template`),
 mais la branche dynamique (`compute_js_deps`, SQL) n'en reconnaît qu'une
-seule (`.classe`, §6.2.2/6.3.4). Une capacité déclarée uniquement avec des
+seule (`.classe`, §6.2.2/6.3.4), et uniquement pour une capacité
+`content_driven = true`. Une capacité déclarée uniquement avec des
 marqueurs `#id`/`[data-*]`/élément ne peut donc **jamais** être déclenchée
-par du contenu éditorial — seule la branche statique peut la déclencher.
+par du contenu éditorial, qu'elle soit `content_driven = true` ou non —
+seule la branche statique peut la déclencher.
 
 Ceci n'est pas un bug de l'implémentation actuelle — `compute_js_deps` n'a
 volontairement pas été modifiée dans le cadre de la généralisation de
@@ -1153,7 +1228,21 @@ réelle du système tel qu'il existe : si un besoin de déclenchement
 dynamique par `#id`, `[data-*]` ou élément se présente, il reste entier et
 non résolu.
 
+### 10.4 `content_driven` sans validation croisée avec `markers` — décision actée, limite assumée
+
+**Statut : décision architecturale actée**, contrairement aux points 10.2
+et 10.3 ci-dessus. Le découplage `[scripts.capabilities.*]` /
+`scripts_registry.lock` (§6.3.2/6.3.3) repose sur `content_driven`,
+orthogonal par construction à `markers` (§6.3.2, §9). Aucune validation ne
+vérifie qu'une capacité `content_driven = true` possède effectivement au
+moins un marqueur `.classe` — c'est un choix délibéré, pas un oubli : la
+règle de prudence retenue pour ce chantier écarte toute contrainte
+supplémentaire non explicitement demandée (voir §9 pour le piège
+correspondant, et l'audit de session qui a précédé cette implémentation
+pour la réserve détaillée). Une future passe pourrait envisager un
+avertissement de build pour ce cas précis, sans que cela soit nécessaire à
+ce jour.
+
 ---
 
-_Document rédigé le 31 août 2026_
-_Révisé le 2 septembre 2026_
+_Document révisé le 2 septembre 2026_
