@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-03 06:53:57
+**Généré le:** 2026-09-03 20:28:29
 
 ## Racine du Workspace
 
@@ -61,7 +61,27 @@
 │   │   │   └── README.md
 │   │   ├── fragment-forge
 │   │   │   ├── src
-│   │   │   │   └── lib.rs
+│   │   │   │   ├── fragment
+│   │   │   │   │   ├── codegen.rs
+│   │   │   │   │   ├── lexer.rs
+│   │   │   │   │   ├── mod.rs
+│   │   │   │   │   ├── parser.rs
+│   │   │   │   │   ├── resolver.rs
+│   │   │   │   │   ├── script_hoisting.rs
+│   │   │   │   │   ├── static_markers.rs
+│   │   │   │   │   ├── token.rs
+│   │   │   │   │   └── validator.rs
+│   │   │   │   ├── page
+│   │   │   │   │   ├── blocks.rs
+│   │   │   │   │   ├── linker.rs
+│   │   │   │   │   ├── lowering.rs
+│   │   │   │   │   ├── mod.rs
+│   │   │   │   │   ├── model.rs
+│   │   │   │   │   ├── parser.rs
+│   │   │   │   │   └── token.rs
+│   │   │   │   ├── lib.rs
+│   │   │   │   ├── naming.rs
+│   │   │   │   └── schema.rs
 │   │   │   ├── Cargo.toml
 │   │   │   └── README.md
 │   │   └── guard-forge
@@ -176,7 +196,7 @@
 ├── README.md
 └── biome.jsonc
 
-52 directories, 118 files
+54 directories, 136 files
 ```
 
 ## Documentation du projet
