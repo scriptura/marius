@@ -1,11 +1,11 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-03 20:28:29
+**Généré le:** 2026-09-03 20:44:53
 
 ## Racine du Workspace
 
 ```text
-/home/nunn/Development/GitHub/marius
+/marius
 ├── crates
 │   ├── core
 │   │   ├── collector
@@ -202,12 +202,12 @@
 ## Documentation du projet
 
 ```text
-/home/nunn/Development/GitHub/marius/docs
+/docs
 ├── adr-postgres
+│   ├── ADR-001-to-ADR-030.md
+│   ├── ADR-031-Nix-vs-Docker.md
 │   ├── Codegen.md
-│   ├── PostgreSQL(OLTP)-vs-OLAP.md
-│   ├── adr-031-Nix-vs-Docker.md
-│   └── architecture-decision-records-for-postgresql-from-ADR-001-to-ADR-030.md
+│   └── PostgreSQL(OLTP)-vs-OLAP.md
 ├── adr-rust
 │   ├── ADR-001-hashset-to-bit-vector.md
 │   ├── ADR-002-reactive-projection-and-hybrid-state-management.md

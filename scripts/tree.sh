@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_NAME="$(basename "$PROJECT_ROOT")"
 DOCS_DIR="$PROJECT_ROOT/docs"
 GEN_DIR="$DOCS_DIR/generate"
 OUTPUT="$GEN_DIR/tree.md"
@@ -22,7 +23,8 @@ cat > "$OUTPUT" << EOF
 \`\`\`text
 EOF
 
-tree "$PROJECT_ROOT" -I "docs|doc|target|build|artifacts|assets|logs" --dirsfirst >> "$OUTPUT"
+tree "$PROJECT_ROOT" -I "docs|doc|target|build|artifacts|assets|logs" --dirsfirst \
+    | sed "1s|.*|/$PROJECT_NAME|" >> "$OUTPUT"
 
 cat >> "$OUTPUT" << EOF
 \`\`\`
@@ -33,7 +35,7 @@ cat >> "$OUTPUT" << EOF
 EOF
 
 if [ -d "$DOCS_DIR" ]; then
-    tree "$DOCS_DIR" --dirsfirst >> "$OUTPUT"
+    tree "$DOCS_DIR" --dirsfirst | sed "1s|.*|/docs|" >> "$OUTPUT"
 else
     echo "⚠️ Dossier $DOCS_DIR introuvable." >> "$OUTPUT"
 fi
