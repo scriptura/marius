@@ -81,5 +81,8 @@ logs/
 
 # ── Marius ────────────────────────────────────────────────────────────────────
 
+# Dossier de build pour les binaires compilés
+# Attention : seul le dossier à la racine du projet doit être ignoré, pas les sous-dossiers "build" dans les sous-modules.
+/build/
+# Ici c'est l'inverse de la configuration précédente : on ignore TOUS les dossiers "artifacts".
 artifacts/
-build/

@@ -10,6 +10,7 @@ documentation = "https://github.com/scriptura/marius/tree/main/docs"
 readme = "README.md"
 keywords = ["ecs", "dod", "codegen", "postgresql", "marius"]
 categories = ["database", "data-structures"]
+build = "build/main.rs"
 
 [dependencies]
 bytemuck = { version = "1.14", features = ["derive"] }

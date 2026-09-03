@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-03 20:44:53
+**Généré le:** 2026-09-03 23:57:05
 
 ## Racine du Workspace
 
@@ -33,8 +33,7 @@
 │   │       │   │   └── offline.marius
 │   │       │   └── base.marius
 │   │       ├── Cargo.toml
-│   │       ├── README.md
-│   │       └── build.rs
+│   │       └── README.md
 │   ├── forge
 │   │   ├── bridge-forge
 │   │   │   ├── src
@@ -196,7 +195,7 @@
 ├── README.md
 └── biome.jsonc
 
-54 directories, 136 files
+54 directories, 135 files
 ```
 
 ## Documentation du projet
