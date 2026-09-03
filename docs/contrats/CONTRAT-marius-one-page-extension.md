@@ -15,24 +15,24 @@ L'objectif premier de ce mécanisme est d'éviter l'explosion combinatoire qui r
 * état de session ;
 * état du panier ;
 * notifications ;
-* état d'authentification lorsqu'il constitue une variation indépendante ;
+* certains états d'authentification ;
 * autres données à cycle de mutation propre.
 
 L'augmentation ne constitue ni un système de composants UI, ni un moteur de rendu côté client, ni une nouvelle étape du Runtime.
 
 Elle exprime une relation architecturale :
 
-> **une page complète peut contenir des points dont le contenu peut évoluer indépendamment de la projection qui a produit le reste de la page.**
+> **Une page complète peut être accompagnée ou enrichie par le résultat d'une projection dont le cycle de production et de mutation est indépendant de celui de la page qui l'accueille.**
 
 ---
 
-# 2. Principe fondamental
+# 2. Principe fondamental : la page reste complète
 
 Une page Marius demeure une **unité AOT complète et fonctionnelle**.
 
 Elle doit pouvoir être servie et utilisée sans JavaScript.
 
-L'augmentation ne remet donc pas en cause le principe d'ADR-008 selon lequel une réponse peut être pré-composée en amont avec notamment :
+L'augmentation ne remet donc pas en cause le principe d'ADR-008 selon lequel une réponse peut être pré-composée avec notamment :
 
 * la structure minimale du document ;
 * la navigation ;
@@ -46,43 +46,192 @@ ADR-011 introduit une capacité supplémentaire : certaines projections peuvent 
 
 Le but n'est donc pas de découper arbitrairement une page en composants.
 
+---
+
+# 3. Deux phénomènes doivent être distingués
+
+Une partie variable d'une page peut relever de deux mécanismes architecturaux radicalement différents :
+
+### 3.1 Contextualisation AOT
+
+Une partie du résultat dépend du **contexte intrinsèque de la route ou de la page en cours de production**.
+
+Cette variation doit être résolue dans la représentation AOT de cette route.
+
+Elle ne constitue pas une augmentation.
+
+### 3.2 Augmentation
+
+Une partie du résultat possède un **cycle de production ou de mutation indépendant de celui de la page**.
+
+Elle peut alors être factorisée comme projection indépendante et être matérialisée séparément.
+
+Cette distinction constitue une frontière fondamentale du présent contrat.
+
+---
+
+# 4. La dépendance à la route n'est pas une augmentation
+
+Une variation déterminée par le contexte intrinsèque de la route ne constitue pas une augmentation.
+
+Lorsqu'une partie de la représentation dépend de la route qui porte la page, cette dépendance doit être résolue lors de la **construction AOT de la représentation de cette route**.
+
+Elle ne doit pas être obtenue par :
+
+* une mutation JavaScript ;
+* une déduction du navigateur ;
+* une synchronisation client ;
+* une composition runtime ;
+* un merge tardif de la page.
+
+Le Forge ne « devine » pas l'état au moment du merge.
+
+Il produit une représentation de route pour laquelle cet état est déjà déterminé.
+
+---
+
+# 5. Exemple canonique : navigation avec onglet courant
+
+Considérons un menu principal :
+
+```html
+<nav>
+  <ul>
+    <li><a href="/">Accueil</a></li>
+    <li><a href="/articles">Articles</a></li>
+    <li><a href="/about">À propos</a></li>
+  </ul>
+</nav>
+```
+
+Sur `/articles`, le résultat attendu peut être :
+
+```html
+<nav>
+  <ul>
+    <li><a href="/">Accueil</a></li>
+    <li class="current">Articles</li>
+    <li><a href="/about">À propos</a></li>
+  </ul>
+</nav>
+```
+
+L'état :
+
+```text
+Articles = current
+```
+
+est déterminé par la route de la page.
+
+Il peut également entraîner d'autres variations corrélées :
+
+* ajout de `.current` ;
+* suppression du lien ;
+* modification de `aria-current` ;
+* autre représentation déterminée par la route.
+
+Toutes ces propriétés relèvent de la **contextualisation AOT de la page**.
+
+Le Runtime ne doit pas exécuter :
+
+```text
+si route == /articles
+    ajouter .current
+    supprimer href
+```
+
+Le navigateur ne doit pas davantage effectuer ce calcul.
+
+Le Forge connaît la table des routes et le contexte de production de la représentation.
+
+Il peut donc produire conceptuellement :
+
+```text
+Route /articles
+    → navigation contextualisée pour /articles
+
+Route /about
+    → navigation contextualisée pour /about
+
+Route /contact
+    → navigation contextualisée pour /contact
+```
+
+Le Runtime ne connaît pas la notion de `.current`.
+
+Il reçoit simplement la description AOT correspondant à la route demandée.
+
+---
+
+# 6. Il ne faut pas confondre variation locale et composition
+
+Le fait qu'un seul élément du menu change ne signifie pas qu'un merge runtime est nécessaire.
+
+Dans l'exemple précédent, on pourrait être tenté de raisonner :
+
+```text
+menu générique
+      +
+état de l'onglet courant
+      ↓
+merge
+```
+
+Ce raisonnement introduit une composition tardive qui n'est pas nécessaire.
+
+La représentation peut au contraire être pensée comme :
+
+```text
+Route /articles
+    │
+    ├── navigation contextualisée
+    ├── breadcrumb
+    ├── contenu
+    └── footer
+```
+
+et être ensuite aplatie par Forge dans le modèle de segments prévu par ADR-011.
+
+Le fait qu'une seule propriété ou qu'un seul élément diffère n'est pas en soi un argument en faveur de l'augmentation.
+
+Le critère pertinent reste l'indépendance du cycle de production ou de mutation.
+
+---
+
+# 7. Critère fondamental d'une augmentation
+
 Le critère d'augmentation est :
 
-> **indépendance du cycle de vie et de mutation d'une partie du résultat vis-à-vis de la page qui l'accueille.**
+> **indépendance du cycle de production et de mutation d'une partie du résultat vis-à-vis de la page qui l'accueille.**
+
+Une partie doit donc être considérée comme augmentation potentielle lorsque son état peut évoluer indépendamment de la page, et que cette indépendance apporte un bénéfice réel de factorisation AOT.
+
+À l'inverse, une partie dont l'état est déterminé par la route courante appartient naturellement à la représentation AOT de cette route.
+
+On peut résumer :
+
+```text
+Dépendance à la route courante
+        ↓
+Contextualisation AOT
+        ↓
+Pas une augmentation
+```
+
+alors que :
+
+```text
+Cycle de mutation indépendant
+        ↓
+Projection indépendante
+        ↓
+Augmentation potentielle
+```
 
 ---
 
-# 3. Ce qu'est une augmentation
-
-Une augmentation est l'association de trois éléments conceptuellement distincts :
-
-1. une **page AOT de base**, complète et fonctionnelle ;
-2. une **projection indépendante**, produisant un résultat pouvant évoluer séparément ;
-3. un **point d'intégration déterministe** permettant au résultat de cette projection d'être présenté dans la page.
-
-L'augmentation permet ainsi de remplacer :
-
-```text
-Page × Contexte A × Contexte B × Contexte C
-```
-
-par :
-
-```text
-Page
- ├── Projection de page
- ├── augmentation A
- ├── augmentation B
- └── augmentation C
-```
-
-sans transformer le Runtime en moteur de composition dynamique.
-
-Cette factorisation est une propriété de l'organisation AOT des projections et de leur matérialisation ; elle n'implique pas que la page soit découpée en composants génériques.
-
----
-
-# 4. Une page personnalisée n'est pas nécessairement une page augmentée
+# 8. Une page personnalisée n'est pas nécessairement une page augmentée
 
 La personnalisation ne constitue pas, à elle seule, un critère d'augmentation.
 
@@ -94,13 +243,11 @@ Par exemple :
 /admin/dashboard
 ```
 
-peut être une page intrinsèquement liée au contexte administrateur et être produite comme un artefact complet.
+peut être une représentation intrinsèquement liée au contexte administrateur et être produite comme un artefact complet.
 
 Il n'est pas nécessaire d'extraire artificiellement ses différentes parties en augmentations.
 
-À l'inverse, un état tel qu'un panier, des notifications ou une information de session peut justifier une augmentation lorsque son cycle de mutation est indépendant de celui de la page qui l'accueille.
-
-Le critère est donc :
+Ainsi :
 
 ```text
 personnalisation
@@ -108,17 +255,17 @@ personnalisation
 augmentation
 ```
 
-mais :
+De même :
 
 ```text
-cycle de mutation indépendant
-        →
-augmentation potentielle
+variation selon la route
+        ≠
+augmentation
 ```
 
 ---
 
-# 5. L'augmentation n'est pas un Segment
+# 9. L'augmentation n'est pas un Segment
 
 Les concepts suivants doivent rester strictement distincts.
 
@@ -126,7 +273,7 @@ Les concepts suivants doivent rester strictement distincts.
 
 Concept du domaine Forge/AOT.
 
-Une Projection décrit une unité de transformation déterminée par ses données sources, son cycle d'invalidation et ses invariants de cohérence.
+Une Projection constitue une unité déterminée par ses données sources, son cycle d'invalidation et ses invariants de cohérence.
 
 ### Artefact
 
@@ -152,7 +299,7 @@ Il ne constitue ni une adresse mémoire, ni un identifiant global d'artefact.
 
 ### SourceKey
 
-Identifiant global et stable permettant au Runtime de résoudre un artefact matérialisé dans le registre.
+Identifiant global et stable permettant de résoudre un artefact matérialisé dans le registre.
 
 ### MaterializedSource
 
@@ -169,15 +316,15 @@ Volatile
 
 Notion Runtime correspondant à une portion adressable d'une source.
 
-### Point d'augmentation dans le navigateur
+### Point d'intégration navigateur
 
-Identifiant ou autre mécanisme permettant au navigateur d'associer le résultat d'une projection à une zone déterminée du document.
+Identifiant ou mécanisme permettant au navigateur d'associer le résultat d'une projection à une zone déterminée du document.
 
 Ce point appartient au **contrat navigateur**, pas à l'ontologie du Segment Runtime.
 
 ---
 
-# 6. Conséquence essentielle : le Segment n'est pas un fragment DOM
+# 10. Le Segment n'est pas un fragment DOM
 
 Il ne doit exister aucune équivalence architecturale implicite :
 
@@ -197,7 +344,7 @@ Le navigateur reçoit des octets HTTP.
 
 Le mécanisme permettant ensuite de présenter ou de remplacer une augmentation dans le DOM constitue une préoccupation distincte.
 
-Ainsi :
+La chaîne conceptuelle est donc :
 
 ```text
 Forge
@@ -221,18 +368,16 @@ Navigateur
 DOM Target
 ```
 
-La frontière entre Runtime et navigateur est donc explicite.
-
 ---
 
-# 7. Contrat serveur
+# 11. Contrat serveur
 
 L'augmentation doit être compatible avec le pipeline Runtime déjà défini.
 
-Le Runtime ne reçoit pas une instruction du type :
+Le Runtime ne reçoit pas une instruction sémantique telle que :
 
 ```text
-"rendre l'augmentation du panier"
+"rendre le panier"
 ```
 
 Il reçoit une description AOT de sources et de segments.
@@ -259,9 +404,56 @@ backend
 
 Cette chaîne demeure inchangée par le concept d'augmentation.
 
+Le Runtime n'a donc pas à savoir si une source correspond :
+
+* à une page ;
+* à une navigation ;
+* à un panier ;
+* à une notification ;
+* ou à toute autre projection.
+
 ---
 
-# 8. Source statique et source volatile
+# 12. Contextualisation AOT et RouteDescriptor
+
+La découverte du cas `.current` permet de préciser le rôle du `RouteDescriptor`.
+
+Le `RouteDescriptor` représente le résultat AOT de la résolution d'une route.
+
+La contextualisation déterminée par cette route doit donc être reflétée dans la représentation AOT de cette route avant l'exécution du Runtime.
+
+Conceptuellement :
+
+```text
+                    FORGE
+                      │
+          ┌───────────┴───────────┐
+          │                       │
+      /articles                 /about
+          │                       │
+          ▼                       ▼
+ RouteDescriptor             RouteDescriptor
+          │                       │
+          ├── page                 ├── page
+          ├── navigation           ├── navigation
+          │   current=articles     │   current=about
+          └── footer               └── footer
+```
+
+Le Runtime ne déduit pas :
+
+```text
+URL = /articles
+→ modifier le menu
+```
+
+Il résout et émet la représentation AOT correspondant à `/articles`.
+
+**L'état courant est donc une propriété de la représentation de route, pas une opération de merge.**
+
+---
+
+# 13. Source statique et source volatile
 
 Une augmentation peut être représentée par une source statique ou volatile selon son mode de matérialisation.
 
@@ -285,19 +477,17 @@ RequestArena
 MaterializedSource::Volatile
 ```
 
-Cette distinction est importante :
+Cette distinction doit rester explicite :
 
 > **la volatilité est une propriété de la source Runtime ; elle ne constitue pas une nouvelle catégorie de Projection dans l'ontologie Forge.**
 
-Une Projection peut donc contribuer à une route dont le plan comporte une source volatile sans que le Runtime ait à connaître la sémantique métier de cette Projection.
-
 ---
 
-# 9. Production du contenu volatil
+# 14. Production du contenu volatil
 
 Le Runtime de segments définit la capacité de matérialiser une source volatile dans le `RequestArena`.
 
-Il ne définit pas, à ce stade, le mécanisme métier complet permettant de produire les octets de cette source.
+Il ne définit pas encore le mécanisme métier complet permettant de produire les octets de cette source.
 
 La chaîne :
 
@@ -313,7 +503,7 @@ production du contenu volatil
 MaterializedSource::Volatile
 ```
 
-constitue un contrat complémentaire qui devra être défini avant l'implémentation effective de composants volatils.
+constitue un contrat complémentaire à définir avant l'implémentation effective de composants volatils.
 
 Ce mécanisme ne devra pas réintroduire implicitement :
 
@@ -323,11 +513,11 @@ Ce mécanisme ne devra pas réintroduire implicitement :
 * une allocation sur le hot path ;
 * une dépendance du Runtime à la sémantique métier des projections.
 
-Le présent contrat **ne préjuge pas de l'implémentation de cette production**.
+Le présent contrat ne préjuge pas de son implémentation.
 
 ---
 
-# 10. Un seul monde de données par requête
+# 15. Un seul monde de données par requête
 
 Lorsqu'une augmentation statique dépend du registre de matérialisation, elle respecte la même garantie de génération que le reste de la réponse.
 
@@ -339,7 +529,7 @@ L'augmentation ne constitue donc pas une exception à la cohérence du Runtime.
 
 ---
 
-# 11. Budget et déterminisme
+# 16. Budget et déterminisme
 
 Le nombre et la nature des segments nécessaires à une route sont déterminés AOT.
 
@@ -358,7 +548,7 @@ Le Runtime ne découvre donc pas dynamiquement combien de segments une augmentat
 
 ---
 
-# 12. Atomicité d'une réponse
+# 17. Atomicité d'une réponse
 
 Lorsqu'une requête produit plusieurs segments, ceux-ci constituent le plan d'émission de cette réponse.
 
@@ -366,10 +556,10 @@ Le Runtime ne doit pas avoir à comprendre quelles portions correspondent à la 
 
 Il doit seulement émettre le plan déterminé AOT.
 
-Ainsi, au niveau serveur :
+Ainsi :
 
 ```text
-page + augmentations
+page + contextualisations AOT + éventuelles augmentations
 ```
 
 est une notion sémantique de l'architecture AOT, tandis que :
@@ -382,7 +572,7 @@ est la réalité du Runtime.
 
 ---
 
-# 13. Contrat navigateur
+# 18. Contrat navigateur
 
 Le navigateur constitue une couche distincte.
 
@@ -395,7 +585,7 @@ Son rôle éventuel est de permettre à une augmentation déjà définie côté 
 
 Ce mécanisme ne doit pas transformer le navigateur en moteur de rendu Marius.
 
-En particulier, le client ne doit pas avoir à :
+Le client ne doit pas avoir à :
 
 * interpréter les templates `.marius` ;
 * reconstruire la page ;
@@ -405,40 +595,31 @@ En particulier, le client ne doit pas avoir à :
 * connaître `SegmentDescriptor` ;
 * connaître `SourceId` ou `SourceKey`.
 
-Le protocole navigateur est donc un **contrat de présentation et de synchronisation**, pas une extension du Runtime de segments.
-
 ---
 
-# 14. JavaScript reste une amélioration progressive
+# 19. JavaScript reste une amélioration progressive
 
 La page de base doit demeurer fonctionnelle sans JavaScript.
 
-L'absence de JavaScript ne doit pas supprimer :
+Une augmentation peut bénéficier d'une actualisation progressive côté navigateur, mais cette capacité ne doit pas devenir une dépendance fonctionnelle générale de la page.
 
-* le contenu essentiel ;
-* la navigation ;
-* les liens ;
-* les informations nécessaires à l'utilisateur ;
-* les propriétés d'accessibilité attendues ;
-* la découvrabilité SEO lorsque celle-ci s'applique.
-
-Une augmentation volatile peut avoir un comportement différent sans JavaScript, mais le système ne doit pas faire de JavaScript une dépendance générale à l'utilisation de la page.
-
-Le contrat devra donc distinguer :
+Il faut distinguer :
 
 ```text
 fonctionnalité fondamentale de la page
 ```
 
-et :
+de :
 
 ```text
 actualisation progressive d'un état indépendant
 ```
 
+Une absence de JavaScript peut donc empêcher une actualisation automatique d'un état volatile sans rendre la page elle-même inutilisable.
+
 ---
 
-# 15. Invalidation serveur et synchronisation navigateur sont distinctes
+# 20. Invalidation serveur et synchronisation navigateur sont distinctes
 
 Le mécanisme d'invalidation Marius :
 
@@ -462,7 +643,7 @@ Une modification de données peut provoquer la régénération d'un artefact ou 
 
 Inversement, un mécanisme navigateur permettant de rafraîchir une augmentation ne doit pas être assimilé au mécanisme de causalité `LISTEN/NOTIFY`.
 
-On distingue donc explicitement :
+On distingue donc :
 
 ```text
 invalidation / matérialisation serveur
@@ -478,11 +659,11 @@ Le protocole reliant éventuellement les deux constitue une décision ultérieur
 
 ---
 
-# 16. Aucun choix technologique implicite
+# 21. Aucun choix technologique implicite
 
 Le présent contrat ne choisit pas entre :
 
-* HTML natif + `fetch` ;
+* `fetch` ;
 * SSE ;
 * WebSocket ;
 * EventSource ;
@@ -494,22 +675,9 @@ Ces technologies sont des moyens éventuels d'implémenter le contrat navigateur
 
 Le choix ne doit intervenir qu'après définition du protocole navigateur lui-même.
 
-En particulier, le fait qu'un mécanisme soit capable de remplacer un fragment HTML ne suffit pas à en faire une bonne abstraction pour Marius.
-
-Le protocole devra être évalué selon les invariants du système, notamment :
-
-* absence de dépendance fonctionnelle au JavaScript ;
-* simplicité du protocole ;
-* absence de logique métier côté client ;
-* compatibilité avec l'AOT ;
-* coût d'exécution ;
-* capacité à cibler précisément une augmentation ;
-* comportement en cas de navigation ou de rafraîchissement ;
-* cohérence avec les cycles de mutation définis côté serveur.
-
 ---
 
-# 17. Hyper et Axum sont hors du contrat d'augmentation
+# 22. Hyper et Axum sont hors du contrat d'augmentation
 
 L'intégration Hyper/Axum relève de l'adaptateur HTTP.
 
@@ -541,140 +709,182 @@ De même, `hyper::upgrade` ne fait pas partie du contrat architectural de l'augm
 
 ---
 
-# 18. Ce que l'augmentation interdit
+# 23. Ce que l'augmentation interdit
 
 L'introduction d'augmentations ne doit pas conduire à :
 
-### 18.1 Reconstituer la page côté serveur
+### 23.1 Reconstituer la page côté serveur
 
 Le Runtime ne doit pas reconstruire dynamiquement une page à partir de composants.
 
-### 18.2 Introduire un moteur de template runtime
+### 23.2 Introduire un moteur de template runtime
 
 Les templates `.marius` restent compilés AOT.
 
-### 18.3 Transformer les Projections en composants UI
+### 23.3 Transformer les Projections en composants UI
 
 Une Projection demeure une unité AOT déterminée par ses données, son cycle d'invalidation et ses invariants de cohérence.
 
-### 18.4 Faire du Segment une abstraction DOM
+### 23.4 Traiter toute variation visuelle comme une augmentation
+
+Une variation déterminée par la route ou le contexte intrinsèque de la page doit être résolue AOT dans la représentation de cette route.
+
+### 23.5 Faire du Segment une abstraction DOM
 
 Segment et DOM Target appartiennent à deux niveaux différents.
 
-### 18.5 Introduire une composition non bornée
+### 23.6 Introduire une composition non bornée
 
 Les contraintes de capacité et de nombre de segments restent vérifiables AOT.
 
-### 18.6 Rendre le navigateur responsable de la logique métier
+### 23.7 Rendre le navigateur responsable de la logique métier
 
 Le navigateur présente et actualise le résultat ; il ne reproduit pas le modèle métier Marius.
 
-### 18.7 Faire dépendre la page de JavaScript
+### 23.8 Faire dépendre la page de JavaScript
 
 L'amélioration progressive ne doit pas devenir une dépendance fonctionnelle.
 
 ---
 
-# 19. Critère d'utilisation d'une augmentation
+# 24. Test architectural : « est-ce réellement indépendant ? »
 
-Avant d'introduire une augmentation, la question doit être :
+Avant d'introduire une augmentation, il faut poser deux questions.
 
-> **Cette partie du résultat possède-t-elle un cycle de mutation suffisamment indépendant de celui de la page pour que sa mutualisation réduise réellement une duplication AOT ?**
+### Question 1 — La valeur dépend-elle intrinsèquement de la route courante ?
 
-Si la réponse est non, l'augmentation ne doit pas être introduite par principe.
+Si oui :
 
-Une partie peut rester intégrée à la page complète.
+```text
+→ contextualisation AOT
+→ pas une augmentation
+```
 
-Le mécanisme est donc un outil de **factorisation des cycles de projection**, et non une doctrine générale de découpage de l'interface.
+Exemple :
 
----
+```text
+/articles
+→ onglet Articles.current
+```
 
-# 20. Exemple conceptuel
+### Question 2 — Peut-elle muter alors que la page reste la même ?
 
-Une route peut être décrite conceptuellement comme :
+Si oui, et si cette indépendance apporte une factorisation utile :
+
+```text
+→ projection indépendante
+→ augmentation potentielle
+```
+
+Exemple :
 
 ```text
 /article/123
-
-Page AOT
- ├── structure
- ├── navigation
- ├── breadcrumb
- ├── article
- ├── footer
- └── augmentation : panier
+        │
+        └── panier
+             ↑
+       peut changer indépendamment
+       de /article/123
 ```
 
-Le Forge peut produire un `RouteDescriptor` dont les sources correspondent conceptuellement à :
-
-```text
-StaticArtifact(article/page)
-StaticArtifact(navigation)
-StaticArtifact(footer)
-VolatileSlot(cart)
-```
-
-Le Runtime ne voit pas :
-
-```text
-article
-navigation
-footer
-cart
-```
-
-comme des composants UI.
-
-Il voit :
-
-```text
-RouteDescriptor
-    ↓
-SegmentDescriptor[]
-    ↓
-SourceSpec[]
-    ↓
-MaterializedSource[]
-    ↓
-EmissionPlan
-    ↓
-IoSlice[]
-    ↓
-backend
-```
-
-Le navigateur, lui, peut connaître un point d'intégration correspondant au panier.
-
-Ces deux représentations sont volontairement différentes.
+Cette seconde propriété est nécessaire mais doit être évaluée avec le bénéfice réel de factorisation ; toute donnée susceptible de changer n'a pas vocation à devenir une augmentation.
 
 ---
 
-# 21. Invariants du contrat
+# 25. Exemple comparatif
 
-Une augmentation Marius doit respecter simultanément les invariants suivants :
+### Cas A — Navigation
+
+```text
+URL : /articles
+
+Navigation
+    └── Articles = current
+```
+
+La navigation dépend de la route.
+
+```text
+→ contextualisation AOT
+→ aucune augmentation
+```
+
+### Cas B — Panier
+
+```text
+URL : /articles/123
+
+Page
+    └── état du panier
+```
+
+Le panier peut changer sans changement de route.
+
+```text
+→ cycle indépendant
+→ augmentation potentielle
+```
+
+### Cas C — Tableau de bord administrateur
+
+```text
+/admin/dashboard
+```
+
+La page est intrinsèquement dédiée à un contexte.
+
+```text
+→ page AOT complète
+→ aucune obligation d'augmentation
+```
+
+### Cas D — Notifications
+
+```text
+URL : /articles/123
+
+Page
+    └── notifications
+```
+
+Les notifications peuvent changer sans que la page change.
+
+```text
+→ cycle indépendant
+→ augmentation potentielle
+```
+
+---
+
+# 26. Invariants du contrat
+
+Une architecture d'augmentation Marius doit respecter simultanément les invariants suivants :
 
 1. **La page de base reste complète et fonctionnelle.**
 2. **Le JavaScript n'est jamais une dépendance fonctionnelle générale.**
-3. **L'augmentation est motivée par l'indépendance d'un cycle de mutation, pas par la seule localisation DOM.**
-4. **La personnalisation seule ne justifie pas une augmentation.**
-5. **Une Projection n'est pas un composant DOM.**
-6. **Un Segment n'est pas un fragment DOM.**
-7. **Le Runtime ne connaît pas la sémantique métier de l'augmentation.**
-8. **La composition des segments reste déterminée et bornée AOT.**
-9. **Les contraintes de capacité restent vérifiables par Forge.**
-10. **Une source volatile respecte le modèle `VolatileSlot → RequestArena → MaterializedSource::Volatile`.**
-11. **La production concrète du contenu d'un slot volatil reste séparée du pipeline d'émission.**
-12. **Le Runtime ne réinterprète pas les templates et ne reconstruit pas dynamiquement la page.**
-13. **La cohérence de génération du `LiveRegistry` s'applique de la même manière aux sources d'une réponse.**
-14. **L'invalidation PostgreSQL et la synchronisation navigateur restent deux mécanismes distincts.**
-15. **Hyper/Axum restent confinés à la frontière HTTP et ne contaminent pas l'ontologie du Runtime.**
-16. **Aucun choix de technologie cliente n'est imposé par ce contrat.**
+3. **Une dépendance à la route courante est une contextualisation AOT, pas une augmentation.**
+4. **L'état d'une contextualisation de route est déterminé avant le Runtime.**
+5. **Le Runtime ne déduit pas la sémantique de la route pour modifier la représentation.**
+6. **La personnalisation seule ne justifie pas une augmentation.**
+7. **L'augmentation est motivée par l'indépendance d'un cycle de production ou de mutation.**
+8. **Une Projection n'est pas un composant DOM.**
+9. **Un Segment n'est pas un fragment DOM.**
+10. **Le Runtime ne connaît pas la sémantique métier de l'augmentation.**
+11. **La composition des segments reste déterminée et bornée AOT.**
+12. **Les contraintes de capacité restent vérifiables par Forge.**
+13. **Une source volatile respecte le modèle `VolatileSlot → RequestArena → MaterializedSource::Volatile`.**
+14. **La production concrète du contenu d'un slot volatil reste séparée du pipeline d'émission.**
+15. **Le Runtime ne réinterprète pas les templates et ne reconstruit pas dynamiquement la page.**
+16. **La cohérence de génération du `LiveRegistry` s'applique de la même manière aux sources d'une réponse.**
+17. **L'invalidation PostgreSQL et la synchronisation navigateur restent deux mécanismes distincts.**
+18. **Hyper/Axum restent confinés à la frontière HTTP et ne contaminent pas l'ontologie du Runtime.**
+19. **Aucun choix de technologie cliente n'est imposé par ce contrat.**
 
 ---
 
-# 22. Périmètre restant à spécifier
+# 27. Périmètre restant à spécifier
 
-Le contrat permet désormais de considérer comme établies les relations :
+Les relations suivantes peuvent désormais être considérées comme établies :
 
 ```text
 Projection
@@ -704,7 +914,7 @@ point d'intégration navigateur
 DOM
 ```
 
-Les points suivants restent volontairement hors décision :
+Restent volontairement hors décision :
 
 1. **production exacte du contenu des `VolatileSlot`** ;
 2. **contrat précis du point d'intégration navigateur** ;
@@ -718,24 +928,28 @@ Ces questions constituent des chantiers distincts et ne doivent pas être résol
 
 ---
 
-# 23. Formulation synthétique
+# 28. Formulation synthétique
 
 Le contrat d'augmentation peut finalement être résumé ainsi :
 
 > **Marius produit toujours des pages complètes AOT.**
 >
-> **ADR-011 permet de ne plus confondre l'unité de projection avec l'unité de page lorsque certaines projections possèdent un cycle de mutation indépendant.**
+> **Une variation déterminée par la route courante est une contextualisation AOT de cette page, et non une augmentation.**
 >
-> **L'augmentation factorise donc des cycles de projection indépendants ; elle ne transforme pas la page en assemblage de composants.**
+> **L'état d'une telle contextualisation est déterminé lors de la construction AOT de la représentation de la route ; le Runtime ne le devine ni ne le calcule.**
+>
+> **ADR-011 permet en revanche de factoriser des projections dont le cycle de production ou de mutation est indépendant de celui de la page.**
+>
+> **L'augmentation ne transforme donc pas la page en assemblage de composants : elle factorise des cycles de projection indépendants.**
 >
 > **Côté serveur, cette factorisation est matérialisée par le plan AOT de sources et de segments déjà défini par le Runtime de segments.**
 >
 > **Côté navigateur, elle pourra être exploitée par un mécanisme d'amélioration progressive permettant de cibler et d'actualiser le résultat concerné.**
 >
-> **Ces deux niveaux restent séparés : le Segment est une primitive d'émission mémoire ; le point d'intégration DOM est une primitive du protocole navigateur.**
+> **Le Segment reste une primitive d'émission mémoire ; le point d'intégration DOM reste une primitive du protocole navigateur.**
 >
 > **Aucun moteur de rendu runtime, aucune composition dynamique de page et aucune dépendance JavaScript ne sont introduits.**
 
 ---
 
-_Document rédigé le 2 septembre 2026_
+_Document rédigé le 3 septembre 2026_

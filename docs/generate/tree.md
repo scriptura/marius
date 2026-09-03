@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-01 23:04:17
+**Généré le:** 2026-09-03 06:53:57
 
 ## Racine du Workspace
 
@@ -173,9 +173,10 @@
 │   └── tree.sh
 ├── Cargo.lock
 ├── Cargo.toml
-└── README.md
+├── README.md
+└── biome.jsonc
 
-52 directories, 117 files
+52 directories, 118 files
 ```
 
 ## Documentation du projet
@@ -216,7 +217,8 @@
 ├── contrats
 │   ├── CONTRAT-implementation-multi-slot-varlena.md
 │   ├── CONTRAT-implementation-projection-segmentee.md
-│   └── CONTRAT-implementation-varlena-raw.md
+│   ├── CONTRAT-implementation-varlena-raw.md
+│   └── CONTRAT-marius-one-page-extension.md
 ├── generate
 │   └── tree.md
 ├── graveyard-of-documentations
@@ -231,9 +233,9 @@
 │   ├── fragment-forge-guide.md
 │   ├── meta-tooling-guide.md
 │   ├── runtime-lifecycle-guide.md
-│   ├── scenario-adding-a-script-or-library.md
-│   ├── scenario-adding-varlena-field.md
-│   ├── scripts-libraries-capabilities-frontend-guide-v2.md
+│   ├── scenario-adding-a-script-or-library-guide.md
+│   ├── scenario-adding-varlena-field-guide.md
+│   ├── scripts-libraries-capabilities-frontend-guide.md
 │   ├── styles-mcss-guide.md
 │   └── terminal-memo-cmd.md
 ├── handoffs
@@ -288,6 +290,6 @@
     ├── orchestration-main-specification.md
     └── provisioning-projection-specification.md
 
-17 directories, 89 files
+17 directories, 90 files
 ```
 
