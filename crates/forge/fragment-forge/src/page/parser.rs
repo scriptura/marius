@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/page/parser.rs
+
 //! Phases 4.2–4.7 — Parser Mode Page : détection d'`extends`
 //! (`detect_extends`), classification du sous-ensemble `Runtime` (symétrique
 //! de `parse_tokens` Mode Fragment), reconnaissance `block`/`endblock`,

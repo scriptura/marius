@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/fragment/static_markers.rs
+
 //! Scan statique post-lowering des marqueurs `class`/`id`/`data-*`/élément
 //! sur le HTML **statique** d'un flux `FlatPageToken` déjà abaissé.
 //! Contrat lexical partagé avec `content.compute_js_deps` côté SQL — deux

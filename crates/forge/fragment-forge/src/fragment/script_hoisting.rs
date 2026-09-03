@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/fragment/script_hoisting.rs
+
 //! Hoisting + déduplication des blocs `{% script %}...{% endscript %}`.
 //! Passe de compilation unique (`build.rs`), jamais exécutée par requête ;
 //! propriété de la CIBLE de compilation (Page vs Fragment isolé), jamais

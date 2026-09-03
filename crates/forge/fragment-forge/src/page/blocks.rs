@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/page/blocks.rs
+
 //! Phases 5.2–5.4 — `collect_blocks` : appariement par pile des
 //! `BlockOpen`/`BlockEnd` d'un fichier admis en arène, production des
 //! `NamedBlockRange`, fail-slow (imbrication détectée, mots-clés non

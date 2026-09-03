@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/fragment/parser.rs
+
 //! Phase 1.3 — Classifieur de tokens : `RawSpan` → `Vec<FlatPageToken>`.
 //! Syntaxe uniquement — pas de lookup de schéma (Phase 1.4), pas
 //! d'équilibrage IfBool/EndIf (Phase 1.4), fail-fast sur la première

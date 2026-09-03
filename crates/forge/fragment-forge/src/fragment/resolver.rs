@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/fragment/resolver.rs
+
 //! Phase 2.1 — AOT Capacity Planner & I/O Resolver : résolution des
 //! inclusions externes, mesure exacte de `STATIC_CAP`/`DYNAMIC_CAP`. Seule
 //! phase du pipeline Fragment autorisée à faire de l'E/S disque.

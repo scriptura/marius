@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/page/lowering.rs
+
 //! Phases 5.8–5.9 — `lower` : projection finale
 //! `(&[PageSourceToken], &LinkPlan, &PageArena) -> Vec<FlatPageToken>`.
 //! `Runtime` → identité, `Static` → `StaticInclude` provisoire, `Block` →

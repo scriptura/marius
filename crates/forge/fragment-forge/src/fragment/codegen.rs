@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/fragment/codegen.rs
+
 //! Phase 2.2 — Générateur AOT (transpileur) : `&[FlatPageToken]` → `String`
 //! de code Rust. Aucune validation sémantique ici (AST supposé correct,
 //! Phases 1.3+1.4). Contient aussi l'en-tête du fichier généré (fonction

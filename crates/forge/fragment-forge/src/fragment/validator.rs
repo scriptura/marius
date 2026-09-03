@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/fragment/validator.rs
+
 //! Phase 1.4 — Validateur sémantique : invariants structurels de la FSM de
 //! rendu sur `&[FlatPageToken]`. Lecture seule, accumulation exhaustive des
 //! erreurs (pas de fail-fast).

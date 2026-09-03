@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/naming.rs
+
 //! Utilitaires transverses de nommage et de calcul de capacité —
 //! conversion chemin → identifiant Rust, résolution de chemin `include_str!`,
 //! calcul de capacité statique du balisage `<article><dl>` généré.

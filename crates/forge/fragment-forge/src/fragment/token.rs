@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/fragment/token.rs
+
 //! Phase 1.1 — Alphabet de l'AST Fragment : `FlatPageToken`.
 //! Enum figé, matché de façon exhaustive par le validateur, le resolver et
 //! le générateur AOT ; toute variante additionnelle est un breaking change

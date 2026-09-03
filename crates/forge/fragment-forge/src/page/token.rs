@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/page/token.rs
+
 //! Phase 4.1 — Alphabet unique du Parser Mode Page : `PageSourceToken`,
 //! type englobant `Runtime(FlatPageToken)` / `Block(PageBlockToken)` /
 //! `Static(StaticPartialRef)` / `Unsupported`. Diff nul garanti sur

@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/fragment/lexer.rs
+
 //! Phase 1.2 — Scanner lexical isolé : `&'src str` → sous-slices `RawSpan`.
 //! Zéro allocation heap, zéro sémantique résolue (pas de distinction
 //! keyword vs ident, pas de lookup de schéma).

@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/schema.rs
+
 //! Socle DDL → layout Rust : catégorisation des champs fixed-length et
 //! varlena, politique d'échappement HTML, index de schéma passé aux phases
 //! de résolution et de génération. Zéro dépendance amont dans ce crate.

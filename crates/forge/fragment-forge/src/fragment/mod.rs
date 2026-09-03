@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/fragment/mod.rs
+
 //! Pipeline Mode Fragment (template unique, sans héritage) :
 //! `token` → `lexer` → `parser` → `validator` → `resolver` → `codegen`,
 //! plus deux passes de post-traitement sur `FlatPageToken` déjà résolu

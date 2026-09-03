@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/page/linker.rs
+
 //! Phases 5.5–5.7 — `link` : appariement parent/enfant sans E/S
 //! (`LinkPlan`/`BlockSubstitution`), vérification `static`, et
 //! `collect_static_refs` (alimentation du paramètre `static_refs` de

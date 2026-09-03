@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/page/model.rs
+
 //! Phase 3.0 — Mode Page, briques structurelles : marqueurs de bloc
 //! (`PageBlockToken`), identité d'arène (`TemplateId`), plages nommées
 //! (`NamedBlockRange`), spécification enfant (`ChildTemplateSpec`),

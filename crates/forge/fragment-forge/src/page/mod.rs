@@ -1,3 +1,5 @@
+// crates/forge/fragment-forge/src/page/mod.rs
+
 //! Pipeline Mode Page (héritage `extends`/`block`) :
 //! `model` → `token` → `parser` → `blocks` → `linker` → `lowering`.
 //! Point de jonction unique avec le pipeline Fragment : `lowering::lower`
