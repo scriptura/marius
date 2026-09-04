@@ -16,4 +16,4 @@ categories = ["development-tools"]
 # mais afin de permettre exactement la même définition lexicale côté SQL et côté Forge,
 # exprimée de manière lisible et testable.
 [dependencies]
-regex = "1.13"
+regex = { workspace = true }

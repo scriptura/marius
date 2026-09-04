@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-04 00:17:55
+**Généré le:** 2026-09-05 00:23:39
 
 ## Racine du Workspace
 
@@ -232,7 +232,8 @@
 │   └── pipeline-mode-page-architecture.md
 ├── benchs
 │   ├── benchs-2026.08.03.md
-│   └── benchs-2026.08.06.md
+│   ├── benchs-2026.08.06.md
+│   └── benchs-2026.09.04.md
 ├── contrats
 │   ├── CONTRAT-implementation-multi-slot-varlena.md
 │   ├── CONTRAT-implementation-projection-segmentee.md
@@ -260,6 +261,7 @@
 ├── handoffs
 │   ├── HANDOFF-scripts-architecture-reprise.md
 │   ├── SUIVI-js-deps-points-en-attente.md
+│   ├── confrontation-code-sequencement-phase0A-5.md
 │   ├── handoff-cartographie-hyper(ADR-011).md
 │   ├── note-post-phase-5.3-generate-main.md
 │   └── risks.md
@@ -309,6 +311,6 @@
     ├── orchestration-main-specification.md
     └── provisioning-projection-specification.md
 
-17 directories, 90 files
+17 directories, 92 files
 ```
 

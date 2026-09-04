@@ -14,19 +14,19 @@ categories = ["database", "data-structures"]
 build = "build/main.rs"
 
 [dependencies]
-bytemuck = { version = "1.14", features = ["derive"] }
-marius-collector = { path = "../../core/collector", version = "=0.5.0" }
-marius-projection = { path = "../../core/projection", version = "=0.5.0" }
+bytemuck = { workspace = true }
+marius-collector = { workspace = true }
+marius-projection = { workspace = true }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 
 [build-dependencies]
-marius-db-forge = { path = "../../forge/db-forge", version = "=0.5.0" }
-marius-fragment-forge = { path = "../../forge/fragment-forge", version = "=0.5.0" }
+marius-db-forge = { workspace = true }
+marius-fragment-forge = { workspace = true }
 sqlx = { workspace = true }
-tokio = { workspace = true }
-serde = { version = "1", features = ["derive"] }
-toml = { version = "0.8" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+serde = { workspace = true }
+toml = { workspace = true }

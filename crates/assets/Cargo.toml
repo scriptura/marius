@@ -1,6 +1,7 @@
 [package]
 name = "marius-assets"
 description = "Compilateur AOT d'assets statiques du thème Marius — hachage BLAKE3 (cache-busting), manifeste plat, outil de build hôte exclusivement."
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,76 +15,14 @@ name = "marius-assets"
 path = "src/main.rs"
 
 [dependencies]
-# Lecture de theme.toml et écriture de manifest.toml. Jamais lié au binaire
-# du Shell ni du Core (no_std) — ce crate est un outil de build hôte
-# indépendant, pas une dépendance du workspace runtime.
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-# Pipeline [webmanifest] Phase 6 — mutation ciblée d'un arbre JSON
-# générique (icons[].src), reste du document préservé intact. Vérifié sur
-# crates.io le jour de cette session : série 1.x stable depuis des années
-# (1.0.150 au moment de l'écriture), pas d'épinglage particulier nécessaire
-# — contrairement à `lightningcss` plus bas, ce n'est pas un crate en
-# alpha perpétuelle.
-serde_json = "1"
-# Hachage de contenu pour le cache-busting des URLs publiques (§9 de la
-# spec marius-assets). Aucune dépendance cryptographique plus lourde
-# n'est nécessaire : BLAKE3 est déjà le choix acté ailleurs dans Marius
-# (cf. manifest-reactive-projection.md).
-blake3 = "1"
-# Pipeline [styles] Phase 2 — bundling (@import), visiteur AST (validation
-# + réécriture Fonts↔CSS, spec §10.1), minification.
-#
-# ATTENTION VERSION : lightningcss n'a jamais eu de release stable —
-# max_stable_version est absent sur crates.io au moment de cette session
-# (vérifié le jour même), seule une série 1.0.0-alpha.N existe. Épinglé
-# explicitement plutôt que laissé sur "1" (qui ne matcherait aucune
-# pré-version sous les règles semver standard de Cargo). Attendez-vous à
-# devoir remonter ce numéro à la prochaine session — l'API de ce crate
-# peut encore changer tant qu'aucune 1.0.0 stable n'existe.
-# "bundler" active Bundler/FileProvider/SourceProvider (@import).
-# "visitor" active le trait Visitor/VisitTypes (parcours d'AST personnalisé).
-lightningcss = { version = "1.0.0-alpha.71", features = ["bundler", "visitor"] }
-
-# Pipeline [sprites] Phase 4 — parseur pull sur &str (aucun DOM construit),
-# vérifié sur crates.io le jour de cette session : `quick-xml` a une
-# release stable (0.41.0, contrairement à `lightningcss` ci-dessus) — pas
-# besoin d'épinglage exotique, un simple `"0.41"` suffit.
-# Aucune feature activée volontairement : "serialize" (intégration serde)
-# inutile — on ne dérive aucune struct SVG, on ré-émet du texte
-# directement ; "encoding" inutile — sources SVG supposées UTF-8 (même
-# hypothèse que `fs::read_to_string` ailleurs dans ce fichier) ;
-# "async-tokio" inutile — même discipline séquentielle que le reste de
-# cet outil de build (voir note en bas de fichier).
-quick-xml = "0.41"
-
-# Pipeline [scripts.components] + [service_worker] — passe de minification
-# finale (suppression des commentaires/espaces, compression AST,
-# renommage des bindings locaux). Cinq crates du même workspace `oxc`,
-# ARENA-based (`oxc_allocator`) — cohérent avec l'éthique DOD du reste de
-# ce binaire, pas un choix arbitraire.
-#
-# ATTENTION VERSION : `oxc_*` est en 0.x (pas de release 1.0 à ce jour),
-# cadence de publication hebdomadaire observée sur crates.io le jour de
-# cette session (0.140.0, 0.139.0, 0.138.0, ... une release par semaine
-# environ) — API instable par construction sous ce régime, donc épinglage
-# EXACT (`=`) plutôt qu'une plage `^`/`~`, même logique que `lightningcss`
-# ci-dessus. Les cinq crates DOIVENT rester synchronisées à la même
-# version — elles partagent des types internes (`Program<'a>`,
-# `Allocator`) au travers des frontières de crate ; une divergence de
-# version entre elles ne compile simplement pas.
-# Signature exacte vérifiée par lecture directe du dépôt GitHub
-# `oxc-project/oxc` (branche `main`, fichier
-# `crates/oxc_minifier/examples/minifier.rs`) le jour de cette session —
-# pas déduite de mémoire, cet écosystème bouge trop vite pour ça.
-oxc_allocator = "=0.140.0"
-oxc_parser = "=0.140.0"
-oxc_span = "=0.140.0"
-oxc_codegen = "=0.140.0"
-oxc_minifier = "=0.140.0"
-
-# Volontairement absent : aucune dépendance async/tokio (ce binaire est
-# séquentiel, DOD — un seul thread, un seul passage par fichier, buffers
-# réutilisés), aucun framework CLI (clap, etc. — un seul argument
-# positionnel ne le justifie pas), aucun "anyhow" (Box<dyn Error> + `?`
-# suffit pour un outil de build à vie courte).
+serde = { workspace = true }
+toml = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+lightningcss = { workspace = true }
+quick-xml = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
+oxc_codegen = { workspace = true }
+oxc_minifier = { workspace = true }

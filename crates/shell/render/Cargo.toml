@@ -13,24 +13,26 @@ keywords = ["axum", "web", "dispatcher", "marius"]
 categories = ["web-programming"]
 
 [dependencies]
-memmap2 = "0.9.10"
-bytemuck = { version = "1.14", features = ["derive"] }
-arc-swap = "1.9.1"
-marius-collector = { version = "=0.5.0", path = "../../core/collector" }
-marius-projection = { version = "=0.5.0", path = "../../core/projection" }
-marius-schema = { version = "=0.5.0", path = "../../core/schema" }
-
-# Shell — Tokio et Rayon vivent uniquement ici (pas dans le Core)
-tokio = { workspace = true }
-rayon = { workspace = true }
 sqlx = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-util",
+    "fs",
+    "macros",
+    "rt-multi-thread",
+] }
+rayon = { workspace = true }
+memmap2 = { workspace = true }
+bytemuck = { workspace = true }
+arc-swap = { workspace = true }
+marius-collector = { workspace = true }
+marius-projection = { workspace = true }
+marius-schema = { workspace = true }
 
 [dev-dependencies]
-divan = "0.1"
-marius-schema = { version = "=0.5.0", path = "../../core/schema" }
+divan = { workspace = true }
 
 [build-dependencies]
-marius-fragment-forge = { version = "=0.5.0", path = "../../forge/fragment-forge" }
+marius-fragment-forge = { workspace = true }
 
 [[bench]]
 name = "hot_path_render"

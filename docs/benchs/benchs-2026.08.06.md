@@ -106,7 +106,6 @@ hot_path_render                       fastest       │ slowest       │ median
 ╰─ render/single/worst_case           1.332 µs      │ 1.402 µs      │ 1.352 µs      │ 1.352 µs      │ 100     │ 200
                                       15.86 GB/s    │ 15.07 GB/s    │ 15.62 GB/s    │ 15.63 GB/s    │         │
                                       750.6 Kitem/s │ 713.1 Kitem/s │ 739.5 Kitem/s │ 739.5 Kitem/s │         │
-
 ```
 
 ## Interprétation des résultats par DeepSheek

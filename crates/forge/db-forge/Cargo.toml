@@ -14,8 +14,8 @@ categories = ["development-tools", "database"]
 
 [dependencies]
 sqlx = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt", "io-util", "net", "time"] }
 # Interface partagée : VarlenField, FieldSpec, FieldKind, generate_render, generate_capacity_consts.
 # Dépendance unidirectionnelle : db-forge → fragment-forge.
 # fragment-forge n'importe jamais db-forge (INV-4).
-marius-fragment-forge = { version = "=0.5.0", path = "../fragment-forge" }
+marius-fragment-forge = { workspace = true }

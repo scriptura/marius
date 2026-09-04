@@ -40,7 +40,70 @@ sqlx = { version = "0.8", features = [
     "macros",
     "chrono",
 ] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", default-features = false }
 rayon = "1.10"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+bytemuck = { version = "1.14", features = ["derive"] }
+phf = { version = "0.14", default-features = false }
+phf_codegen = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.8" }
+blake3 = "1"
+lightningcss = { version = "1.0.0-alpha.71", features = ["bundler", "visitor"] }
+quick-xml = "0.41"
+memmap2 = "0.9.10"
+regex = "1.13"
+arc-swap = "1.9.1"
+divan = "0.1"
+reqwest = { version = "0.13", default-features = false }
+
+# Pipeline [scripts.components] + [service_worker] — passe de minification
+# finale (suppression des commentaires/espaces, compression AST,
+# renommage des bindings locaux). Cinq crates du même workspace `oxc`,
+# ARENA-based (`oxc_allocator`) — cohérent avec l'éthique DOD du reste de
+# ce binaire, pas un choix arbitraire.
+#
+# ATTENTION VERSION : `oxc_*` est en 0.x (pas de release 1.0 à ce jour),
+# cadence de publication hebdomadaire observée sur crates.io le jour de
+# cette session (0.140.0, 0.139.0, 0.138.0, ... une release par semaine
+# environ) — API instable par construction sous ce régime, donc épinglage
+# EXACT (`=`) plutôt qu'une plage `^`/`~`, même logique que `lightningcss`
+# ci-dessus. Les cinq crates DOIVENT rester synchronisées à la même
+# version — elles partagent des types internes (`Program<'a>`,
+# `Allocator`) au travers des frontières de crate ; une divergence de
+# version entre elles ne compile simplement pas.
+oxc_allocator = "=0.140.0"
+oxc_parser = "=0.140.0"
+oxc_span = "=0.140.0"
+oxc_codegen = "=0.140.0"
+oxc_minifier = "=0.140.0"
+
+# Dépendances internes au workspace — version verrouillée pour tous les membres.
+marius = { version = "=0.5.0", path = "crates/marius" }
+marius-collector = { version = "=0.5.0", path = "crates/core/collector" }
+marius-projection = { version = "=0.5.0", path = "crates/core/projection" }
+marius-schema = { version = "=0.5.0", path = "crates/core/schema" }
+marius-render = { version = "=0.5.0", path = "crates/shell/render" }
+marius-server = { version = "=0.5.0", path = "crates/shell/server" }
+marius-db-forge = { version = "=0.5.0", path = "crates/forge/db-forge" }
+marius-fragment-forge = { version = "=0.5.0", path = "crates/forge/fragment-forge" }
+marius-guard-forge = { version = "=0.5.0", path = "crates/forge/guard-forge" }
+marius-bridge-forge = { version = "=0.5.0", path = "crates/forge/bridge-forge" }
+
+[workspace.lints.clippy]
+clone_on_copy = "deny"
+large_stack_arrays = "warn"
+# Traque les Boxing inutiles (indirections pénalisantes en ECS)
+borrowed_box = "warn"
+unnecessary_box_returns = "warn"
+
+[profile.release]
+lto = "fat"               # Link-Time Optimization global (inlining cross-crates)
+codegen-units = 1         # Empêche LLVM de paralléliser au détriment de l'optimisation
+panic = "abort"           # Supprime le code de déroulement de pile (unwinding), réduit la taille binaire et la pression mémoire
+strip = "debuginfo"       # Nettoie les symboles pour le déploiement
+
+[profile.dev]
+opt-level = 1             # Léger niveau d'opti en dev (sinon les abstractions DOD/ECS sont trop lentes)
