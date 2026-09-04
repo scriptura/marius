@@ -1,12 +1,13 @@
 [package]
 name = "marius-assets"
-version = "0.5.0"
-edition = "2024"
 description = "Compilateur AOT d'assets statiques du thème Marius — hachage BLAKE3 (cache-busting), manifeste plat, outil de build hôte exclusivement."
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/scriptura/marius"
-homepage = "https://github.com/scriptura/marius"
-documentation = "https://github.com/scriptura/marius/tree/main/docs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
 
 [[bin]]
 name = "marius-assets"

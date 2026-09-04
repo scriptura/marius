@@ -1,12 +1,15 @@
 
 [package]
 name = "marius"
-version = "0.5.0"
-edition = "2024"
 description = "Marius: a data-oriented reactive projection engine. PostgreSQL → AOT HTML, zero intermediate transformation."
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/scriptura/marius"
 readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
 keywords = ["ecs", "dod", "reactive", "cms", "aot"]
 categories = ["web-programming", "database", "concurrency"]
 

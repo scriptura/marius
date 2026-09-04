@@ -1,13 +1,14 @@
 [package]
 name = "marius-fragment-forge"
-version = "0.5.0"
-edition = "2024"
 description = "Build-time HTML render generator for the Marius engine. Computes static/dynamic buffer capacities."
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/scriptura/marius"
-homepage = "https://github.com/scriptura/marius"
-documentation = "https://github.com/scriptura/marius/tree/main/docs"
 readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
 keywords = ["codegen", "build-script", "marius"]
 categories = ["development-tools"]
 

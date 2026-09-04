@@ -1,11 +1,17 @@
 [package]
 name = "marius-server"
-version = "0.5.0"
-edition = "2024"
-publish = false
 description = "Serveur shell pour le projet Marius — frontière réseau Axum/Tokio"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/scriptura/marius"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
+
+# Binaire applicatif (main.rs) — non publiable sur crates.io par conception
+publish = false
 
 # Binaire principal — point d'entrée du processus.
 [[bin]]

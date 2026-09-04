@@ -1,14 +1,15 @@
 
 [package]
 name = "marius-collector"
-version = "0.5.0"
-edition = "2024"
 description = "Lock-free bit-vector collector for the Marius reactive engine. Pure Core, no async runtime."
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/scriptura/marius"
-homepage = "https://github.com/scriptura/marius"
-documentation = "https://github.com/scriptura/marius/tree/main/docs"
 readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
 keywords = ["ecs", "lock-free", "bit-vector", "marius"]
 categories = ["concurrency", "data-structures"]
 
