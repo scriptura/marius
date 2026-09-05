@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-05 00:23:39
+**Généré le:** 2026-09-05 02:16:41
 
 ## Racine du Workspace
 

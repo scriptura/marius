@@ -99,6 +99,7 @@ pub(crate) fn minify_javascript(source: &str, path_hint: &Path) -> Result<String
     let options = MinifierOptions {
         mangle: Some(MangleOptions::default()),
         compress: Some(CompressOptions::smallest()),
+        mangle_properties: None,
     };
     let minifier_ret = Minifier::new(options).minify(&allocator, &mut program);
 

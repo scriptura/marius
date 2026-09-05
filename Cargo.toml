@@ -41,19 +41,19 @@ sqlx = { version = "0.8", features = [
     "chrono",
 ] }
 tokio = { version = "1", default-features = false }
-rayon = "1.10"
+rayon = "1.12"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
-bytemuck = { version = "1.14", features = ["derive"] }
+bytemuck = { version = "1.25", features = ["derive"] }
 phf = { version = "0.14", default-features = false }
 phf_codegen = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = { version = "0.8" }
+toml = { version = "1.1" }
 blake3 = "1"
-lightningcss = { version = "1.0.0-alpha.71", features = ["bundler", "visitor"] }
+lightningcss = { version = "1.0.0-alpha.72", features = ["bundler", "visitor"] }
 quick-xml = "0.41"
-memmap2 = "0.9.10"
+memmap2 = "0.9.11"
 regex = "1.13"
 arc-swap = "1.9.1"
 divan = "0.1"
@@ -74,11 +74,11 @@ reqwest = { version = "0.13", default-features = false }
 # version — elles partagent des types internes (`Program<'a>`,
 # `Allocator`) au travers des frontières de crate ; une divergence de
 # version entre elles ne compile simplement pas.
-oxc_allocator = "=0.140.0"
-oxc_parser = "=0.140.0"
-oxc_span = "=0.140.0"
-oxc_codegen = "=0.140.0"
-oxc_minifier = "=0.140.0"
+oxc_allocator = "=0.148.0"
+oxc_parser = "=0.148.0"
+oxc_span = "=0.148.0"
+oxc_codegen = "=0.148.0"
+oxc_minifier = "=0.148.0"
 
 # Dépendances internes au workspace — version verrouillée pour tous les membres.
 marius = { version = "=0.5.0", path = "crates/marius" }

@@ -40,10 +40,8 @@ fn fail_fast_panic_in_dispatcher_terminates_process() {
              triggers_notify_dml.sql appliqués, packfiles déjà présents sur \
              disque pour les deux entrées de ROUTE_TABLE (content_core, \
              pages_homepage — commerce_product_core désactivé, hors \
-             périmètre PoC, HANDOFF-js-deps-capacites-frontend-v2.md) : \
-             cold_start() est \
-             fatal sinon, et le binaire doit démarrer jusqu'au bout pour que \
-             ce test ait un sens."
+             périmètre PoC) : cold_start() est fatal sinon, et le binaire \
+             doit démarrer jusqu'au bout pour que ce test ait un sens."
         )
     });
 

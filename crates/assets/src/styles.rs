@@ -100,6 +100,7 @@ fn extract_source_index(rule: &CssRule) -> Option<u32> {
         CssRule::StartingStyle(r) => Some(r.loc.source_index),
         CssRule::ViewTransition(r) => Some(r.loc.source_index),
         CssRule::Unknown(r) => Some(r.loc.source_index),
+        CssRule::PositionTry(r) => Some(r.loc.source_index),
         CssRule::Ignored | CssRule::Custom(_) => None,
     }
 }
