@@ -289,10 +289,14 @@ pub struct ParsedPageTemplate<'src> {
 ///
 /// ─── Allocation ──────────────────────────────────────────────────────────
 ///
-///   `Vec` de croissance linéaire, une entrée par fichier admis (2 dans le
-///   cas courant : enfant + parent — voir Document 2 §6.1 pour le point
-///   ouvert sur l'héritage multi-niveaux, non traité par cette structure).
-///   Build-time uniquement, jamais exposée au runtime du moteur.
+///   `Vec` de croissance linéaire, une entrée par fichier admis. Historiquement
+///   2 dans le cas courant (enfant + parent) ; depuis la généralisation de
+///   l'héritage multi-niveaux (Document 2 §6.1, tranché), jusqu'à
+///   `MAX_EXTENDS_DEPTH` (orchestrateur, Document 3 §5) — cette structure
+///   elle-même n'a jamais eu besoin de changer : elle admettait déjà N
+///   fichiers sans limite structurelle, seule la construction de la chaîne
+///   en amont était plafonnée à 2. Build-time uniquement, jamais exposée au
+///   runtime du moteur.
 #[derive(Debug, Default)]
 pub struct PageArena<'src> {
     templates: Vec<ParsedPageTemplate<'src>>,
@@ -385,12 +389,21 @@ pub enum PageLinkError<'src> {
     /// Chemin déclaré par `{% extends "path" %}` introuvable au moment de la
     /// résolution. Distinct de `ResolverError::IoError` (mode fragment) :
     /// contexte de phase différent (Linker vs résolution de capacité), pas
-    /// une duplication.
+    /// une duplication. Construite et émise par l'orchestrateur (Document 3,
+    /// hors périmètre du Linker lui-même) : résoudre le chemin `extends`
+    /// suppose une E/S disque, que `link`/`link_chain` n'effectuent jamais.
     ExtendsNotFound { path: &'src str },
-    /// `{% block name %}` défini dans un enfant sans `BlockOpen` de même nom
-    /// dans l'AST du parent référencé par `extends`. Cf. doc de
-    /// `ChildTemplateSpec`.
-    OrphanBlock { name: &'src str },
+    /// `{% block name %}` défini dans un maillon (enfant ou intermédiaire,
+    /// jamais le Root lui-même) sans `BlockOpen` de même nom dans l'AST du
+    /// Root de la chaîne d'héritage. `template` identifie précisément le
+    /// maillon fautif — avec l'héritage multi-niveaux, ce n'est plus
+    /// nécessairement l'enfant terminal : n'importe quel maillon
+    /// intermédiaire peut déclarer un bloc mort. Cf. doc de
+    /// `ChildTemplateSpec` et de `link_chain`.
+    OrphanBlock {
+        name: &'src str,
+        template: TemplateId,
+    },
     /// `{% static path %}` référence un fichier introuvable. Distinct
     /// d'`ExtendsNotFound` (chemin de template) et de
     /// `ResolverError::IoError` (mode fragment, `StaticInclude`) : trois
@@ -583,7 +596,10 @@ mod tests_phase_3_0_page_mode_types {
     #[test]
     fn phase_errors_are_distinct_types() {
         let _parse: PageComposeParseError = PageComposeParseError::ExtendsNotFirst;
-        let _link: PageLinkError<'_> = PageLinkError::OrphanBlock { name: "sidebar" };
+        let _link: PageLinkError<'_> = PageLinkError::OrphanBlock {
+            name: "sidebar",
+            template: TemplateId(0),
+        };
         let _validation: PageValidationError<'_> = PageValidationError::ForLoopDetected;
     }
 }

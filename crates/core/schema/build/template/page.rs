@@ -1,7 +1,8 @@
 // crates/core/schema/build/template/page.rs
 
 //! Sous-orchestration Mode Page (`{% extends %}`) — pipeline complet :
-//! E/S parent, garde single-level, admission en arène, `LinkPlan`,
+//! résolution de la chaîne d'héritage (jusqu'à `MAX_EXTENDS_DEPTH` fichiers,
+//! détection de cycle), admission en arène, `LinkPlan` N-aire (`link_chain`),
 //! Lowering, jonction avec le pipeline gelé de `fragment-forge`.
 
 use std::collections::HashMap;
@@ -9,10 +10,11 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use marius_fragment_forge::{
-    AssetLookup, FlatPageToken, PageArena, SchemaIndex, TemplateMetrics, VarlenField,
-    collect_blocks, collect_static_refs, extract_static_marker_facts, generate_aot_snippet,
-    generate_segmented_snippet, hoist_and_dedupe_scripts, link, lower, parse_page_tokens,
-    relative_path_for_include_str, resolve_and_measure, scan, splice_hoisted_scripts, validate_ast,
+    AssetLookup, FlatPageToken, NamedBlockRange, PageArena, PageLinkError, SchemaIndex,
+    TemplateId, TemplateMetrics, VarlenField, collect_blocks, collect_static_refs,
+    extract_static_marker_facts, generate_aot_snippet, generate_segmented_snippet,
+    hoist_and_dedupe_scripts, link_chain, lower, parse_page_tokens, relative_path_for_include_str,
+    resolve_and_measure, scan, splice_hoisted_scripts, validate_ast,
 };
 
 use crate::asset_lookup::resolve_asset_lookup;
@@ -22,10 +24,26 @@ use crate::modules_lowering::{lower_modules_for_template, render_modules_as_rust
 use crate::template::common::{read_template_file, split_static_at_marker};
 use crate::{MODULES_PLACEHOLDER, SCRIPTS_PLACEHOLDER};
 
-/// Sous-orchestration Mode Page — pipeline complet : E/S parent, garde
-/// single-level, admission en arène, `LinkPlan`, Lowering, jonction avec le
-/// pipeline gelé (`validate_ast` → `resolve_and_measure` →
-/// `generate_aot_snippet`). Dernière phase de la roadmap (6.6).
+/// Profondeur maximale de la chaîne `{% extends %}`, fichier de la table
+/// inclus. 2 = enfant + parent direct (ancien plafond, désormais un cas
+/// particulier) ; jusqu'à 4 = enfant + jusqu'à 3 ancêtres (Root inclus).
+/// Au-delà : `cargo:error` nommé, jamais une récursion non bornée.
+const MAX_EXTENDS_DEPTH: usize = 4;
+
+/// Assemble la chaîne de chemins visités en une chaîne lisible pour un
+/// message `cargo:error` (« a.marius -> b.marius -> c.marius »).
+fn render_chain(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+/// Sous-orchestration Mode Page — pipeline complet : résolution de la
+/// chaîne d'héritage, admission en arène, `LinkPlan` N-aire, Lowering,
+/// jonction avec le pipeline gelé (`validate_ast` → `resolve_and_measure` →
+/// `generate_aot_snippet`).
 ///
 /// Signature gelée à sa forme finale (Document 3 §4), désormais entièrement
 /// consommée : `fixed`/`varlena` alimentent le `SchemaIndex` du point de
@@ -37,16 +55,32 @@ use crate::{MODULES_PLACEHOLDER, SCRIPTS_PLACEHOLDER};
 /// modification de signature ni de corps, dans le même ordre que le chemin
 /// Mode Fragment — aucun branchement de mode ne survit à ce point.
 ///
+/// ─── Résolution de la chaîne — pourquoi deux boucles distinctes ──────────
+///
+///   Phase 1 (découverte) : lit chaque ancêtre, en extrait uniquement la
+///   valeur `.extends` (copiée en `String`), puis jette l'AST obtenu. Phase
+///   2 (admission) : reparse chaque source, désormais figée dans un `Vec`
+///   qui ne grandit plus, et admet chaque AST en arène. Les deux boucles ne
+///   peuvent pas être fusionnées : admettre un AST en arène pendant la
+///   Phase 1 emprunterait la `String` qui vient d'être poussée dans
+///   `sources`, alors que `sources` doit continuer à grandir pour les
+///   ancêtres suivants — le borrow-checker refuse la coexistence d'un
+///   emprunt vivant sur `sources` et d'une mutation (`push`) de `sources`
+///   lui-même. Coût réel de cette séparation : un second parsing par
+///   maillon (≤ `MAX_EXTENDS_DEPTH` occurrences), négligeable au build.
+///
 /// Retourne :
-///   `Err(())` : parent illisible (E/S), parent syntaxiquement invalide,
-///               parent déclarant lui-même `extends` (garde single-level),
-///               enfant syntaxiquement invalide à la ré-analyse
-///               d'admission, blocs enfant ou parent syntaxiquement mal
-///               formés, linking échoué (bloc orphelin, fichier `static`
-///               introuvable), template Mode Page sémantiquement invalide
-///               (`validate_ast`), ou résolution de capacité échouée
-///               (`resolve_and_measure` — fichier `include`/`static`
-///               illisible). Neuf messages `cargo:error` distincts.
+///   `Err(())` : chaîne extends trop profonde, cycle détecté dans la chaîne,
+///               chemin `extends` introuvable, un maillon syntaxiquement
+///               invalide (découverte ou ré-analyse d'admission), blocs d'un
+///               maillon syntaxiquement mal formés, linking échoué (bloc
+///               orphelin contre le Root, fichier `static` introuvable),
+///               template Mode Page sémantiquement invalide
+///               (`validate_ast`), hoisting des scripts échoué, marqueur
+///               `SCRIPTS_PLACEHOLDER`/`MODULES_PLACEHOLDER` absent du Root,
+///               ou résolution de capacité échouée (`resolve_and_measure` —
+///               fichier `include`/`static` illisible). `cargo:error`
+///               distincts pour chaque cas.
 ///   `Ok((body, metrics))` : template Mode Page résolu avec succès —
 ///               structurellement indiscernable, à ce point, d'un résultat
 ///               Mode Fragment (Document 2 §5, postcondition finale).
@@ -62,69 +96,130 @@ pub(crate) fn resolve_page_template<'src>(
     child_extends: &'src str,
     capabilities: &[(String, CapabilityInfo)],
 ) -> Result<(String, TemplateMetrics), ()> {
-    let parent_path = PathBuf::from(relative_path_for_include_str(manifest_dir, child_extends));
+    // ── Phase 1 — Découverte de la chaîne extends ───────────────────────
+    //
+    // `visited_paths[0]` est un label synthétique (jamais un chemin
+    // disque réel — les chevrons excluent toute collision avec un vrai
+    // nom de fichier) : cette fonction ne reçoit pas le chemin physique du
+    // fichier de la table lui-même, seulement son contenu (`child_src`).
+    let mut visited_paths: Vec<PathBuf> = vec![PathBuf::from(format!("<{schema}.{table}>"))];
+    let mut sources: Vec<String> = vec![child_src.to_string()];
+    let mut current_extends = child_extends.to_string();
 
-    // Invalidation de cache : un parent modifié doit invalider le build, au
-    // même titre que l'enfant (déjà couvert par resolve_template).
-    println!("cargo:rerun-if-changed={}", parent_path.display());
-
-    let parent_src = read_template_file(&parent_path)?;
-
-    let parent_ast = parse_page_tokens(scan(&parent_src)).map_err(|e| {
-        println!(
-            "cargo:error=DB-Forge [{schema}.{table}] : parent Mode Page invalide ({}) : {e:?}",
-            parent_path.display()
-        );
-    })?;
-
-    // Garde single-level (Document 2 §6.1, tranchée par Document 3 §5) :
-    // l'héritage multi-niveaux n'est pas couvert par ce contrat.
-    if parent_ast.extends.is_some() {
-        println!(
-            "cargo:error=DB-Forge [{schema}.{table}] : héritage multi-niveaux non supporté \
-             ({} déclare lui-même extends)",
-            parent_path.display()
-        );
-        return Err(());
-    }
-
-    // Admission en arène (Phase 6.4, Documents 1+2 §2) : enfant et parent
-    // obtiennent chacun un TemplateId distinct dans le contexte réel du
-    // build. Ré-analyse de l'enfant : `parse_page_tokens` a déjà validé ce
-    // même contenu dans `resolve_template` (extraction de `child_extends`)
-    // ; un échec ici serait donc un bug du pipeline, pas un cas de template
-    // réellement invalide — message distinct pour le distinguer à la lecture
-    // des logs `cargo:error`.
-    let child_ast = parse_page_tokens(scan(child_src)).map_err(|e| {
-        println!(
-            "cargo:error=DB-Forge [{schema}.{table}] : enfant Mode Page invalide \
-             (ré-analyse pour admission en arène) : {e:?}"
-        );
-    })?;
-
-    let mut arena = PageArena::default();
-    let child_id = arena.admit(child_ast);
-    let parent_id = arena.admit(parent_ast);
-
-    // Collecte de blocs — schéma-libre (Document 2 §3, Phase 5.2-5.4),
-    // câblée ici sur les AST réels de l'arène. Erreurs distinctes
-    // enfant/parent : une plage mal formée du mauvais fichier ne doit pas
-    // se confondre dans un message unique.
-    let child_blocks = collect_blocks(child_id, &arena.get(child_id).tokens).map_err(|errors| {
-        println!("cargo:error=DB-Forge [{schema}.{table}] : blocs enfant mal formés : {errors:?}");
-    })?;
-    let parent_blocks =
-        collect_blocks(parent_id, &arena.get(parent_id).tokens).map_err(|errors| {
+    loop {
+        if sources.len() >= MAX_EXTENDS_DEPTH {
             println!(
-                "cargo:error=DB-Forge [{schema}.{table}] : blocs parent mal formés : {errors:?}"
+                "cargo:error=DB-Forge [{schema}.{table}] : chaîne extends trop profonde \
+                 (max {MAX_EXTENDS_DEPTH} fichiers) : {} -> (arrêté avant lecture de `{current_extends}`)",
+                render_chain(&visited_paths)
+            );
+            return Err(());
+        }
+
+        let path = PathBuf::from(relative_path_for_include_str(manifest_dir, &current_extends));
+
+        if visited_paths.contains(&path) {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : cycle détecté dans la chaîne \
+                 extends : {} -> {} (déjà présent plus haut dans la chaîne)",
+                render_chain(&visited_paths),
+                path.display()
+            );
+            return Err(());
+        }
+
+        if !path.exists() {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : extends introuvable — {} déclare \
+                 `{current_extends}`, mais {} n'existe pas",
+                render_chain(&visited_paths),
+                path.display()
+            );
+            return Err(());
+        }
+
+        println!("cargo:rerun-if-changed={}", path.display());
+        let src = read_template_file(&path)?;
+
+        // AST jeté volontairement (voir doc de tête) : seule `.extends`,
+        // déjà copiée en `String`, survit à cette itération.
+        let peek_ast = parse_page_tokens(scan(&src)).map_err(|e| {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : maillon extends invalide ({}) : {e:?}",
+                path.display()
             );
         })?;
+        let next_extends = peek_ast.extends.map(str::to_string);
 
-    // Extraction des références `{% static %}` des deux fichiers (Document 2
-    // §5.7, déjà scaffoldée dans fragment-forge) — aucune déduplication à ce
-    // stade (Document 2 §6.2, hors périmètre).
-    let mut static_refs = collect_static_refs(&arena.get(child_id).tokens);
-    static_refs.extend(collect_static_refs(&arena.get(parent_id).tokens));
+        visited_paths.push(path);
+        sources.push(src);
+
+        match next_extends {
+            Some(next) => current_extends = next,
+            None => break, // ce maillon est le Root
+        }
+    }
+
+    // ── Phase 2 — Parsing réel + admission en arène ─────────────────────
+    //
+    // `sources` ne grandit plus à partir d'ici : chaque `&sources[i]`
+    // emprunté ci-dessous reste valide jusqu'à la fin de la fonction, sans
+    // conflit avec le borrow-checker.
+    let mut arena = PageArena::default();
+    let mut chain_ids: Vec<TemplateId> = Vec::with_capacity(sources.len());
+
+    for (index, src) in sources.iter().enumerate() {
+        let ast = parse_page_tokens(scan(src)).map_err(|e| {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : maillon Mode Page invalide \
+                 (ré-analyse pour admission en arène, {}) : {e:?}",
+                visited_paths[index].display()
+            );
+        })?;
+        chain_ids.push(arena.admit(ast));
+    }
+
+    let root_id = *chain_ids
+        .last()
+        .expect("chain_ids non vide : au moins le Root, garanti par la boucle Phase 1");
+    let root_path = visited_paths
+        .last()
+        .expect("visited_paths non vide : au moins le Root, garanti par la boucle Phase 1");
+
+    // Résout un `TemplateId` vers son chemin fichier — `chain_ids` et
+    // `visited_paths` partagent le même ordre (même boucle d'admission ci-
+    // dessus) ; recherche linéaire triviale sur une chaîne bornée à
+    // `MAX_EXTENDS_DEPTH` maillons.
+    let path_for_template = |id: TemplateId| -> &Path {
+        let idx = chain_ids
+            .iter()
+            .position(|&x| x == id)
+            .expect("template admis dans cette chaîne — invariant garanti par la boucle ci-dessus");
+        &visited_paths[idx]
+    };
+
+    // Collecte de blocs — un ensemble par maillon, dans l'ordre
+    // feuille → Root (même ordre que `chain_ids`/`visited_paths`).
+    let mut chain_blocks_owned: Vec<Vec<NamedBlockRange<'_>>> =
+        Vec::with_capacity(chain_ids.len());
+    for &id in &chain_ids {
+        let blocks = collect_blocks(id, &arena.get(id).tokens).map_err(|errors| {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : blocs mal formés ({}) : {errors:?}",
+                path_for_template(id).display()
+            );
+        })?;
+        chain_blocks_owned.push(blocks);
+    }
+    let chain_blocks: Vec<&[NamedBlockRange<'_>]> =
+        chain_blocks_owned.iter().map(Vec::as_slice).collect();
+
+    // Références `{% static %}` de tous les maillons de la chaîne — aucune
+    // déduplication (Document 2 §6.2, inchangé).
+    let mut static_refs = Vec::new();
+    for &id in &chain_ids {
+        static_refs.extend(collect_static_refs(&arena.get(id).tokens));
+    }
 
     // Vérification d'existence des fichiers `static`, injectée au Linker
     // sous forme de closure pure modulo E/S (Document 2 §4) — résolution
@@ -133,20 +228,31 @@ pub(crate) fn resolve_page_template<'src>(
         Path::new(&relative_path_for_include_str(manifest_dir, path)).exists()
     };
 
-    let plan =
-        link(&parent_blocks, &child_blocks, &static_refs, file_exists).map_err(|errors| {
-            println!(
-                "cargo:error=DB-Forge [{schema}.{table}] : linking Mode Page échoué : {errors:?}"
-            );
-        })?;
+    let plan = link_chain(&chain_blocks, &static_refs, file_exists).map_err(|errors| {
+        for &error in &errors {
+            match error {
+                PageLinkError::OrphanBlock { name, template } => {
+                    println!(
+                        "cargo:error=DB-Forge [{schema}.{table}] : bloc `{name}` déclaré dans \
+                         {} ne correspond à aucun slot du Root ({}) — bloc mort, à supprimer \
+                         ou renommer",
+                        path_for_template(template).display(),
+                        root_path.display()
+                    );
+                }
+                other => println!(
+                    "cargo:error=DB-Forge [{schema}.{table}] : linking Mode Page échoué : {other:?}"
+                ),
+            }
+        }
+    })?;
 
     // Lowering (Document 2 §5, dernière étape du domaine composition) :
-    // fusion irréversible parent+enfant selon `plan`, projection vers
+    // fusion irréversible de toute la chaîne selon `plan`, projection vers
     // `FlatPageToken` — Block/TemplateId/Static(StaticPartialRef) cessent
-    // d'exister à partir d'ici. Fonction totale (pas de `Result`) : par
-    // construction, `plan` provient d'un `link` réussi, donc toute
-    // référence de composition est déjà résolue.
-    let tokens = lower(&arena.get(parent_id).tokens, &plan, &arena);
+    // d'exister à partir d'ici. Toujours le Root qui est traversé, jamais
+    // un « parent » supposé unique.
+    let tokens = lower(&arena.get(root_id).tokens, &plan, &arena);
 
     // Point de jonction unique (Document 3 §2) : à partir d'ici, identique
     // au chemin Mode Fragment de `resolve_template` — mêmes fonctions,
@@ -180,9 +286,9 @@ pub(crate) fn resolve_page_template<'src>(
             None => {
                 println!(
                     "cargo:error=DB-Forge [{schema}.{table}] : {} bloc(s) {{% script %}} à \
-                     hisser mais aucun marqueur {SCRIPTS_PLACEHOLDER} trouvé dans le layout {}",
+                     hisser mais aucun marqueur {SCRIPTS_PLACEHOLDER} trouvé dans le Root {}",
                     hoisted_blocks.len(),
-                    parent_path.display()
+                    root_path.display()
                 );
                 return Err(());
             }
@@ -191,14 +297,13 @@ pub(crate) fn resolve_page_template<'src>(
 
     // MARIUS_MODULES — lowering PAR TEMPLATE (addendum « MARIUS_MODULES
     // agrège deux sources » — scan statique des Static tokens de CE flux
-    // déjà fusionné parent+enfant, croisé avec record.js_deps). Jamais
-    // conditionnel au nombre de capacités actives (contrairement au
-    // hoisting de scripts ci-dessus) : `base.marius` porte ce marqueur en
-    // permanence, son absence signale une corruption du layout, pas une
-    // simple absence de contenu à hisser. Un snippet vide (0 capacité
-    // concerne ce template) est un cas normal qui se traduit par un token
-    // présent, mais lowerisant vers zéro octet — jamais une raison de
-    // sauter le splice.
+    // déjà fusionné, croisé avec record.js_deps). Jamais conditionnel au
+    // nombre de capacités actives (contrairement au hoisting de scripts
+    // ci-dessus) : le Root porte ce marqueur en permanence, son absence
+    // signale une corruption du layout, pas une simple absence de contenu
+    // à hisser. Un snippet vide (0 capacité concerne ce template) est un
+    // cas normal qui se traduit par un token présent, mais lowerisant vers
+    // zéro octet — jamais une raison de sauter le splice.
     let static_facts = extract_static_marker_facts(&tokens);
     let emissions = lower_modules_for_template(capabilities, &static_facts, true);
     let modules_lowering = render_modules_as_rust(&emissions);
@@ -211,9 +316,9 @@ pub(crate) fn resolve_page_template<'src>(
         None => {
             println!(
                 "cargo:error=DB-Forge [{schema}.{table}] : marqueur {MODULES_PLACEHOLDER} \
-                 introuvable dans le layout {} — base.marius doit le porter en permanence \
+                 introuvable dans le Root {} — base.marius doit le porter en permanence \
                  (avant la fermeture de </head>)",
-                parent_path.display()
+                root_path.display()
             );
             return Err(());
         }
@@ -315,13 +420,11 @@ mod tests_phase_6_4_arena_admission {
     /// contenu attendu de chaque fixture — pas seulement que l'admission ne
     /// panique pas.
     ///
-    /// Portée du test : reproduit la séquence I/O + parse + admission de
-    /// `resolve_page_template` (lecture, `parse_page_tokens(scan(..))`,
-    /// `PageArena::admit` ×2) sans passer par le pipeline complet de
-    /// `build.rs` (connexion PostgreSQL, `main()`) — `resolve_page_template`
-    /// n'est pas `pub`, ce test exerce donc les mêmes briques constitutives
-    /// qu'elle, dans le même ordre, exactement comme le prescrit la
-    /// roadmap (« test d'intégration avec fixtures réelles sur disque »).
+    /// Portée du test : ce test n'exerce plus le chemin exact de
+    /// `resolve_page_template` (qui admet désormais toute la chaîne dans une
+    /// boucle) mais les mêmes briques constitutives (`PageArena::admit` ×2
+    /// sur des fixtures parent/enfant réelles) — non-régression du
+    /// comportement de base de l'arène, inchangé par cette session.
     #[test]
     fn admitting_child_and_parent_fixtures_yields_expected_token_counts() {
         let dir = std::env::temp_dir().join(format!(
@@ -404,9 +507,8 @@ mod tests_phase_6_5_collect_and_link {
     /// bloc `title` du parent : le `LinkPlan` retient la plage de l'enfant
     /// (`source.template == child_id`), pas celle du parent, vérifié par
     /// introspection directe du plan (pas d'exécution de `lower`, hors
-    /// périmètre de cette phase). Séquence identique à
-    /// `resolve_page_template` : lecture disque, ré-analyse, admission en
-    /// arène, `collect_blocks` ×2, `link`.
+    /// périmètre de cette phase). Ce test exerce `link` (cas particulier à 2
+    /// niveaux) directement — inchangé par cette session.
     #[test]
     fn override_case_plan_retains_child_block() {
         let (parent_path, child_path) = write_fixtures(
@@ -513,13 +615,13 @@ mod tests_phase_6_6_full_pipeline {
         (parent_path, child_path)
     }
 
-    /// Jalon Vert (roadmap §6.6, cas « override ») — reproduit intégralement
-    /// la séquence de `resolve_page_template` sur fixtures disque réelles,
-    /// jusqu'au point de jonction : lecture, parse ×2, admission en arène,
-    /// `collect_blocks` ×2, `link`, `lower`, `validate_ast`,
-    /// `resolve_and_measure`, `generate_aot_snippet`. Aucun `{{ champ }}`
-    /// dans ces fixtures : `SchemaIndex` vide (`fixed`/`varlena` à `&[]`)
-    /// suffit, `get_file_size` n'est jamais appelé (aucun `{% static %}`).
+    /// Jalon Vert (roadmap §6.6, cas « override ») — reproduit la séquence
+    /// à 2 niveaux (`link`, cas particulier de `link_chain`) jusqu'au point
+    /// de jonction : lecture, parse ×2, admission en arène, `collect_blocks`
+    /// ×2, `link`, `lower`, `validate_ast`, `resolve_and_measure`,
+    /// `generate_aot_snippet`. Aucun `{{ champ }}` dans ces fixtures :
+    /// `SchemaIndex` vide (`fixed`/`varlena` à `&[]`) suffit, `get_file_size`
+    /// n'est jamais appelé (aucun `{% static %}`).
     #[test]
     fn override_case_pipeline_produces_expected_body_and_metrics() {
         let (parent_path, child_path) = write_fixtures(

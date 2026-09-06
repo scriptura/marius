@@ -14,7 +14,7 @@ pub mod parser;
 pub mod token;
 
 pub use blocks::collect_blocks;
-pub use linker::{BlockSubstitution, LinkPlan, collect_static_refs, link};
+pub use linker::{BlockSubstitution, LinkPlan, collect_static_refs, link, link_chain};
 pub use lowering::lower;
 pub use model::{
     ChildTemplateSpec, NamedBlockRange, PageArena, PageBlockToken, PageComposeParseError,

@@ -1,4 +1,6 @@
 # Benchs du 4 septembre 2026
+
+_Attention : les benchs ont été modifiés pour mieux refléter le comportement du projet, ils ne peuvent donc pas être comparés avec les benchs précédents._
 Suite à refactor important de `crates/forge/fragment-forge/src/lib.rs` et de `crates/core/schema/build.rs` (éclatement de ces 2 fichiers monolytiques, separation of concern).
 ---
 

@@ -23,6 +23,7 @@
 
 <body>
     <a class="sr-only" href="#main">Aller au contenu</a>
+    {% block main_nav %}
     <nav class="nav" role="navigation">
         <div class="logo-nav">
             <span class="sr-only">Marius</span>
@@ -72,9 +73,9 @@
             </li>
         </ol>
     </nav>
-    <main id="main" role="main">
-        {% block main_content %}{% endblock %}
-    </main>
+    {% endblock %}
+    {% block main_content %}{% endblock %}
+    {% block main_footer %}
     <footer class="footer" role="contentinfo">
         <div class="wrap">
             <div>
@@ -136,6 +137,7 @@
             </div>
         </noscript>
     </div>
+    {% endblock %}
 </body>
 
 </html>

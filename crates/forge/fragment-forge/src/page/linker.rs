@@ -1,9 +1,11 @@
 // crates/forge/fragment-forge/src/page/linker.rs
 
-//! Phases 5.5–5.7 — `link` : appariement parent/enfant sans E/S
-//! (`LinkPlan`/`BlockSubstitution`), vérification `static`, et
-//! `collect_static_refs` (alimentation du paramètre `static_refs` de
-//! `link`, fonction séparée par catégorie de concept — voir doc de tête).
+//! Phases 5.5–5.10 — `link_chain` : appariement N-aire feuille→Root sans
+//! E/S (`LinkPlan`/`BlockSubstitution`), vérification `static`, et
+//! `collect_static_refs` (alimentation du paramètre `static_refs`).
+//! `link` (Phases 5.5/5.6, signature historique à 2 maillons) est
+//! réimplémentée comme cas particulier de `link_chain` (Phase 5.10,
+//! généralisation multi-niveaux) — aucune logique dupliquée.
 
 #[cfg(test)]
 use crate::fragment::token::FlatPageToken;
@@ -78,74 +80,140 @@ use crate::page::token::PageSourceToken;
 //   décision déjà actée par le document d'architecture, appliquée sans
 //   écart.
 //
-// ─── `link` clos (Document 2 §4 terminé) ───────────────────────────────────
+// ─── `link` clos (Document 2 §4 terminé), généralisée en 5.10 ─────────────
 //
 //   Les trois erreurs de `PageLinkError` (`ExtendsNotFound`, `OrphanBlock`,
 //   `StaticFileNotFound`) ont chacune leur point d'émission : `OrphanBlock`
-//   et `StaticFileNotFound` dans `link` (ce module), `ExtendsNotFound` dans
-//   l'orchestrateur (Document 3, hors périmètre — résolution du chemin
-//   `extends` lui-même, pas une correspondance de blocs).
+//   et `StaticFileNotFound` dans `link`/`link_chain` (ce module),
+//   `ExtendsNotFound` dans l'orchestrateur (Document 3, hors périmètre —
+//   résolution du chemin `extends` lui-même, pas une correspondance de
+//   blocs ; construite avec l'identité du fichier déclarant connue de
+//   l'orchestrateur au moment de l'échec, jamais par ce module qui ne fait
+//   aucune E/S).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockSubstitution<'src> {
-    /// Nom du bloc, identique à `NamedBlockRange::name` du parent
+    /// Nom du bloc, identique à `NamedBlockRange::name` du Root
     /// correspondant. Dupliqué depuis `source` pour que le Lowering
     /// (Phase 5.8+) puisse itérer sur `substitutions` sans redériver le nom
-    /// depuis une plage dont l'origine (enfant ou parent) varie.
+    /// depuis une plage dont l'origine (Root ou n'importe quel maillon de
+    /// la chaîne) varie.
     pub name: &'src str,
-    /// Plage de contenu retenue : plage enfant si override, plage parent
-    /// sinon. Porte son propre `TemplateId` (`NamedBlockRange::template`) —
-    /// c'est ce champ, pas `name`, qui indique dans quel AST le Lowering
-    /// devra lire le contenu substitué.
+    /// Plage de contenu retenue : plage du maillon le plus proche de la
+    /// feuille qui redéfinit ce nom, ou plage du Root lui-même si aucun
+    /// maillon ne le redéfinit. Porte son propre `TemplateId`
+    /// (`NamedBlockRange::template`) — c'est ce champ, pas `name`, qui
+    /// indique dans quel AST le Lowering devra lire le contenu substitué.
     pub source: NamedBlockRange<'src>,
 }
 
-/// Plan de fusion produit par `link` : une substitution par bloc du parent,
-/// dans l'ordre du parent. Type de données pur — aucune méthode de fusion
-/// ici, c'est le rôle du Lowering (Document 2 §5, Phase 5.8+).
+/// Plan de fusion produit par `link`/`link_chain` : une substitution par
+/// bloc du Root, dans l'ordre du Root. Type de données pur — aucune méthode
+/// de fusion ici, c'est le rôle du Lowering (Document 2 §5, Phase 5.8+).
 ///
-/// `substitutions.len() == parent_blocks.len()` est un invariant de ce type
-/// produit par `link` (voir doc de tête ci-dessus) — pas revérifié à la
-/// construction (pas de constructeur dédié : le champ est public, produit
-/// uniquement par `link` dans ce module à ce stade).
+/// `substitutions.len() == root_blocks.len()` est un invariant de ce type
+/// produit par `link`/`link_chain` (voir doc de tête ci-dessus) — pas
+/// revérifié à la construction (pas de constructeur dédié : le champ est
+/// public, produit uniquement par ces deux fonctions dans ce module).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkPlan<'src> {
     pub substitutions: Vec<BlockSubstitution<'src>>,
 }
 
-/// Calcule le plan de fusion entre les blocs d'un parent et ceux d'un
-/// enfant (correspondance par nom), et vérifie l'existence de chaque
-/// fichier `{% static %}` référencé via `file_exists` — aucune E/S directe
-/// dans cette fonction, aucune mutation des tranches reçues. Voir doc de
-/// tête (Phases 5.5/5.6) pour la règle de construction du plan et le
-/// mécanisme de vérification `static`.
-pub fn link<'src>(
-    parent_blocks: &[NamedBlockRange<'src>],
-    child_blocks: &[NamedBlockRange<'src>],
+// =============================================================================
+// PHASE 5.10 — `link_chain` : généralisation N-aire de `link` (héritage
+// multi-niveaux, `{% extends %}` chaîné)
+// =============================================================================
+// Contexte (tranché en session ultérieure à 5.5–5.7) : `link` plafonnait la
+// chaîne d'héritage à 2 fichiers (parent direct + enfant), garde imposée par
+// l'orchestrateur (`build/template/page.rs`), pas par ce module — voir
+// commentaire de `PageArena` (Document 2 §6.1, point ouvert désormais
+// tranché). `link_chain` lève cette limite ici, à la seule couche qui portait
+// réellement une hypothèse binaire dans sa logique (`link` comparait
+// exactement 2 ensembles de plages) ; `PageArena`, `NamedBlockRange`,
+// `lower` n'ont jamais eu besoin de cette hypothèse et restent inchangés.
+//
+// ─── Ordre et rôle des niveaux ─────────────────────────────────────────────
+//
+//   `chain_blocks[0]` : le maillon le plus dérivé (feuille — le fichier
+//   directement lié à la table). `chain_blocks[chain_blocks.len() - 1]` :
+//   le Root — seul maillon sans `extends`, seul porteur des positions
+//   physiques `BlockOpen`/`BlockEnd` effectivement traversées par `lower`.
+//   Tout indice intermédiaire est un ancêtre, dans l'ordre feuille → Root.
+//
+// ─── Règle de résolution : « le plus proche de la feuille gagne » ─────────
+//
+//   Pour chaque plage du Root : on cherche, dans l'ordre feuille → Root
+//   parmi tous les maillons non-Root, le premier qui redéfinit ce nom.
+//   Trouvé : sa plage est la substitution. Sinon : plage par défaut du Root
+//   lui-même (comportement identique à `link`, étendu à N niveaux au lieu
+//   de 1). C'est une généralisation directe de la règle binaire ; à 2
+//   niveaux (`chain_blocks = [enfant, parent]`), le comportement est
+//   bit-à-bit identique à l'ancien `link`.
+//
+// ─── OrphanBlock : contre le Root, jamais contre un niveau intermédiaire ──
+//
+//   Un bloc déclaré à *n'importe quel* niveau non-Root (feuille ou
+//   intermédiaire) et absent des `BlockOpen` du Root est orphelin — décision
+//   actée explicitement : seul le Root porte des positions physiques
+//   (`lower` ne traverse jamais que `root_tokens`), donc un bloc qui ne
+//   correspond à aucun slot du Root est du code mort par construction, quel
+//   que soit le niveau de profondeur où il est déclaré. `template` (ajouté à
+//   `PageLinkError::OrphanBlock`) porte l'identité exacte du maillon fautif
+//   — pas seulement son nom, qui ne suffirait pas à désigner le fichier
+//   quand la chaîne compte plus de 2 maillons.
+//
+// ─── `link` comme cas particulier, pas comme duplication ──────────────────
+//
+//   `link(parent_blocks, child_blocks, ...)` = `link_chain(&[child_blocks,
+//   parent_blocks], ...)`. Signature historique conservée pour compatibilité
+//   des call-sites et des tests déjà écrits (Phases 5.5–5.9) — aucun de ces
+//   tests n'a eu besoin d'être réécrit, seuls ceux qui inspectaient
+//   `PageLinkError::OrphanBlock` par valeur ont dû suivre l'ajout du champ
+//   `template` (changement mécanique, pas de logique).
+
+/// Calcule le plan de fusion pour une chaîne `{% extends %}` de longueur
+/// arbitraire. Voir doc de section ci-dessus pour l'ordre des niveaux, la
+/// règle de résolution et la règle `OrphanBlock`.
+///
+/// Panique si `chain_blocks` est vide : précondition d'appel — une chaîne
+/// d'héritage compte toujours au moins le Root (un Root sans aucun ancêtre
+/// est un cas valide, représenté par une chaîne à une seule entrée, jamais
+/// par une chaîne vide).
+pub fn link_chain<'src>(
+    chain_blocks: &[&[NamedBlockRange<'src>]],
     static_refs: &[StaticPartialRef<'src>],
     file_exists: impl Fn(&str) -> bool,
 ) -> Result<LinkPlan<'src>, Vec<PageLinkError<'src>>> {
-    let mut substitutions = Vec::with_capacity(parent_blocks.len());
-    for parent_range in parent_blocks {
-        let source = child_blocks
+    let root_blocks = chain_blocks
+        .last()
+        .expect("chain_blocks non vide : au moins le Root, précondition d'appel");
+    let ancestors = &chain_blocks[..chain_blocks.len() - 1];
+
+    let mut substitutions = Vec::with_capacity(root_blocks.len());
+    for root_range in *root_blocks {
+        let source = ancestors
             .iter()
-            .find(|child_range| child_range.name == parent_range.name)
+            .find_map(|level| level.iter().find(|range| range.name == root_range.name))
             .copied()
-            .unwrap_or(*parent_range);
+            .unwrap_or(*root_range);
         substitutions.push(BlockSubstitution {
-            name: parent_range.name,
+            name: root_range.name,
             source,
         });
     }
 
     let mut errors = Vec::new();
-    for child_range in child_blocks {
-        let has_matching_parent = parent_blocks
-            .iter()
-            .any(|parent_range| parent_range.name == child_range.name);
-        if !has_matching_parent {
-            errors.push(PageLinkError::OrphanBlock {
-                name: child_range.name,
-            });
+    for level in ancestors {
+        for range in *level {
+            let has_matching_root_slot = root_blocks
+                .iter()
+                .any(|root_range| root_range.name == range.name);
+            if !has_matching_root_slot {
+                errors.push(PageLinkError::OrphanBlock {
+                    name: range.name,
+                    template: range.template,
+                });
+            }
         }
     }
 
@@ -162,6 +230,20 @@ pub fn link<'src>(
     } else {
         Err(errors)
     }
+}
+
+/// Cas particulier à 2 maillons de `link_chain` (Phase 5.10) — signature
+/// historique (Phases 5.5/5.6) conservée pour compatibilité des appelants et
+/// des tests existants. Toute la logique vit dans `link_chain` ; ce wrapper
+/// ne fait que réordonner les deux tranches reçues (`[enfant, parent]`, Root
+/// en dernier — le parent direct EST le Root dans le cas à 2 niveaux).
+pub fn link<'src>(
+    parent_blocks: &[NamedBlockRange<'src>],
+    child_blocks: &[NamedBlockRange<'src>],
+    static_refs: &[StaticPartialRef<'src>],
+    file_exists: impl Fn(&str) -> bool,
+) -> Result<LinkPlan<'src>, Vec<PageLinkError<'src>>> {
+    link_chain(&[child_blocks, parent_blocks], static_refs, file_exists)
 }
 
 // =============================================================================
@@ -228,6 +310,8 @@ mod tests_phase_5_5_link {
 
     /// Jalon Vert (roadmap §5.5) — un bloc enfant sans correspondance côté
     /// parent produit `OrphanBlock`, jamais une substitution silencieuse.
+    /// `template` porte l'identité de l'enfant, seul maillon fautif possible
+    /// dans une chaîne à 2 niveaux.
     #[test]
     fn child_block_without_parent_match_is_orphan() {
         let parent_template = TemplateId(0);
@@ -239,7 +323,10 @@ mod tests_phase_5_5_link {
 
         assert_eq!(
             result,
-            Err(vec![PageLinkError::OrphanBlock { name: "sidebar" }])
+            Err(vec![PageLinkError::OrphanBlock {
+                name: "sidebar",
+                template: child_template,
+            }])
         );
     }
 
@@ -334,79 +421,16 @@ mod tests_phase_5_6_link_static_check {
         assert_eq!(
             result,
             Err(vec![
-                PageLinkError::OrphanBlock { name: "sidebar" },
+                PageLinkError::OrphanBlock {
+                    name: "sidebar",
+                    template: child_template,
+                },
                 PageLinkError::StaticFileNotFound {
                     path: "missing.css"
                 },
             ])
         );
     }
-}
-
-// =============================================================================
-// PHASE 5.7 — `collect_static_refs` (Document 2 §4, alimentation de `link`)
-// =============================================================================
-// Responsabilité (roadmap §5.7) : extraire, sans omission, toutes les
-// références `{% static %}` d'un flux `PageSourceToken` — fonction séparée,
-// une seule responsabilité, pour alimenter le paramètre `static_refs` de
-// `link` (Phase 5.6, déjà clos). Le câblage réel (quel flux — enfant, parent,
-// ou les deux — est passé à `link` par l'orchestrateur) est hors périmètre
-// de cette phase : Document 3.
-//
-// ─── Pourquoi une fonction séparée, pas une extension de `collect_blocks` ──
-//
-//   `collect_blocks` (Phase 5.2-5.4, Document 2 §3) a une seule
-//   responsabilité déjà remplie : position des blocs et validation de forme
-//   sans second fichier. Y ajouter la collecte `static` mélangerait deux
-//   catégories de concept distinctes dans une même fonction (§0 : une
-//   fonction, une catégorie de concept éliminée) — ici, « où sont les
-//   blocs » et « où sont les références static » n'ont aucune donnée ni
-//   aucun invariant en commun (pas de pile, pas d'appariement, pas d'erreur
-//   de forme). Contrairement à la fusion actée pour `collect_blocks`
-//   lui-même (construction de plage + validation de forme : même flux, même
-//   ordre, même pile), aucune économie de parcours ne justifierait ici de
-//   coupler les deux : un filtre `Static` et un appariement `BlockOpen`/
-//   `BlockEnd` restent deux boucles indépendantes même fusionnées en une
-//   seule passe physique, sans partage d'état — la séparation en deux
-//   fonctions ne coûte donc aucune localité de cache supplémentaire.
-//
-// ─── Pas de déduplication (Document 2 §6.2, point ouvert non tranché ici) ──
-//
-//   Chaque occurrence de `{% static %}` dans le flux produit une entrée,
-//   y compris si `original_path` est identique à une entrée déjà retournée.
-//   Comportement identique à `{% include %}` en Mode Fragment (gelé) :
-//   compter les occurrences réelles, pas les chemins distincts. La
-//   déduplication cross-page évoquée par le scaffolding de `StaticPartialRef`
-//   (partager un unique `static_partials::{IDENT}` entre plusieurs pages)
-//   resterait hors de portée même avec une déduplication *intra*-flux ici —
-//   c'est un problème d'orchestrateur sur plusieurs fichiers, pas un problème
-//   de cette fonction sur un seul flux. Introduire un filtre de doublons
-//   maintenant serait un comportement spéculatif non demandé par cette phase.
-//
-// ─── Complexité et mémoire ──────────────────────────────────────────────────
-//
-//   Une seule boucle sur `tokens`, `O(n)`. Aucun étage de recherche
-//   (`HashSet`, tri) : la fonction ne compare jamais deux entrées entre
-//   elles, elle projette uniquement. `Vec<StaticPartialRef<'src>>` alloué au
-//   premier `push`, croissance linéaire — pas de capacité pré-allouée sur la
-//   taille de `tokens` (le nombre de `Static` est généralement une faible
-//   fraction du flux ; `Vec::with_capacity(tokens.len())` sur-allouerait dans
-//   le cas courant sans bénéfice mesuré). `StaticPartialRef` est `Copy`,
-//   copié depuis la slice sans indirection nouvelle.
-
-/// Extrait, dans l'ordre du flux et sans déduplication, toutes les
-/// références `{% static %}` de `tokens`. Filtre pur : ne consulte ni
-/// `PageArena`, ni `LinkPlan`, ne fait aucune E/S. Voir doc de tête
-/// (Phase 5.7) pour la justification de la séparation d'avec
-/// `collect_blocks` et l'absence de déduplication.
-pub fn collect_static_refs<'src>(tokens: &[PageSourceToken<'src>]) -> Vec<StaticPartialRef<'src>> {
-    let mut refs = Vec::new();
-    for token in tokens {
-        if let PageSourceToken::Static(static_ref) = token {
-            refs.push(*static_ref);
-        }
-    }
-    refs
 }
 
 // =============================================================================
@@ -446,6 +470,127 @@ mod tests_phase_5_7_collect_static_refs {
                     original_path: "nav.html"
                 },
             ]
+        );
+    }
+}
+
+/// Extrait, dans l'ordre du flux et sans déduplication, toutes les
+/// références `{% static %}` de `tokens`. Filtre pur : ne consulte ni
+/// `PageArena`, ni `LinkPlan`, ne fait aucune E/S. Voir doc de tête
+/// (Phase 5.7) pour la justification de la séparation d'avec
+/// `collect_blocks` et l'absence de déduplication.
+pub fn collect_static_refs<'src>(tokens: &[PageSourceToken<'src>]) -> Vec<StaticPartialRef<'src>> {
+    let mut refs = Vec::new();
+    for token in tokens {
+        if let PageSourceToken::Static(static_ref) = token {
+            refs.push(*static_ref);
+        }
+    }
+    refs
+}
+
+// =============================================================================
+// Tests — Phase 5.10 (généralisation multi-niveaux)
+// =============================================================================
+
+#[cfg(test)]
+mod tests_phase_5_10_link_chain {
+    use super::{LinkPlan, NamedBlockRange, PageLinkError, TemplateId, link_chain};
+
+    fn range(name: &str, template: TemplateId, start: usize, end: usize) -> NamedBlockRange<'_> {
+        NamedBlockRange {
+            name,
+            template,
+            start,
+            end,
+        }
+    }
+
+    /// Jalon Vert — chaîne à 3 niveaux (feuille, intermédiaire, Root) : la
+    /// feuille redéfinit `title`, l'intermédiaire redéfinit `sidebar` (le
+    /// Root ne redéfinit rien, il définit). Chaque substitution pointe vers
+    /// le maillon le plus proche de la feuille qui redéfinit le nom — pas
+    /// nécessairement la feuille elle-même.
+    #[test]
+    fn three_level_chain_nearest_override_wins_per_block() {
+        let leaf = TemplateId(0);
+        let mid = TemplateId(1);
+        let root = TemplateId(2);
+
+        let leaf_blocks = vec![range("title", leaf, 0, 5)];
+        let mid_blocks = vec![range("sidebar", mid, 0, 5)];
+        let root_blocks = vec![
+            range("title", root, 0, 3),
+            range("sidebar", root, 4, 6),
+            range("footer", root, 7, 9),
+        ];
+
+        let plan = link_chain(&[&leaf_blocks, &mid_blocks, &root_blocks], &[], |_| true)
+            .expect("aucun orphelin : title et sidebar existent tous deux dans le Root");
+
+        assert_eq!(plan.substitutions.len(), 3);
+        assert_eq!(plan.substitutions[0].name, "title");
+        assert_eq!(plan.substitutions[0].source.template, leaf);
+        assert_eq!(plan.substitutions[1].name, "sidebar");
+        assert_eq!(plan.substitutions[1].source.template, mid);
+        assert_eq!(plan.substitutions[2].name, "footer");
+        assert_eq!(
+            plan.substitutions[2].source.template, root,
+            "footer non redéfini par personne : fallback sur le Root lui-même"
+        );
+    }
+
+    /// Jalon Vert — un bloc déclaré par le maillon intermédiaire (ni la
+    /// feuille, ni le Root) sans slot correspondant dans le Root est
+    /// orphelin, avec `template` désignant précisément l'intermédiaire —
+    /// jamais la feuille, jamais le Root, quel que soit le niveau réel de
+    /// la déclaration fautive.
+    #[test]
+    fn orphan_declared_by_intermediate_level_names_that_level() {
+        let leaf = TemplateId(0);
+        let mid = TemplateId(1);
+        let root = TemplateId(2);
+
+        let leaf_blocks: Vec<NamedBlockRange<'_>> = Vec::new();
+        let mid_blocks = vec![range("extra_unused", mid, 0, 5)];
+        let root_blocks = vec![range("title", root, 0, 3)];
+
+        let result = link_chain(&[&leaf_blocks, &mid_blocks, &root_blocks], &[], |_| true);
+
+        assert_eq!(
+            result,
+            Err(vec![PageLinkError::OrphanBlock {
+                name: "extra_unused",
+                template: mid,
+            }])
+        );
+    }
+
+    /// Jalon Vert — chaîne à 3 niveaux, cas particulier `link` (2 niveaux) :
+    /// `link_chain(&[child, parent], ...)` produit exactement le même
+    /// résultat que `link(parent, child, ...)` — non-régression explicite
+    /// de la généralisation.
+    #[test]
+    fn two_level_chain_matches_historical_link_behavior() {
+        let parent = TemplateId(0);
+        let child = TemplateId(1);
+        let parent_blocks = vec![range("title", parent, 0, 3)];
+        let child_blocks = vec![range("title", child, 10, 20)];
+
+        let via_link_chain =
+            link_chain(&[&child_blocks, &parent_blocks], &[], |_| true).expect("pas d'orphelin");
+        let via_link =
+            super::link(&parent_blocks, &child_blocks, &[], |_| true).expect("pas d'orphelin");
+
+        assert_eq!(via_link_chain, via_link);
+        assert_eq!(
+            via_link_chain,
+            LinkPlan {
+                substitutions: vec![super::BlockSubstitution {
+                    name: "title",
+                    source: range("title", child, 10, 20),
+                }],
+            }
         );
     }
 }

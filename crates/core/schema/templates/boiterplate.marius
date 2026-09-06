@@ -1,0 +1,117 @@
+{% extends templates/base.marius %}
+
+{% block main_nav %}
+<nav class="nav" role="navigation">
+    <div class="logo-nav">
+        <span class="sr-only">Marius</span>
+    </div>
+    <button class="cmd-nav" id="cmd-nav" type="button" aria-label="Main Menu" aria-controls="sub-nav">
+        <svg viewBox="0 0 100 100" aria-hidden="true">
+            <rect x="5" y="20" width="90" height="6"></rect>
+            <rect x="5" y="47" width="90" height="6"></rect>
+            <rect x="5" y="74" width="90" height="6"></rect>
+        </svg>
+    </button>
+    <ul class="sub-nav" id="sub-nav" aria-labelledby="cmd-nav">
+        <li><a href="/content/1"><svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#ampersand"></use>
+                </svg>Content 1</a></li>
+        <li><a href="/content/2"><svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>Content 2</a></li>
+        <li><a href="/content/3"><svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>Content 3</a></li>
+        <li><a href="/content/4"><svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>Content 4</a></li>
+        <li><a href="/content/5"><svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>Content 5</a></li>
+        <li><a href="/content/6"><svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>Content 6</a></li>
+        <li><a href="/content/10"><svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>Content 10</a></li>
+        <li><a href="/content/14"><svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>Content 14</a></li>
+        <li><a href="/content/16"><svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>Content 16</a></li>
+        <li><a href="//github.com/scriptura/marius"><svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#github"></use>
+                </svg>Repository</a></li>
+    </ul>
+    <ol class="breadcrumb" aria-label="Breadcrumb">
+        <li>
+            <div>Marius <span>.&nbsp;Home page</span></div>
+        </li>
+    </ol>
+</nav>
+{% endblock %}
+
+{% block main_footer %}
+<footer class="footer" role="contentinfo">
+    <div class="wrap">
+        <div>
+            <div class="logo">
+                <svg>
+                    <use href="{% asset sprites/silos/195v.svg %}#a"></use>
+                </svg>
+            </div>
+            <p>Marius</p>
+        </div>
+        <p>Created by <a class="author" href="//www.linkedin.com/in/olivier-chavarin/">Olivier Chavarin</a>
+        </p>
+        <p>Since 2026</p>
+    </div>
+</footer>
+<div class="alert">
+    <template id="gdpr">
+        <div class="wrap" id="gdpr-see">
+            <div class="mm" role="alert">
+                <svg class="icon" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#cookie-bite"></use>
+                </svg>
+                <div>
+                    <p>Ce site utilise des cookies et vous donne le contrôle sur ceux que vous souhaitez activer.
+                    </p>
+                </div>
+            </div>
+            <div class="flex gap">
+                <button class="button" id="gdpr-true-consent" style="background-color:tomato">
+                    <svg class="icon-inline" aria-hidden="true">
+                        <use href="{% asset sprites/utils.svg %}#checkmark"></use>
+                    </svg>
+                    Tout accepter
+                </button>
+                <button class="button" id="gdpr-false-consent" style="background-color:tomato">
+                    <svg class="icon-inline" aria-hidden="true">
+                        <use href="{% asset sprites/utils.svg %}#mark"></use>
+                    </svg>
+                    Tout refuser
+                </button>
+                <button class="button" style="background-color:tomato">
+                    <svg class="icon-inline" aria-hidden="true">
+                        <use href="{% asset sprites/utils.svg %}#quill"></use>
+                    </svg>
+                    Personnaliser
+                </button>
+            </div>
+        </div>
+    </template>
+    <noscript>
+        <div class="wrap">
+            <div class="mm" role="alert">
+                <svg class="icon" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#warning"></use>
+                </svg>
+                <p>Javascript est désactivé dans votre navigateur. Afin de bénéficier de toutes les fonctionnalités
+                    du site, réactivez cette option dans vos paramètres.</p>
+            </div>
+        </div>
+    </noscript>
+</div>
+{% endblock %}
