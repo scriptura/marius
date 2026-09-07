@@ -3,15 +3,28 @@
 //! Matérialisation des pages sans donnée dynamique (`STATIC_PAGES`) —
 //! résolution du pipeline Mode Page puis rendu direct en HTML sur disque,
 //! jamais en `render()` compilé (aucune table SQL, aucun `record`).
+//!
+//! Réutilise les briques de découverte de chaîne (`{% extends %}`) et
+//! d'expansion de fragments (`{% import %}`) de `resolve_page_template`
+//! (`crate::template::page`) — même pipeline, mêmes bornes
+//! (`MAX_EXTENDS_DEPTH`, `MAX_IMPORT_DEPTH`), même détection de cycle.
+//! Ancienne divergence corrigée : cette fonction avait sa propre copie
+//! figée du pipeline (garde single-level `extends`, aucune notion
+//! d'`import`), jamais mise à jour lors de la généralisation de la chaîne
+//! ni lors de l'introduction de `{% import %}` — source du bug « `Import`
+//! non développé atteint `lower_leaf_token` » observé sur `offline.offline`,
+//! qui partage `base.marius` avec les pages pilotées par
+//! `fetch_component_list` sans jamais passer par leur pipeline corrigé.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use marius_fragment_forge::{
-    AssetLookup, FlatPageToken, PageArena, SchemaIndex, collect_blocks, collect_static_refs,
-    detect_extends, extract_static_marker_facts, hoist_and_dedupe_scripts, link, lower,
-    parse_page_tokens, relative_path_for_include_str, resolve_and_measure, scan,
-    splice_hoisted_scripts, validate_ast,
+    AssetLookup, FlatPageToken, NamedBlockRange, PageArena, PageLinkError, ParsedPageTemplate,
+    SchemaIndex, TemplateId, collect_blocks, collect_static_refs, detect_extends,
+    extract_static_marker_facts, hoist_and_dedupe_scripts, link_chain, lower, parse_page_tokens,
+    relative_path_for_include_str, resolve_and_measure, scan, splice_hoisted_scripts,
+    validate_ast,
 };
 
 use crate::asset_lookup::resolve_asset_lookup;
@@ -19,6 +32,9 @@ use crate::capabilities::CapabilityInfo;
 use crate::manifest::AssetEntry;
 use crate::modules_lowering::{lower_modules_for_template, render_modules_as_static_html};
 use crate::template::common::{read_template_file, split_static_at_marker};
+use crate::template::page::{
+    MAX_EXTENDS_DEPTH, MAX_IMPORT_DEPTH, discover_imports, render_chain, splice_all_imports,
+};
 use crate::{MODULES_PLACEHOLDER, SCRIPTS_PLACEHOLDER};
 
 /// Pages sans donnée dynamique : `(schema, table)`, résolues par
@@ -118,11 +134,15 @@ fn emit_static_html<'r>(
 }
 
 /// Pipeline complet pour une entrée de `STATIC_PAGES` — modélisé sur
-/// `resolve_page_template` (mêmes fonctions gelées, même ordre :
-/// `scan` → `parse_page_tokens` → arène → `collect_blocks`/
-/// `collect_static_refs` → `link` → `lower` → `validate_ast` →
-/// `hoist_and_dedupe_scripts` (+ splice) → `resolve_and_measure`), à trois
-/// différences près, chacune délibérée :
+/// `resolve_page_template` (`crate::template::page`), dont cette fonction
+/// réutilise directement les briques de résolution de chaîne (`discover_
+/// imports`, `splice_all_imports`, `render_chain`, `MAX_EXTENDS_DEPTH`,
+/// `MAX_IMPORT_DEPTH`) plutôt que d'en garder une copie séparée — c'est
+/// cette copie séparée, jamais mise à jour lors des deux généralisations
+/// successives de `resolve_page_template` (chaîne `extends` N-aire, puis
+/// `{% import %}`), qui a produit la régression corrigée par cette
+/// réécriture. Trois différences restent délibérées vis-à-vis de
+/// `resolve_page_template` :
 ///
 ///  1. Aucune connexion Postgres, aucun `fetch_component_list` — cette
 ///     fonction est appelable AVANT même l'ouverture du pool (voir
@@ -157,10 +177,7 @@ fn emit_static_html<'r>(
 /// Mode Page exigé explicitement (`detect_extends` doit être vrai) : les
 /// pages de `STATIC_PAGES` connues à ce jour héritent toutes d'un layout
 /// commun (`base.marius`). Un Mode Fragment ici retourne une erreur
-/// explicite plutôt qu'un comportement deviné — ce cas n'a pas de
-/// précédent dans le pipeline Mode Page existant, mieux vaut un
-/// `cargo:error` net qu'une hypothèse silencieuse sur une sémantique non
-/// éprouvée.
+/// explicite plutôt qu'un comportement deviné.
 pub(crate) fn resolve_static_page(
     manifest_dir: &str,
     assets: &HashMap<String, AssetEntry>,
@@ -196,68 +213,178 @@ pub(crate) fn resolve_static_page(
     })?;
     let child_extends = child_ast
         .extends
-        .expect("detect_extends garantit extends.is_some() après parse réussi");
+        .expect("detect_extends garantit extends.is_some() après parse réussi")
+        .to_string();
 
-    let parent_path = PathBuf::from(relative_path_for_include_str(manifest_dir, child_extends));
-    println!("cargo:rerun-if-changed={}", parent_path.display());
+    // ── Phase 1 — Découverte de la chaîne extends ───────────────────────
+    //
+    // `visited_paths[0]` est le chemin réel du template de la table (connu
+    // ici, contrairement à `resolve_page_template` qui ne reçoit que le
+    // contenu — cf. sa propre doc pour le label synthétique qu'elle utilise
+    // à défaut).
+    let mut visited_paths: Vec<PathBuf> = vec![template_path.clone()];
+    let mut sources: Vec<String> = vec![src];
+    let mut current_extends = child_extends;
 
-    let parent_src = read_template_file(&parent_path)?;
-    let parent_ast = parse_page_tokens(scan(&parent_src)).map_err(|e| {
-        println!(
-            "cargo:error=DB-Forge [{schema}.{table}] : parent Mode Page invalide ({}) : {e:?}",
-            parent_path.display()
-        );
-    })?;
+    loop {
+        if sources.len() >= MAX_EXTENDS_DEPTH {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : chaîne extends trop profonde \
+                 (max {MAX_EXTENDS_DEPTH} fichiers) : {} -> (arrêté avant lecture de `{current_extends}`)",
+                render_chain(&visited_paths)
+            );
+            return Err(());
+        }
 
-    // Garde single-level — même règle que `resolve_page_template`.
-    if parent_ast.extends.is_some() {
-        println!(
-            "cargo:error=DB-Forge [{schema}.{table}] : héritage multi-niveaux non supporté \
-             ({} déclare lui-même extends)",
-            parent_path.display()
-        );
-        return Err(());
+        let path = PathBuf::from(relative_path_for_include_str(manifest_dir, &current_extends));
+
+        if visited_paths.contains(&path) {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : cycle détecté dans la chaîne \
+                 extends : {} -> {} (déjà présent plus haut dans la chaîne)",
+                render_chain(&visited_paths),
+                path.display()
+            );
+            return Err(());
+        }
+
+        if !path.exists() {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : extends introuvable — {} déclare \
+                 `{current_extends}`, mais {} n'existe pas",
+                render_chain(&visited_paths),
+                path.display()
+            );
+            return Err(());
+        }
+
+        println!("cargo:rerun-if-changed={}", path.display());
+        let ancestor_src = read_template_file(&path)?;
+
+        let peek_ast = parse_page_tokens(scan(&ancestor_src)).map_err(|e| {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : maillon extends invalide ({}) : {e:?}",
+                path.display()
+            );
+        })?;
+        let next_extends = peek_ast.extends.map(str::to_string);
+
+        visited_paths.push(path);
+        sources.push(ancestor_src);
+
+        match next_extends {
+            Some(next) => current_extends = next,
+            None => break, // ce maillon est le Root
+        }
     }
 
-    // Ré-analyse de l'enfant pour admission en arène — même choix que
-    // `resolve_page_template` (message distinct d'un bug interne si cette
-    // seconde analyse échouait alors que la première a réussi).
-    let child_ast_for_arena = parse_page_tokens(scan(&src)).map_err(|e| {
-        println!(
-            "cargo:error=DB-Forge [{schema}.{table}] : enfant Mode Page invalide \
-             (ré-analyse pour admission en arène) : {e:?}"
-        );
-    })?;
+    println!(
+        "cargo:warning=DB-Forge [{schema}.{table}] : chaîne extends : {}",
+        render_chain(&visited_paths)
+    );
 
+    // ── Phase 1.5 — Découverte des imports de chaque maillon ────────────
+    let mut import_sources: Vec<String> = Vec::new();
+    let mut import_trees = Vec::with_capacity(sources.len());
+
+    for (index, ancestor_src) in sources.iter().enumerate() {
+        let mut ancestry: Vec<PathBuf> = vec![visited_paths[index].clone()];
+        let tree = discover_imports(
+            schema,
+            table,
+            manifest_dir,
+            ancestor_src,
+            &visited_paths[index],
+            0,
+            &mut ancestry,
+            &mut import_sources,
+        )?;
+        import_trees.push(tree);
+    }
+
+    // ── Phase 2 — Parsing réel + expansion des imports + admission ──────
     let mut arena = PageArena::default();
-    let child_id = arena.admit(child_ast_for_arena);
-    let parent_id = arena.admit(parent_ast);
+    let mut chain_ids: Vec<TemplateId> = Vec::with_capacity(sources.len());
 
-    let child_blocks = collect_blocks(child_id, &arena.get(child_id).tokens).map_err(|errors| {
-        println!("cargo:error=DB-Forge [{schema}.{table}] : blocs enfant mal formés : {errors:?}");
-    })?;
-    let parent_blocks =
-        collect_blocks(parent_id, &arena.get(parent_id).tokens).map_err(|errors| {
+    for (index, ancestor_src) in sources.iter().enumerate() {
+        let ast = parse_page_tokens(scan(ancestor_src)).map_err(|e| {
             println!(
-                "cargo:error=DB-Forge [{schema}.{table}] : blocs parent mal formés : {errors:?}"
+                "cargo:error=DB-Forge [{schema}.{table}] : maillon Mode Page invalide \
+                 (ré-analyse pour admission en arène, {}) : {e:?}",
+                visited_paths[index].display()
             );
         })?;
 
-    let mut static_refs = collect_static_refs(&arena.get(child_id).tokens);
-    static_refs.extend(collect_static_refs(&arena.get(parent_id).tokens));
+        let extends = ast.extends;
+        let tokens = splice_all_imports(
+            ast.tokens,
+            &import_trees[index],
+            &import_sources,
+            schema,
+            table,
+        )?;
+
+        chain_ids.push(arena.admit(ParsedPageTemplate { extends, tokens }));
+    }
+
+    let root_id = *chain_ids
+        .last()
+        .expect("chain_ids non vide : au moins le Root, garanti par la boucle Phase 1");
+    let root_path = visited_paths
+        .last()
+        .expect("visited_paths non vide : au moins le Root, garanti par la boucle Phase 1");
+
+    let path_for_template = |id: TemplateId| -> &Path {
+        let idx = chain_ids
+            .iter()
+            .position(|&x| x == id)
+            .expect("template admis dans cette chaîne — invariant garanti par la boucle ci-dessus");
+        &visited_paths[idx]
+    };
+
+    let mut chain_blocks_owned: Vec<Vec<NamedBlockRange<'_>>> =
+        Vec::with_capacity(chain_ids.len());
+    for &id in &chain_ids {
+        let blocks = collect_blocks(id, &arena.get(id).tokens).map_err(|errors| {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : blocs mal formés ({}) : {errors:?}",
+                path_for_template(id).display()
+            );
+        })?;
+        chain_blocks_owned.push(blocks);
+    }
+    let chain_blocks: Vec<&[NamedBlockRange<'_>]> =
+        chain_blocks_owned.iter().map(Vec::as_slice).collect();
+
+    let mut static_refs = Vec::new();
+    for &id in &chain_ids {
+        static_refs.extend(collect_static_refs(&arena.get(id).tokens));
+    }
 
     let file_exists = |path: &str| -> bool {
         Path::new(&relative_path_for_include_str(manifest_dir, path)).exists()
     };
 
-    let plan =
-        link(&parent_blocks, &child_blocks, &static_refs, file_exists).map_err(|errors| {
-            println!(
-                "cargo:error=DB-Forge [{schema}.{table}] : linking Mode Page échoué : {errors:?}"
-            );
-        })?;
+    let plan = link_chain(&chain_blocks, &static_refs, file_exists).map_err(|errors| {
+        for &error in &errors {
+            match error {
+                PageLinkError::OrphanBlock { name, template } => {
+                    println!(
+                        "cargo:error=DB-Forge [{schema}.{table}] : bloc `{name}` déclaré dans \
+                         {} ne correspond à aucun slot du Root ({}) — bloc mort, à supprimer \
+                         ou renommer",
+                        path_for_template(template).display(),
+                        root_path.display()
+                    );
+                }
+                other => println!(
+                    "cargo:error=DB-Forge [{schema}.{table}] : linking Mode Page échoué : {other:?}"
+                ),
+            }
+        }
+    })?;
 
-    let tokens = lower(&arena.get(parent_id).tokens, &plan, &arena);
+    let tokens = lower(&arena.get(root_id).tokens, &plan, &arena);
 
     validate_ast(&tokens).map_err(|errors| {
         println!(
@@ -281,7 +408,7 @@ pub(crate) fn resolve_static_page(
                     "cargo:error=DB-Forge [{schema}.{table}] : {} bloc(s) {{% script %}} à \
                      hisser mais aucun marqueur {SCRIPTS_PLACEHOLDER} trouvé dans le layout {}",
                     hoisted_blocks.len(),
-                    parent_path.display()
+                    root_path.display()
                 );
                 return Err(());
             }
@@ -314,7 +441,7 @@ pub(crate) fn resolve_static_page(
                 "cargo:error=DB-Forge [{schema}.{table}] : marqueur {MODULES_PLACEHOLDER} \
                  introuvable dans le layout {} — base.marius doit le porter en permanence \
                  (avant la fermeture de </head>)",
-                parent_path.display()
+                root_path.display()
             );
             return Err(());
         }

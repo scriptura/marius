@@ -547,7 +547,6 @@ mod tests_phase_5_10_link_chain {
     /// la déclaration fautive.
     #[test]
     fn orphan_declared_by_intermediate_level_names_that_level() {
-        let leaf = TemplateId(0);
         let mid = TemplateId(1);
         let root = TemplateId(2);
 

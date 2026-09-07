@@ -1,4 +1,4 @@
-{% extends templates/boiterplate.marius %}
+{% extends templates/base.marius %}
 
 {% block head_description %}{{ record.description }}{% endblock %}
 {% block head_title %}{{ record.description }}{% endblock %}

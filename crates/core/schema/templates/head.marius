@@ -1,0 +1,17 @@
+{% block main_head %}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{% block head_title %}Default title{% endblock %}</title>
+<link rel="preload" href="{% asset fonts/notoSans-Regular.woff2 %}" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="{% asset fonts/notoSerif-Regular.woff2 %}" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="{% asset styles/main.css %}" media="screen">
+<link rel="stylesheet" href="{% asset styles/print.css %}" media="print">
+<meta name="description" content="{% block head_description %}Default description{% endblock %}">
+<meta name="theme-color" content="#333">
+<link rel="manifest" href="{% asset manifest.webmanifest %}" crossorigin="use-credentials">
+<link rel="icon" type="image/svg+xml" href="{% asset favicons/favicon.svg %}">
+<link rel="shortcut icon" href="{% asset favicons/favicon.ico %}">
+<link rel="apple-touch-icon" sizes="180x180" href="{% asset favicons/apple-touch-icon.png %}">
+{% script %}
+<script src="{% asset service-worker.js %}" type="module"></script>{% endscript %}
+{% endblock %}

@@ -49,9 +49,10 @@ pub use fragment::{
 };
 pub use naming::{relative_path_for_include_str, static_capacity, static_const_ident};
 pub use page::{
-    BlockSubstitution, ChildTemplateSpec, LinkPlan, NamedBlockRange, PageArena, PageBlockToken,
-    PageComposeParseError, PageLinkError, PageValidationError, ParsedPageTemplate,
-    StaticPartialRef, TemplateId, collect_blocks, collect_static_refs, detect_extends, link,
-    link_chain, lower, parse_page_tokens,
+    BlockSubstitution, ChildTemplateSpec, ImportRef, LinkPlan, NamedBlockRange, PageArena,
+    PageBlockToken, PageComposeParseError, PageImportError, PageLinkError, PageSourceToken,
+    PageValidationError, ParsedPageTemplate, StaticPartialRef, TemplateId, collect_blocks,
+    collect_static_refs, collect_top_level_imports, detect_extends, link, link_chain, lower,
+    parse_page_tokens,
 };
 pub use schema::{EscapePolicy, FieldKind, FieldSpec, SchemaIndex, VarlenField};

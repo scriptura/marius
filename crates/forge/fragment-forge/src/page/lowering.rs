@@ -4,6 +4,8 @@
 //! `(&[PageSourceToken], &LinkPlan, &PageArena) -> Vec<FlatPageToken>`.
 //! `Runtime` → identité, `Static` → `StaticInclude` provisoire, `Block` →
 //! splice de la plage substituée (parent ou enfant selon `LinkPlan`).
+//! `Import` ne peut structurellement jamais atteindre ce module — voir doc
+//! de `lower_leaf_token`.
 
 use crate::fragment::token::FlatPageToken;
 
@@ -55,6 +57,15 @@ use crate::page::token::PageSourceToken;
 //   serait un bug de la phase amont, pas un cas à absorber dans le Lowering
 //   (citation directe du contrat : « le Lowering suppose une entrée déjà
 //   validée »). Panique documentée, même style que ci-dessus.
+//
+//   `PageSourceToken::Import` (session ultérieure) hérite de cette même
+//   garantie, pour une raison différente : ce n'est pas `collect_blocks` qui
+//   l'écarte, c'est l'orchestrateur (`build/template/page.rs`) — tout
+//   `Import` doit être développé (remplacé positionnellement par les tokens
+//   du fragment ciblé) avant l'admission en arène, donc avant que
+//   `collect_blocks`/`link_chain`/`lower` ne voient jamais le fichier. Une
+//   occurrence ici serait un bug de l'expansion amont, jamais un cas normal
+//   à absorber — même traitement (panique documentée) que `Unsupported`.
 //
 // ─── Projection `Static` → `StaticInclude` (provisoire) ───────────────────
 //
@@ -197,9 +208,10 @@ pub fn lower<'src>(
 /// `lower` et le contenu d'une plage substituée (Phase 5.9, voir doc de
 /// tête : « aucune duplication de la logique de projection »).
 ///
-/// Panique sur `Block(_)` et `Unsupported { .. }` : aucun des deux ne peut
-/// structurellement atteindre ce point sur une entrée déjà validée — voir
-/// doc de tête, Phase 5.9, pour la justification de chaque cas.
+/// Panique sur `Block(_)`, `Import(_)` et `Unsupported { .. }` : aucun des
+/// trois ne peut structurellement atteindre ce point sur une entrée déjà
+/// validée — voir doc de tête, Phases 5.9 et « Import », pour la
+/// justification de chaque cas.
 fn lower_leaf_token<'src>(token: &PageSourceToken<'src>) -> FlatPageToken<'src> {
     match token {
         PageSourceToken::Runtime(flat) => *flat,
@@ -216,6 +228,13 @@ fn lower_leaf_token<'src>(token: &PageSourceToken<'src>) -> FlatPageToken<'src> 
              l'imbrication de blocs est rejetée en amont par collect_blocks \
              (NestedBlock, Phase 5.3), une plage NamedBlockRange déjà validée \
              ne peut structurellement pas en contenir."
+        ),
+        PageSourceToken::Import(_) => unreachable!(
+            "lower_leaf_token : PageSourceToken::Import rencontré — précondition \
+             violée : tout {{% import %}} doit être développé (remplacé par les \
+             tokens du fragment ciblé) par l'orchestrateur avant l'admission en \
+             arène, donc bien avant que ce fichier n'atteigne collect_blocks, \
+             link_chain ou lower. Bug de l'expansion amont, pas un cas géré ici."
         ),
         PageSourceToken::Unsupported { .. } => unreachable!(
             "lower_leaf_token (Phase 5.9) : PageSourceToken::Unsupported \

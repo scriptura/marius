@@ -495,11 +495,68 @@ pub struct StaticPartialRef<'src> {
     pub original_path: &'src str,
 }
 
+/// Référence à un fragment `.marius` importé (`{% import path %}`),
+/// distincte de `StaticPartialRef` : le fichier ciblé est intégralement
+/// reparsé comme un template Mode Page à part entière (ses propres
+/// `{% block %}`, `{% asset %}`, `{% script %}`, `{% import %}` imbriqués),
+/// puis ses tokens remplacent ce marqueur *positionnellement* — aucune
+/// notion de constante partagée dédupliquée (contrairement à `{% static %}`,
+/// où le même fichier référencé plusieurs fois ne coûte qu'une fois en
+/// octets). Deux occurrences de `{% import same.marius %}` produisent deux
+/// expansions indépendantes, chacune pouvant elle-même contenir des blocs
+/// qui rejoindront l'espace de noms plat du fichier qui importe.
+///
+/// ─── Zéro E/S, zéro résolution ici ─────────────────────────────────────
+///
+///   Comme `StaticPartialRef`/`StaticInclude`, ce type ne porte que le
+///   chemin brut tel qu'écrit dans le template. La lecture du fichier
+///   ciblé, son parsing récursif, la détection de cycle et la borne de
+///   profondeur (`MAX_IMPORT_DEPTH`) sont une responsabilité exclusive de
+///   l'orchestrateur (`build/template/page.rs`) — ce crate ne fait jamais
+///   d'E/S, ici comme partout ailleurs.
+///
+/// ─── Contrainte de position : jamais vérifiée par ce type ni par le
+///     Parser ────────────────────────────────────────────────────────────
+///
+///   `{% import %}` n'est valide qu'en position top-level (jamais à
+///   l'intérieur d'un `{% block %}` ouvert) — contrainte vérifiée par
+///   `collect_top_level_imports` (module `importer`), pas construite dans
+///   ce type ni dans le Parser (même permissivité délibérée que pour
+///   l'imbrication de blocs, cf. doc de `parse_page_block`) : la position
+///   est une propriété du *flux* de tokens, pas de l'occurrence isolée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportRef<'src> {
+    /// Chemin tel qu'écrit dans le template, non quoté — même convention
+    /// que `StaticPartialRef::original_path` et `{% extends %}`.
+    pub original_path: &'src str,
+}
+
+/// Erreur de position d'un `{% import %}` — détectée sans aucune E/S,
+/// uniquement à partir du flux de tokens déjà parsé d'**un seul** fichier.
+/// Distincte de `PageValidationError` : ce n'est pas une propriété de forme
+/// d'un `{% block %}` lui-même, c'est une contrainte de position d'un token
+/// différent (`Import`) relativement aux blocs déjà ouverts au moment où il
+/// est rencontré. Distincte aussi de `PageLinkError` : aucune connaissance
+/// d'un autre fichier n'est nécessaire pour la détecter — un import mal
+/// placé l'est déjà avant toute résolution de chemin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageImportError<'src> {
+    /// `{% import path %}` rencontré à l'intérieur d'un `{% block %}`
+    /// ouvert. `block_name` désigne le bloc englobant fautif — un import ne
+    /// peut se substituer qu'à un slot de premier niveau, jamais à du
+    /// contenu à l'intérieur d'un bloc (cela recréerait, une fois le
+    /// fragment développé, l'imbrication que `NestedBlock` interdit déjà).
+    ImportInsideBlock {
+        path: &'src str,
+        block_name: &'src str,
+    },
+}
+
 #[cfg(test)]
 mod tests_phase_3_0_page_mode_types {
     use super::{
-        ChildTemplateSpec, NamedBlockRange, PageBlockToken, PageComposeParseError, PageLinkError,
-        PageValidationError, StaticPartialRef, TemplateId,
+        ChildTemplateSpec, ImportRef, NamedBlockRange, PageBlockToken, PageComposeParseError,
+        PageImportError, PageLinkError, PageValidationError, StaticPartialRef, TemplateId,
     };
 
     /// Jalon Vert — les nouveaux types sont Copy/Clone/PartialEq comme leurs
@@ -601,6 +658,21 @@ mod tests_phase_3_0_page_mode_types {
             template: TemplateId(0),
         };
         let _validation: PageValidationError<'_> = PageValidationError::ForLoopDetected;
+        let _import: PageImportError<'_> = PageImportError::ImportInsideBlock {
+            path: "head.marius",
+            block_name: "main_head",
+        };
+    }
+
+    /// Jalon Vert — ImportRef ne porte que le chemin brut, comme
+    /// StaticPartialRef, mais reste un type distinct : le compilateur ne
+    /// permet aucune confusion entre les deux au site de construction.
+    #[test]
+    fn import_ref_shape() {
+        let r = ImportRef {
+            original_path: "head.marius",
+        };
+        assert_eq!(r.original_path, "head.marius");
     }
 }
 

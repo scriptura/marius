@@ -1,17 +1,30 @@
 // crates/core/schema/build/template/page.rs
 
-//! Sous-orchestration Mode Page (`{% extends %}`) — pipeline complet :
-//! résolution de la chaîne d'héritage (jusqu'à `MAX_EXTENDS_DEPTH` fichiers,
-//! détection de cycle), admission en arène, `LinkPlan` N-aire (`link_chain`),
-//! Lowering, jonction avec le pipeline gelé de `fragment-forge`.
+//! Sous-orchestration Mode Page (`{% extends %}` + `{% import %}`) —
+//! pipeline complet : résolution de la chaîne d'héritage (jusqu'à
+//! `MAX_EXTENDS_DEPTH` fichiers, détection de cycle), découverte et
+//! expansion récursive des fragments importés (jusqu'à `MAX_IMPORT_DEPTH`
+//! niveaux, détection de cycle indépendante), admission en arène, `LinkPlan`
+//! N-aire (`link_chain`), Lowering, jonction avec le pipeline gelé de
+//! `fragment-forge`.
+//!
+//! Deux axes de composition, indépendants et combinables : `{% extends %}`
+//! (héritage vertical, un seul parent par maillon, blocs overridables) et
+//! `{% import %}` (composition horizontale, N fragments par maillon, aucune
+//! notion d'override — remplacement positionnel pur). Chaque maillon de la
+//! chaîne `extends` (feuille comme ancêtres, Root inclus) peut porter ses
+//! propres `{% import %}` ; chaque fragment importé peut à son tour importer
+//! d'autres fragments, mais ne peut jamais lui-même `{% extends %}` (cf.
+//! `discover_imports`).
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
 use marius_fragment_forge::{
-    AssetLookup, FlatPageToken, NamedBlockRange, PageArena, PageLinkError, SchemaIndex,
-    TemplateId, TemplateMetrics, VarlenField, collect_blocks, collect_static_refs,
+    AssetLookup, FlatPageToken, ImportRef, NamedBlockRange, PageArena, PageImportError,
+    PageLinkError, PageSourceToken, ParsedPageTemplate, SchemaIndex, TemplateId, TemplateMetrics,
+    VarlenField, collect_blocks, collect_static_refs, collect_top_level_imports,
     extract_static_marker_facts, generate_aot_snippet, generate_segmented_snippet,
     hoist_and_dedupe_scripts, link_chain, lower, parse_page_tokens, relative_path_for_include_str,
     resolve_and_measure, scan, splice_hoisted_scripts, validate_ast,
@@ -28,16 +41,268 @@ use crate::{MODULES_PLACEHOLDER, SCRIPTS_PLACEHOLDER};
 /// inclus. 2 = enfant + parent direct (ancien plafond, désormais un cas
 /// particulier) ; jusqu'à 4 = enfant + jusqu'à 3 ancêtres (Root inclus).
 /// Au-delà : `cargo:error` nommé, jamais une récursion non bornée.
-const MAX_EXTENDS_DEPTH: usize = 4;
+pub(crate) const MAX_EXTENDS_DEPTH: usize = 4;
+
+/// Profondeur maximale d'une chaîne de `{% import %}` imbriqués, comptée à
+/// partir du fichier qui déclare le premier import (ce fichier lui-même non
+/// compté : profondeur 1 = un fragment importé directement, sans import
+/// propre ; profondeur 4 = quatre niveaux de fragments s'important les uns
+/// les autres). Axe indépendant de `MAX_EXTENDS_DEPTH` — un Root peut à la
+/// fois être au bout d'une chaîne `extends` de 4 maillons ET importer des
+/// fragments sur 4 niveaux : les deux compteurs ne se cumulent jamais.
+pub(crate) const MAX_IMPORT_DEPTH: usize = 4;
 
 /// Assemble la chaîne de chemins visités en une chaîne lisible pour un
 /// message `cargo:error` (« a.marius -> b.marius -> c.marius »).
-fn render_chain(paths: &[PathBuf]) -> String {
+pub(crate) fn render_chain(paths: &[PathBuf]) -> String {
     paths
         .iter()
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join(" -> ")
+}
+
+// =============================================================================
+// `{% import %}` — découverte (E/S) puis expansion (splice positionnel)
+// =============================================================================
+//
+// Même coupure Phase 1 / Phase 2 que pour la chaîne `extends`, et pour la
+// même raison structurelle : un `ImportNode` découvert à la profondeur N
+// emprunterait la `String` source du fragment à la profondeur N+1 si l'on
+// tentait de tout faire en une seule passe récursive parse-et-admet — or
+// `import_sources` (le pool partagé, commun à TOUS les maillons de la chaîne
+// extends, pas un pool par maillon) doit continuer à grandir tant que la
+// découverte n'est pas terminée pour l'ensemble de la chaîne. Solution
+// retenue : `discover_imports` ne fait qu'un `peek` (parse, extrait la liste
+// des imports top-level, jette l'AST) à chaque nœud, sur une `String` locale
+// qui n'est poussée dans `import_sources` qu'*après* que sa propre sous-
+// arborescence ait fini de grandir (ordre post-order, cf. corps de la
+// fonction) — jamais de emprunt vivant sur `import_sources` au moment d'un
+// `push`.
+//
+// ─── Pourquoi un fragment importé ne peut pas lui-même `{% extends %}` ────
+//
+//   Un fragment importé n'est jamais le Root d'une fusion : il ne possède
+//   aucune position physique propre dans le pipeline `link_chain`/`lower`,
+//   ses tokens sont simplement spliced tels quels à la place du marqueur
+//   `{% import %}`. Un `{% extends %}` en tête d'un tel fichier n'aurait
+//   donc aucun sens à résoudre (extends de quoi, pour quel Root ?) — rejeté
+//   explicitement plutôt que silencieusement ignoré.
+//
+// ─── Pourquoi la position (top-level uniquement) est vérifiée à CHAQUE
+//     niveau, indépendamment ───────────────────────────────────────────────
+//
+//   `collect_top_level_imports` est appelée sur les tokens propres de
+//   chaque fichier (maillon de la chaîne extends OU fragment importé) avant
+//   toute expansion — un fragment importé qui contiendrait lui-même un
+//   `{% import %}` mal placé (à l'intérieur d'un de ses propres blocs) est
+//   rejeté à sa propre profondeur, jamais silencieusement toléré parce
+//   qu'il est « déjà » un fragment.
+
+/// Nœud de l'arbre des fragments importés d'un fichier, une fois la
+/// découverte (E/S) terminée mais avant le parsing réel — symétrique de la
+/// coupure Phase 1 / Phase 2 déjà en place pour la chaîne `{% extends %}`.
+pub(crate) struct ImportNode {
+    /// Index dans `import_sources` (le pool partagé, figé une fois toute la
+    /// découverte terminée) où lire la source réelle de ce fragment.
+    pool_index: usize,
+    /// Chemin résolu de ce fragment — pour nommer le fichier fautif dans un
+    /// message `cargo:error` sans avoir à reparcourir l'arbre.
+    path: PathBuf,
+    /// Ses propres imports top-level, dans l'ordre d'apparition dans son
+    /// propre flux de tokens — un enfant par occurrence de `{% import %}`
+    /// rencontrée lors de l'expansion (`splice_all_imports` consomme cette
+    /// liste dans le même ordre, invariant garanti par construction ici).
+    children: Vec<ImportNode>,
+}
+
+/// Découvre récursivement, par E/S, l'arbre des fragments importés par
+/// `src` (le contenu déjà lu d'un maillon de la chaîne extends, ou d'un
+/// fragment importé à une profondeur inférieure). Fait grandir
+/// `import_sources` (le pool partagé de toute la résolution) mais ne
+/// parse jamais `src` lui-même « pour de vrai » : seul un `peek` (parse,
+/// extraction, abandon de l'AST) a lieu ici — voir doc de section pour la
+/// raison exacte de cette coupure.
+///
+/// `ancestry` est le chemin de fragments déjà visités sur la branche
+/// courante de la récursion (pas un ensemble global) : deux fragments
+/// distincts important tous deux le même troisième fragment ne sont jamais
+/// un cycle, seul un fragment se réimportant lui-même (directement ou via
+/// une chaîne de sous-imports) en est un. Poussé avant de descendre, dépilé
+/// après — backtracking classique.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn discover_imports(
+    schema: &str,
+    table: &str,
+    manifest_dir: &str,
+    src: &str,
+    declared_by: &Path,
+    depth: usize,
+    ancestry: &mut Vec<PathBuf>,
+    import_sources: &mut Vec<String>,
+) -> Result<Vec<ImportNode>, ()> {
+    let peek_ast = parse_page_tokens(scan(src)).map_err(|e| {
+        println!(
+            "cargo:error=DB-Forge [{schema}.{table}] : fragment importé invalide ({}) : {e:?}",
+            declared_by.display()
+        );
+    })?;
+
+    let peek_imports = collect_top_level_imports(&peek_ast.tokens).map_err(|errors| {
+        for error in &errors {
+            let PageImportError::ImportInsideBlock { path, block_name } = error;
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : {{% import {path} %}} déclaré dans \
+                 {} à l'intérieur du bloc `{block_name}` — position interdite, un import ne \
+                 peut se substituer qu'à un slot de premier niveau",
+                declared_by.display()
+            );
+        }
+    })?;
+
+    let mut nodes = Vec::with_capacity(peek_imports.len());
+    for ImportRef { original_path } in peek_imports {
+        if depth >= MAX_IMPORT_DEPTH {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : chaîne import trop profonde \
+                 (max {MAX_IMPORT_DEPTH} niveaux) — {} déclare `{original_path}`",
+                declared_by.display()
+            );
+            return Err(());
+        }
+
+        let path = PathBuf::from(relative_path_for_include_str(manifest_dir, original_path));
+
+        if ancestry.contains(&path) {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : cycle détecté dans la chaîne \
+                 import : {} -> {} (déjà présent plus haut dans cette branche)",
+                render_chain(ancestry),
+                path.display()
+            );
+            return Err(());
+        }
+
+        if !path.exists() {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : import introuvable — {} déclare \
+                 `{original_path}`, mais {} n'existe pas",
+                declared_by.display(),
+                path.display()
+            );
+            return Err(());
+        }
+
+        println!("cargo:rerun-if-changed={}", path.display());
+        let fragment_src = read_template_file(&path)?;
+
+        // Un fragment importé ne peut pas lui-même `{% extends %}` — voir
+        // doc de section pour la justification (aucune position physique
+        // propre à un fragment importé, un Root de fusion n'a de sens que
+        // pour un maillon de la chaîne extends).
+        let fragment_peek = parse_page_tokens(scan(&fragment_src)).map_err(|e| {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : fragment importé invalide ({}) : \
+                 {e:?}",
+                path.display()
+            );
+        })?;
+        if fragment_peek.extends.is_some() {
+            println!(
+                "cargo:error=DB-Forge [{schema}.{table}] : {} est importé (par {}) mais déclare \
+                 lui-même {{% extends %}} — un fragment importé n'a pas de position physique \
+                 propre, {{% extends %}} y est dénué de sens",
+                path.display(),
+                declared_by.display()
+            );
+            return Err(());
+        }
+
+        // Récursion AVANT le push dans `import_sources` : `fragment_src`
+        // (variable locale) est empruntée pour la descente, puis déplacée
+        // dans le pool seulement une fois sa propre sous-arborescence
+        // entièrement découverte — aucun emprunt vivant sur `import_sources`
+        // au moment de son `push` (voir doc de section).
+        ancestry.push(path.clone());
+        let children = discover_imports(
+            schema,
+            table,
+            manifest_dir,
+            &fragment_src,
+            &path,
+            depth + 1,
+            ancestry,
+            import_sources,
+        )?;
+        ancestry.pop();
+
+        let pool_index = import_sources.len();
+        import_sources.push(fragment_src);
+        nodes.push(ImportNode {
+            pool_index,
+            path,
+            children,
+        });
+    }
+
+    Ok(nodes)
+}
+
+/// Développe récursivement un `ImportNode` déjà découvert : reparse sa
+/// source réelle (cette fois pour de vrai — `import_sources` est figé, plus
+/// aucun `push` ne peut intervenir pendant que ce parsing emprunte l'un de
+/// ses éléments), puis développe ses propres imports avant de retourner ses
+/// tokens complets, prêts à être splicés chez l'appelant.
+fn expand_import_node<'src>(
+    node: &ImportNode,
+    import_sources: &'src [String],
+    schema: &str,
+    table: &str,
+) -> Result<Vec<PageSourceToken<'src>>, ()> {
+    let src = &import_sources[node.pool_index];
+    let ast = parse_page_tokens(scan(src)).map_err(|e| {
+        println!(
+            "cargo:error=DB-Forge [{schema}.{table}] : fragment importé invalide ({}) : {e:?}",
+            node.path.display()
+        );
+    })?;
+    splice_all_imports(ast.tokens, &node.children, import_sources, schema, table)
+}
+
+/// Remplace, dans `tokens`, chaque marqueur `PageSourceToken::Import`
+/// rencontré par les tokens développés du `ImportNode` correspondant, pris
+/// dans `children` dans l'ordre d'apparition — même ordre que celui dans
+/// lequel `discover_imports` les a découverts (invariant de construction,
+/// jamais revérifié dynamiquement ici : les deux fonctions parcourent le
+/// même flux de tokens dans le même ordre).
+///
+/// Fonction partagée entre le niveau racine (un maillon de la chaîne
+/// extends) et le niveau d'un fragment importé lui-même (`expand_import_node`)
+/// — aucune duplication de la logique de splice entre ces deux appelants.
+pub(crate) fn splice_all_imports<'src>(
+    mut tokens: Vec<PageSourceToken<'src>>,
+    children: &[ImportNode],
+    import_sources: &'src [String],
+    schema: &str,
+    table: &str,
+) -> Result<Vec<PageSourceToken<'src>>, ()> {
+    let mut child_iter = children.iter();
+    let mut i = 0;
+    while i < tokens.len() {
+        if matches!(tokens[i], PageSourceToken::Import(_)) {
+            let child = child_iter.next().expect(
+                "un ImportNode par occurrence de PageSourceToken::Import, dans l'ordre du \
+                 flux — invariant garanti par discover_imports",
+            );
+            let expanded = expand_import_node(child, import_sources, schema, table)?;
+            let expanded_len = expanded.len();
+            tokens.splice(i..i + 1, expanded);
+            i += expanded_len;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(tokens)
 }
 
 /// Sous-orchestration Mode Page — pipeline complet : résolution de la
@@ -72,11 +337,15 @@ fn render_chain(paths: &[PathBuf]) -> String {
 /// Retourne :
 ///   `Err(())` : chaîne extends trop profonde, cycle détecté dans la chaîne,
 ///               chemin `extends` introuvable, un maillon syntaxiquement
-///               invalide (découverte ou ré-analyse d'admission), blocs d'un
-///               maillon syntaxiquement mal formés, linking échoué (bloc
-///               orphelin contre le Root, fichier `static` introuvable),
-///               template Mode Page sémantiquement invalide
-///               (`validate_ast`), hoisting des scripts échoué, marqueur
+///               invalide (découverte ou ré-analyse d'admission), un import
+///               mal placé (`{% import %}` à l'intérieur d'un bloc), chaîne
+///               import trop profonde, cycle détecté dans une chaîne
+///               d'imports, chemin `import` introuvable, un fragment importé
+///               qui déclare lui-même `{% extends %}`, blocs d'un maillon
+///               syntaxiquement mal formés, linking échoué (bloc orphelin
+///               contre le Root, fichier `static` introuvable), template
+///               Mode Page sémantiquement invalide (`validate_ast`),
+///               hoisting des scripts échoué, marqueur
 ///               `SCRIPTS_PLACEHOLDER`/`MODULES_PLACEHOLDER` absent du Root,
 ///               ou résolution de capacité échouée (`resolve_and_measure` —
 ///               fichier `include`/`static` illisible). `cargo:error`
@@ -160,11 +429,47 @@ pub(crate) fn resolve_page_template<'src>(
         }
     }
 
-    // ── Phase 2 — Parsing réel + admission en arène ─────────────────────
+    // Visibilité de la chaîne complète à chaque build, quelle que soit sa
+    // profondeur (1 à MAX_EXTENDS_DEPTH maillons) — un `cargo:warning`, pas
+    // une erreur : la chaîne est valide à ce stade, c'est sa longueur et son
+    // Root réel qui méritent d'être visibles sans avoir à ouvrir chaque
+    // fichier un par un pour la reconstituer soi-même.
+    println!(
+        "cargo:warning=DB-Forge [{schema}.{table}] : chaîne extends : {}",
+        render_chain(&visited_paths)
+    );
+
+    // ── Phase 1.5 — Découverte des imports de chaque maillon ────────────
     //
-    // `sources` ne grandit plus à partir d'ici : chaque `&sources[i]`
-    // emprunté ci-dessous reste valide jusqu'à la fin de la fonction, sans
-    // conflit avec le borrow-checker.
+    // Un `peek` par maillon (comme la découverte extends de Phase 1), qui
+    // fait grandir `import_sources` — un pool UNIQUE, partagé par tous les
+    // maillons de la chaîne, jamais un pool par maillon (rien n'empêche
+    // deux maillons distincts d'importer, indépendamment, le même chemin).
+    let mut import_sources: Vec<String> = Vec::new();
+    let mut import_trees: Vec<Vec<ImportNode>> = Vec::with_capacity(sources.len());
+
+    for (index, src) in sources.iter().enumerate() {
+        let mut ancestry: Vec<PathBuf> = vec![visited_paths[index].clone()];
+        let tree = discover_imports(
+            schema,
+            table,
+            manifest_dir,
+            src,
+            &visited_paths[index],
+            0,
+            &mut ancestry,
+            &mut import_sources,
+        )?;
+        import_trees.push(tree);
+    }
+
+    // ── Phase 2 — Parsing réel + expansion des imports + admission ──────
+    //
+    // `sources` ET `import_sources` ne grandissent plus à partir d'ici :
+    // chaque `&sources[i]` et chaque `&import_sources[j]` empruntés
+    // ci-dessous restent valides jusqu'à la fin de la fonction, sans
+    // conflit avec le borrow-checker — même raisonnement que pour la
+    // chaîne extends, étendu au pool d'imports.
     let mut arena = PageArena::default();
     let mut chain_ids: Vec<TemplateId> = Vec::with_capacity(sources.len());
 
@@ -176,7 +481,21 @@ pub(crate) fn resolve_page_template<'src>(
                 visited_paths[index].display()
             );
         })?;
-        chain_ids.push(arena.admit(ast));
+
+        // Développe tous les `{% import %}` top-level de ce maillon avant
+        // admission — `collect_blocks`/`link_chain`/`lower` ne verront
+        // jamais un `PageSourceToken::Import` (cf. doc de tête et de
+        // `lower_leaf_token`, `fragment-forge`).
+        let extends = ast.extends;
+        let tokens = splice_all_imports(
+            ast.tokens,
+            &import_trees[index],
+            &import_sources,
+            schema,
+            table,
+        )?;
+
+        chain_ids.push(arena.admit(ParsedPageTemplate { extends, tokens }));
     }
 
     let root_id = *chain_ids

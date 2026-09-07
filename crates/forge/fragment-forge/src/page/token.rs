@@ -2,11 +2,11 @@
 
 //! Phase 4.1 — Alphabet unique du Parser Mode Page : `PageSourceToken`,
 //! type englobant `Runtime(FlatPageToken)` / `Block(PageBlockToken)` /
-//! `Static(StaticPartialRef)` / `Unsupported`. Diff nul garanti sur
-//! `FlatPageToken` (gelé) : aucune variante n'y est ajoutée.
+//! `Static(StaticPartialRef)` / `Import(ImportRef)` / `Unsupported`. Diff nul
+//! garanti sur `FlatPageToken` (gelé) : aucune variante n'y est ajoutée.
 
 use crate::fragment::token::FlatPageToken;
-use crate::page::model::{PageBlockToken, StaticPartialRef};
+use crate::page::model::{ImportRef, PageBlockToken, StaticPartialRef};
 
 // =============================================================================
 // Phase 4.1 — Parser Mode Page : type `PageSourceToken<'src>`
@@ -43,9 +43,9 @@ use crate::page::model::{PageBlockToken, StaticPartialRef};
 ///   flux unique élimine par construction.
 ///
 ///   Retenu — enum englobant paramétré sur les deux enums existants
-///   (`FlatPageToken`, `PageBlockToken`) plus deux variantes propres au
-///   Parser Mode Page (`Static`, `Unsupported`). Un seul `Vec`, un seul ordre
-///   d'apparition, cohérent avec le reste du pipeline.
+///   (`FlatPageToken`, `PageBlockToken`) plus les variantes propres au
+///   Parser Mode Page (`Static`, `Import`, `Unsupported`). Un seul `Vec`, un
+///   seul ordre d'apparition, cohérent avec le reste du pipeline.
 ///
 /// ─── Invariant de platitude ───────────────────────────────────────────────
 ///
@@ -55,14 +55,20 @@ use crate::page::model::{PageBlockToken, StaticPartialRef};
 ///   plage d'indices dans un `Vec` plat plutôt que comme une sous-structure
 ///   récursive. Ce type suit le même principe : aucun nouvel arbre.
 ///
+///   `Import(ImportRef)` ne fait pas exception : ce token ne porte, comme
+///   `Static`, qu'un chemin brut — jamais les tokens du fragment ciblé.
+///   L'expansion (remplacement positionnel de ce marqueur par le flux de
+///   tokens du fragment, une fois celui-ci lu et parsé) est une
+///   responsabilité de l'orchestrateur (`build/template/page.rs`), exécutée
+///   avant l'admission en arène — au moment où `collect_blocks`/`link_chain`/
+///   `lower` observent un fichier, `Import` n'y apparaît plus jamais.
+///
 /// ─── `Copy`, zéro indirection supplémentaire ──────────────────────────────
 ///
 ///   Agrégat de types déjà `Copy` (`FlatPageToken<'src>`, `PageBlockToken<'src>`,
-///   `StaticPartialRef<'src>`, `&'src str`) : `PageSourceToken` est `Copy` par
-///   construction, sans `Box`, `Rc` ni indirection ajoutée par l'enum
-///   englobant lui-même. Coût mémoire par token : celui de la plus grande
-///   variante — voir `page_source_token_layout_is_frozen` ci-dessous pour la
-///   valeur figée et sa justification.
+///   `StaticPartialRef<'src>`, `ImportRef<'src>`, `&'src str`) :
+///   `PageSourceToken` est `Copy` par construction, sans `Box`, `Rc` ni
+///   indirection ajoutée par l'enum englobant lui-même.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageSourceToken<'src> {
     /// Opérateur de projection, identique au Mode Fragment : `{{ }}`,
@@ -80,21 +86,20 @@ pub enum PageSourceToken<'src> {
     /// Opérateur de composition : `{% block %}` / `{% endblock %}`.
     Block(PageBlockToken<'src>),
 
-    /// Opérateur de composition : `{% static path %}`.
-    ///
-    /// Forme lexicale actée en Phase 4.5 : `path` est un `Ident` de bloc nu,
-    /// sans guillemets — symétrique de `{% include path %}` (Mode Fragment,
-    /// gelé, cf. `parse_block`), pas de la notation à guillemets utilisée à
-    /// titre illustratif dans Document 1 §2.1/§6. Le scanner (`InBlock`,
-    /// Phase 1.2, gelé) n'a aucune notion de littéral de chaîne : il n'existe
-    /// pas de `SpanKind` dédié aux guillemets, qui seraient sinon capturés
-    /// tels quels dans la slice. Introduire un tel support serait une
-    /// extension du scanner gelé, hors périmètre de cette phase (§3
-    /// roadmap : « aucune dépendance à `std::fs` introduite », pas
-    /// d'extension de grammaire lexicale). `original_path` est donc
-    /// directement la slice brute retournée par le scanner, sans étape de
-    /// dépouillement.
+    /// Inclusion opaque, dédupliquée : `{% static path %}`. Le fichier
+    /// référencé n'est jamais reparsé comme template — voir doc d'`Import`
+    /// ci-dessous pour la distinction avec ce dernier.
     Static(StaticPartialRef<'src>),
+
+    /// Import de fragment, reparsé et développé positionnellement :
+    /// `{% import path %}`. Distinct de `Static` : le fichier ciblé est un
+    /// template Mode Page à part entière (peut contenir ses propres
+    /// `{% block %}`, `{% asset %}`, `{% script %}`, et même ses propres
+    /// `{% import %}` imbriqués, jusqu'à une profondeur bornée), et ses
+    /// tokens remplacent ce marqueur avant que `collect_blocks`/`link_chain`/
+    /// `lower` ne voient jamais ce fichier — cf. doc de `ImportRef`
+    /// (`page::model`) pour le contrat complet.
+    Import(ImportRef<'src>),
 
     /// Mot-clé de bloc reconnu syntaxiquement mais non supporté par la
     /// grammaire runtime (`for`, `join`, `where`, `filter`, `group`, ou tout
@@ -108,15 +113,18 @@ pub enum PageSourceToken<'src> {
 
 #[cfg(test)]
 mod tests_phase_4_1_page_source_token {
-    use super::{FlatPageToken, PageBlockToken, PageSourceToken, StaticPartialRef};
+    use super::{FlatPageToken, ImportRef, PageBlockToken, PageSourceToken, StaticPartialRef};
 
-    /// Jalon Vert — construction des 4 variantes.
+    /// Jalon Vert — construction des 5 variantes.
     #[test]
-    fn constructs_all_four_variants() {
+    fn constructs_all_five_variants() {
         let runtime = PageSourceToken::Runtime(FlatPageToken::Static("hello"));
         let block = PageSourceToken::Block(PageBlockToken::BlockOpen { name: "header" });
         let static_ref = PageSourceToken::Static(StaticPartialRef {
             original_path: "partials/nav.html",
+        });
+        let import_ref = PageSourceToken::Import(ImportRef {
+            original_path: "head.marius",
         });
         let unsupported = PageSourceToken::Unsupported {
             keyword: "for",
@@ -139,6 +147,12 @@ mod tests_phase_4_1_page_source_token {
             }
             _ => unreachable!(),
         }
+        match import_ref {
+            PageSourceToken::Import(ImportRef { original_path }) => {
+                assert_eq!(original_path, "head.marius")
+            }
+            _ => unreachable!(),
+        }
         match unsupported {
             PageSourceToken::Unsupported { keyword, tail } => {
                 assert_eq!(keyword, "for");
@@ -149,7 +163,7 @@ mod tests_phase_4_1_page_source_token {
     }
 
     /// Jalon Vert — `match` exhaustif sans arm `_` compile : preuve que
-    /// l'enum est fermé sur exactement 4 variantes, aucune de plus, aucune
+    /// l'enum est fermé sur exactement 5 variantes, aucune de plus, aucune
     /// de moins. Si une variante est ajoutée ou retirée sans mise à jour de
     /// ce `match`, ce test ne compile plus (erreur `non-exhaustive
     /// patterns`) — la garantie est portée par le compilateur, pas par une
@@ -161,6 +175,7 @@ mod tests_phase_4_1_page_source_token {
                 PageSourceToken::Runtime(_) => "runtime",
                 PageSourceToken::Block(_) => "block",
                 PageSourceToken::Static(_) => "static",
+                PageSourceToken::Import(_) => "import",
                 PageSourceToken::Unsupported { .. } => "unsupported",
             }
         }
@@ -172,6 +187,12 @@ mod tests_phase_4_1_page_source_token {
             classify(PageSourceToken::Block(PageBlockToken::BlockEnd)),
             "block"
         );
+        assert_eq!(
+            classify(PageSourceToken::Import(ImportRef {
+                original_path: "head.marius"
+            })),
+            "import"
+        );
     }
 
     /// Jalon Vert — `Copy` disponible sur toutes les variantes (agrégat de
@@ -180,11 +201,14 @@ mod tests_phase_4_1_page_source_token {
     /// (Phase 3.0) — cohérence de méthode entre phases.
     #[test]
     fn all_variants_are_copy() {
-        let tokens: [PageSourceToken<'_>; 4] = [
+        let tokens: [PageSourceToken<'_>; 5] = [
             PageSourceToken::Runtime(FlatPageToken::Static("content")),
             PageSourceToken::Block(PageBlockToken::BlockOpen { name: "body" }),
             PageSourceToken::Static(StaticPartialRef {
                 original_path: "partials/foot.html",
+            }),
+            PageSourceToken::Import(ImportRef {
+                original_path: "head.marius",
             }),
             PageSourceToken::Unsupported {
                 keyword: "where",
@@ -202,11 +226,14 @@ mod tests_phase_4_1_page_source_token {
     /// ce test, jamais un effet de bord silencieux d'un changement ailleurs
     /// dans le fichier (ex. un champ ajouté à `FlatPageToken::StaticInclude`).
     ///
-    /// Valeur observée sur cible 64 bits : la plus grande variante est
+    /// Valeur observée sur cible 64 bits : la plus grande variante reste
     /// `FlatPageToken::StaticInclude { original_path: &str, rel_from_manifest:
-    /// &str, len: usize }`, portée via `Runtime`. Trois mots de 8 octets
+    /// &str, len: usize }`, portée via `Runtime` — trois mots de 8 octets
     /// (2 fat pointers `&str` = 16 octets chacun, `usize` = 8 octets) plus le
     /// tag de discriminant de l'enum englobant, aligné sur 8 octets.
+    /// `Import(ImportRef { original_path: &str })` (16 octets + tag) reste
+    /// strictement plus petite que `Runtime(StaticInclude)` : ajouter cette
+    /// variante ne modifie donc pas la valeur figée ci-dessous.
     #[test]
     fn page_source_token_layout_is_frozen() {
         assert_eq!(

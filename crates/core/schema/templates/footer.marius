@@ -1,0 +1,62 @@
+{% block main_footer %}
+<footer class="footer" role="contentinfo">
+    <div class="wrap">
+        <div>
+            <div class="logo">
+                <svg>
+                    <use href="{% asset sprites/silos/195v.svg %}#a"></use>
+                </svg>
+            </div>
+            <p>Marius</p>
+        </div>
+        <p>Created by <a class="author" href="//www.linkedin.com/in/olivier-chavarin/">Olivier Chavarin</a></p>
+        <p>Since 2026</p>
+    </div>
+</footer>
+<div class="alert">
+    <template id="gdpr">
+        <div class="wrap" id="gdpr-see">
+            <div class="mm" role="alert">
+                <svg class="icon" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#cookie-bite"></use>
+                </svg>
+                <div>
+                    <p>Ce site utilise des cookies et vous donne le contrôle sur ceux que vous souhaitez activer.
+                    </p>
+                </div>
+            </div>
+            <div class="flex gap">
+                <button class="button" id="gdpr-true-consent" style="background-color:tomato">
+                    <svg class="icon-inline" aria-hidden="true">
+                        <use href="{% asset sprites/utils.svg %}#checkmark"></use>
+                    </svg>
+                    Tout accepter
+                </button>
+                <button class="button" id="gdpr-false-consent" style="background-color:tomato">
+                    <svg class="icon-inline" aria-hidden="true">
+                        <use href="{% asset sprites/utils.svg %}#mark"></use>
+                    </svg>
+                    Tout refuser
+                </button>
+                <button class="button" style="background-color:tomato">
+                    <svg class="icon-inline" aria-hidden="true">
+                        <use href="{% asset sprites/utils.svg %}#quill"></use>
+                    </svg>
+                    Personnaliser
+                </button>
+            </div>
+        </div>
+    </template>
+    <noscript>
+        <div class="wrap">
+            <div class="mm" role="alert">
+                <svg class="icon" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#warning"></use>
+                </svg>
+                <p>Javascript est désactivé dans votre navigateur. Afin de bénéficier de toutes les fonctionnalités
+                    du site, réactivez cette option dans vos paramètres.</p>
+            </div>
+        </div>
+    </noscript>
+</div>
+{% endblock %}

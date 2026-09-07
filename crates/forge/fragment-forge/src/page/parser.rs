@@ -1,16 +1,17 @@
 // crates/forge/fragment-forge/src/page/parser.rs
 
-//! Phases 4.2–4.7 — Parser Mode Page : détection d'`extends`
+//! Phases 4.2–4.7, + `import` — Parser Mode Page : détection d'`extends`
 //! (`detect_extends`), classification du sous-ensemble `Runtime` (symétrique
 //! de `parse_tokens` Mode Fragment), reconnaissance `block`/`endblock`,
-//! `static`, `extends`, et catch-all `Unsupported` fermant la grammaire.
+//! `static`, `extends`, `import`, et catch-all `Unsupported` fermant la
+//! grammaire.
 
 use crate::fragment::lexer::{RawSpan, SpanKind, scan};
 #[cfg(test)]
 use crate::fragment::parser::parse_tokens;
 use crate::fragment::token::FlatPageToken;
 use crate::page::model::{
-    PageBlockToken, PageComposeParseError, ParsedPageTemplate, StaticPartialRef,
+    ImportRef, PageBlockToken, PageComposeParseError, ParsedPageTemplate, StaticPartialRef,
 };
 use crate::page::token::PageSourceToken;
 
@@ -149,15 +150,16 @@ mod tests_phase_4_2_detect_extends {
 //     Page par construction du type `PageSourceToken::Runtime`, cf. Phase
 //     4.1) — échouait avec `PageComposeParseError::InvalidBlockSequence`.
 //     Depuis, `block`/`endblock` (Phase 4.4), `static` (Phase 4.5),
-//     `extends` (Phase 4.6) et le catch-all `Unsupported` avec l'exclusion
-//     explicite d'`include` (Phase 4.7) sont sortis de ce catch-all — voir
-//     sections dédiées ci-dessous. La grammaire des mots-clés de bloc est
-//     désormais close (Document 1 clos sur ce point).
+//     `extends` (Phase 4.6), le catch-all `Unsupported` avec l'exclusion
+//     explicite d'`include` (Phase 4.7), et `import` (session ultérieure,
+//     composition horizontale de fragments) sont sortis de ce catch-all —
+//     voir sections dédiées ci-dessous. La grammaire des mots-clés de bloc
+//     est désormais close (Document 1 clos sur ce point).
 //   - `{% block %}` / `{% endblock %}` (Phase 4.4), `{% static %}` (Phase
-//     4.5), `{% extends %}` (Phase 4.6) et le catch-all `Unsupported` /
-//     `{% include %}` (Phase 4.7) : voir sections dédiées ci-dessous, qui
-//     étendent `parse_page_block` (seule fonction modifiée à chaque fois)
-//     sans toucher à ce dispatch de tête.
+//     4.5), `{% extends %}` (Phase 4.6), le catch-all `Unsupported` /
+//     `{% include %}` (Phase 4.7), et `{% import %}` : voir sections
+//     dédiées ci-dessous, qui étendent `parse_page_block` (seule fonction
+//     modifiée à chaque fois) sans toucher à ce dispatch de tête.
 
 // =============================================================================
 // Phase 4.6 — Position d'`extends` + `ExtendsNotFirst`
@@ -215,13 +217,24 @@ mod tests_phase_4_2_detect_extends {
 /// pas d'accumulation). Un fichier sans aucun `extends` (parent) laisse ce
 /// champ à `None` sans qu'aucune erreur ne soit levée — Document 1 §3.
 ///
-/// ─── Grammaire close (Phase 4.7) ───────────────────────────────────────────
+/// ─── `import` (session ultérieure) : aucune contrainte de position ici ─────
+///
+/// Contrairement à `extends`, `{% import %}` n'a pas de position privilégiée
+/// jugée par *cette* fonction : il produit un `PageSourceToken::Import`
+/// ordinaire, poussé dans `tokens` au même titre que `Static`. Sa propre
+/// contrainte de position (top-level uniquement, jamais à l'intérieur d'un
+/// `{% block %}` ouvert) est jugée séparément, après coup, par
+/// `collect_top_level_imports` (module `importer`) — pas ici, pour la même
+/// raison que l'imbrication de blocs n'est pas jugée ici (cf. doc de
+/// `parse_page_block`).
+///
+/// ─── Grammaire close (Phase 4.7 + `import`) ────────────────────────────────
 ///
 /// Reconnaît désormais tout mot-clé de bloc : `if`/`endif`/`block`/
-/// `endblock`/`static`/`extends` chacun sous sa forme dédiée, `include`
-/// explicitement exclu (`PageComposeParseError::InvalidBlockSequence`), et
-/// tout le reste sous `PageSourceToken::Unsupported` (catch-all, voir doc de
-/// `parse_page_block`). Aucun mot-clé de tête ne peut plus atteindre un
+/// `endblock`/`static`/`extends`/`import` chacun sous sa forme dédiée,
+/// `include` explicitement exclu (`PageComposeParseError::InvalidBlockSequence`),
+/// et tout le reste sous `PageSourceToken::Unsupported` (catch-all, voir doc
+/// de `parse_page_block`). Aucun mot-clé de tête ne peut plus atteindre un
 /// chemin d'erreur générique non informatif — Document 1 clos sur ce point.
 ///
 /// ─── Invariants mémoire ─────────────────────────────────────────────────────
@@ -256,11 +269,11 @@ pub fn parse_page_tokens<'src>(
             }
 
             // `{% keyword … %}` → IfBool | EndIf | BlockOpen | BlockEnd |
-            // Static(..) | Extends(path). `parse_page_block` décide de la
-            // forme (`PageBlockOutcome`) ; seule cette fonction sait si le
-            // span de tête `{%` consommé était le tout premier du fichier,
-            // donc seule elle peut juger la position d'un `Extends` (Phase
-            // 4.6 : voir doc ci-dessus).
+            // Static(..) | Import(..) | Extends(path). `parse_page_block`
+            // décide de la forme (`PageBlockOutcome`) ; seule cette fonction
+            // sait si le span de tête `{%` consommé était le tout premier du
+            // fichier, donc seule elle peut juger la position d'un `Extends`
+            // (Phase 4.6 : voir doc ci-dessus).
             SpanKind::BlockOpen => match parse_page_block(&mut iter)? {
                 PageBlockOutcome::Extends(path) => {
                     if !head {
@@ -353,8 +366,14 @@ where
 /// dupliquerait, à l'échelle d'une seule fonction, l'état que
 /// `parse_page_tokens` maintient déjà (`is_head`) — deux sources de vérité
 /// pour une même position, un candidat naturel à la divergence.
+///
+/// `import` n'a pas ce problème : sa contrainte de position (top-level,
+/// jamais dans un bloc ouvert) n'est pas une question de tête-de-fichier —
+/// elle se juge sur l'AST complet, après coup (`collect_top_level_imports`),
+/// donc `import` transite normalement par `Token`, comme `static`.
 enum PageBlockOutcome<'src> {
-    /// Token de contenu ordinaire — `if`/`endif`/`block`/`endblock`/`static`.
+    /// Token de contenu ordinaire — `if`/`endif`/`block`/`endblock`/`static`/
+    /// `import`.
     Token(PageSourceToken<'src>),
     /// Chemin brut d'une déclaration `{% extends path %}`, syntaxiquement
     /// bien formée. La légalité de sa position est jugée par l'appelant.
@@ -365,65 +384,43 @@ enum PageBlockOutcome<'src> {
 /// correspondant. Précondition : `BlockOpen` vient d'être consommé par
 /// `parse_page_tokens`.
 ///
-/// Portée Phase 4.7 : reconnaît `if`/`endif` (Phase 4.3, logique inchangée),
-/// `block`/`endblock` (Phase 4.4, logique inchangée), `static` (Phase 4.5,
-/// logique inchangée), `extends` (Phase 4.6, logique inchangée), `include`
-/// (exclusion explicite, introduite ici) et le catch-all `Unsupported`
-/// (introduit ici) pour tout le reste. Cette fonction est désormais totale
-/// sur la grammaire lexicale des mots-clés de bloc : aucun `Ident` de tête
-/// ne peut plus atteindre un chemin d'erreur générique non informatif —
-/// Document 1 clos sur ce point (roadmap §4.7).
+/// Reconnaît tout mot-clé de bloc : `if`/`endif` (Phase 4.3, logique
+/// inchangée), `block`/`endblock` (Phase 4.4, logique inchangée), `static`
+/// (Phase 4.5, logique inchangée), `extends` (Phase 4.6, logique inchangée),
+/// `include` (exclusion explicite, Phase 4.7), `import` (session ultérieure,
+/// composition horizontale de fragments) et le catch-all `Unsupported`
+/// (Phase 4.7) pour tout le reste. Cette fonction est désormais totale sur
+/// la grammaire lexicale des mots-clés de bloc : aucun `Ident` de tête ne
+/// peut plus atteindre un chemin d'erreur générique non informatif.
 ///
 /// ─── Pourquoi le type de retour change : `PageBlockOutcome`, plus
 ///     `PageSourceToken` directement ─────────────────────────────────────────
 ///
-/// `if`/`endif`/`block`/`endblock`/`static` restent enveloppés exactement
-/// comme en Phase 4.5 (`PageSourceToken`, lui-même sous `Runtime` ou
-/// `Block`/`Static` selon le cas). `extends` seul n'a pas d'enveloppe
-/// `PageSourceToken` : ce n'est pas un token de contenu, c'est un champ de
-/// `ParsedPageTemplate` (cf. doc du type) — `PageBlockOutcome::Extends` le
-/// fait remonter à l'appelant sans le faire transiter par `PageSourceToken`,
-/// ce qui rendrait par construction impossible de le pousser par erreur
-/// dans `tokens`.
+/// `if`/`endif`/`block`/`endblock`/`static`/`import` restent enveloppés
+/// exactement comme en Phase 4.5 (`PageSourceToken`, lui-même sous `Runtime`
+/// ou `Block`/`Static`/`Import` selon le cas). `extends` seul n'a pas
+/// d'enveloppe `PageSourceToken` : ce n'est pas un token de contenu, c'est
+/// un champ de `ParsedPageTemplate` (cf. doc du type) — `PageBlockOutcome::
+/// Extends` le fait remonter à l'appelant sans le faire transiter par
+/// `PageSourceToken`, ce qui rendrait par construction impossible de le
+/// pousser par erreur dans `tokens`.
 ///
-/// ─── Invariant introduit en Phase 4.6 : zéro E/S sur `extends`,
-///     forme jugée ici, position jugée par l'appelant ─────────────────────────
+/// ─── `import` : même invariant zéro E/S que `static`/`extends` ────────────
 ///
-/// Comme `static` (Phase 4.5), la branche `extends` capture `path` tel quel
-/// — aucun appel `std::fs`, aucune vérification d'existence. Elle vérifie en
-/// revanche la forme (`Ident(path) BlockClose`, sinon `UnexpectedToken`/
-/// `UnexpectedEof`) : c'est un jugement de grammaire mono-fichier, dans le
-/// domaine de cette fonction. Ce que cette fonction ne vérifie jamais, y
-/// compris pour `extends` : la position dans le fichier — jugée exclusivement
-/// par `parse_page_tokens` via `PageComposeParseError::ExtendsNotFirst`
-/// (cf. doc de `PageBlockOutcome`).
-///
-/// ─── Invariant introduit en Phase 4.5 : zéro E/S sur `static` ────────────
-///
-/// La branche `static` capture `original_path` tel quel — aucun appel
-/// `std::fs`, aucune vérification d'existence, aucune résolution de chemin
-/// relatif. Un chemin syntaxiquement bien formé mais inexistant sur disque
-/// produit un `Ok` identique à un chemin existant : l'existence est une
-/// propriété du Linker (`PageLinkError::StaticFileNotFound`, Document 2),
-/// pas du Parser (Document 1 §5/§6). Cf. `static_path_parses_without_touching_filesystem`.
-///
-/// ─── Permissivité délibérée sur l'imbrication (Document 1 §4, §6) ─────────
-///
-/// Cette fonction ne maintient aucune pile de blocs ouverts : un
-/// `{% block %}` rencontré alors qu'un autre est déjà ouvert est accepté
-/// sans distinction — l'appariement correct et l'absence d'imbrication ne
-/// sont pas des garanties de sortie du Parser (cf. Document 1 §6). Juger
-/// l'imbrication exige un état de pile que seule la Validation (Document 2,
-/// `PageValidationError::NestedBlock`) construit ; le dupliquer ici
-/// recréerait la fusion syntaxe/sémantique que le Parser doit éviter par
-/// construction.
+/// La branche `import` capture `original_path` tel quel — aucun appel
+/// `std::fs`, aucune vérification d'existence, aucune récursion. Un chemin
+/// syntaxiquement bien formé mais inexistant, cyclique, ou trop profond
+/// produit un `Ok` identique à un chemin valide : c'est l'orchestrateur
+/// (`build/template/page.rs`) qui résout, lit, développe récursivement et
+/// borne la profondeur — jamais ce Parser (Document Import §2).
 fn parse_page_block<'src, I>(iter: &mut I) -> Result<PageBlockOutcome<'src>, PageComposeParseError>
 where
     I: Iterator<Item = RawSpan<'src>>,
 {
     let keyword = expect_ident_page(
         iter,
-        "keyword (if | endif | block | endblock | static | extends | asset | script | endscript)",
+        "keyword (if | endif | block | endblock | static | extends | import | asset | script \
+         | endscript)",
     )?;
 
     match keyword {
@@ -476,6 +473,27 @@ where
             expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
             Ok(PageBlockOutcome::Extends(path))
         }
+        // `{% import path %}` (session ultérieure, composition horizontale
+        // de fragments) : capture brute, zéro E/S, même convention non-
+        // quotée que `static`/`extends`. Contrairement à `static` (contenu
+        // opaque, jamais reparsé), le fragment ciblé sera intégralement
+        // reparsé par l'orchestrateur et ses propres tokens remplaceront
+        // positionnellement ce marqueur — mais cette fonction n'en sait
+        // rien : la résolution, la lecture, l'expansion récursive et la
+        // borne de profondeur sont une responsabilité exclusive de
+        // `build/template/page.rs`, jamais de ce Parser. La contrainte de
+        // position (top-level uniquement) n'est pas non plus jugée ici —
+        // même permissivité délibérée que pour l'imbrication de `{% block %}`
+        // (cf. doc de tête) : c'est `collect_top_level_imports` (module
+        // `importer`) qui la vérifie, séparément, une fois l'AST complet
+        // construit.
+        "import" => {
+            let original_path = expect_ident_page(iter, "Ident(path)")?;
+            expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+            Ok(PageBlockOutcome::Token(PageSourceToken::Import(
+                ImportRef { original_path },
+            )))
+        }
         // `{% include path %}` (Phase 4.7) : exclusion explicite du catch-all
         // `Unsupported` ci-dessous — roadmap §4.7 exige `∉ {if, endif,
         // include, extends, block, endblock, static}` pour la branche
@@ -489,12 +507,13 @@ where
         // (Document 2) la charge de distinguer, au sein d'un même verdict
         // « non supporté », un mot-clé simplement pas encore implémenté
         // (`for`) d'un mot-clé délibérément interdit dans ce mode
-        // (`include`, qui a un équivalent : `static`) — une confusion que
-        // Document 1 §0 proscrit explicitement (fusion syntaxe/sémantique).
-        // Bras explicite plutôt que laissé retomber dans le catch-all : sans
-        // lui, `include` migrerait silencieusement vers `Unsupported` dès
-        // que le catch-all serait ajouté — un effet de bord de ce diff, pas
-        // une décision prise consciemment.
+        // (`include`, qui a désormais deux équivalents : `static` et
+        // `import`) — une confusion que Document 1 §0 proscrit
+        // explicitement (fusion syntaxe/sémantique). Bras explicite plutôt
+        // que laissé retomber dans le catch-all : sans lui, `include`
+        // migrerait silencieusement vers `Unsupported` dès que le catch-all
+        // serait ajouté — un effet de bord de ce diff, pas une décision
+        // prise consciemment.
         "include" => Err(PageComposeParseError::InvalidBlockSequence),
         // `{% asset key %}` (spec `marius-assets-specification.md` §9) :
         // à la différence d'`include` (Mode Fragment exclusif, cf. bras
@@ -893,5 +912,51 @@ mod tests_phase_4_7_unsupported_catch_all {
                 other => panic!("mot-clé {keyword:?} : attendu Unsupported, obtenu {other:?}"),
             }
         }
+    }
+}
+
+// =============================================================================
+// Tests — `import`
+// =============================================================================
+
+#[cfg(test)]
+mod tests_import_keyword {
+    use super::{FlatPageToken, ImportRef, PageSourceToken, parse_page_tokens, scan};
+
+    /// Jalon Vert — un chemin syntaxiquement valide mais absent du disque
+    /// est accepté : comme `static`/`extends`, cette fonction ne fait
+    /// aucune E/S, donc l'existence réelle du fichier n'a aucune incidence
+    /// sur le résultat.
+    #[test]
+    fn import_path_parses_without_touching_filesystem() {
+        let src = "before{% import this/path/does/not/exist.marius %}after";
+
+        let actual = parse_page_tokens(scan(src))
+            .expect("parse_page_tokens doit réussir sans vérifier l'existence du fichier");
+
+        assert_eq!(
+            actual.tokens,
+            vec![
+                PageSourceToken::Runtime(FlatPageToken::Static("before")),
+                PageSourceToken::Import(ImportRef {
+                    original_path: "this/path/does/not/exist.marius",
+                }),
+                PageSourceToken::Runtime(FlatPageToken::Static("after")),
+            ]
+        );
+    }
+
+    /// Jalon Vert — un `{% import %}` à l'intérieur d'un `{% block %}`
+    /// ouvert n'est PAS rejeté par ce Parser : sa contrainte de position
+    /// est jugée séparément par `collect_top_level_imports`, pas ici — même
+    /// permissivité délibérée que pour l'imbrication de `{% block %}`.
+    #[test]
+    fn import_inside_block_still_parses_position_judged_elsewhere() {
+        let src = "{% block main_head %}{% import head.marius %}{% endblock %}";
+
+        let actual = parse_page_tokens(scan(src))
+            .expect("le Parser ne juge pas la position d'un import, seulement sa forme");
+
+        assert_eq!(actual.tokens.len(), 3);
     }
 }

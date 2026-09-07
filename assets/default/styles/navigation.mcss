@@ -1,6 +1,11 @@
+/* ==========================================================================
+   NAVIGATION PIPELINE
+   Paradigme : Déclaratif, Zéro-JS, Native State Machine (Popover API)
+   ========================================================================== */
+
 .nav {
   position: relative;
-  /* @note Permet de passer au-dessus du pseudo élément de body (ce dernier faisant un effet d'ombrage sur le contenu en version mobile) et aussi de certains éléments définis par des sources externes (comme les Maps Leaflet). */
+  /* [LAYOUT] : Assure l'empilement au-dessus des contextes locaux générés par des librairies tierces (ex: Leaflet). */
   z-index: 2000;
   display: grid;
   user-select: none;
@@ -65,7 +70,7 @@
     transparent 5px,
     hsla(0, 100%, 0%, 0.25) 5px,
     hsla(0, 100%, 0%, 0.25) 10px
-  ); /* @note Hachures non scalables. */
+  );
 }
 
 .offline .logo-nav {
@@ -78,20 +83,35 @@
   }
 }
 
+/* --------------------------------------------------------------------------
+   [STATE MACHINE] : .sub-nav
+   Délégation de l'état ouvert/fermé au moteur C++ via l'attribut HTML 'popover'.
+   Le CSS agit uniquement comme une fonction pure : Etat(C++) -> Rendu(GPU).
+   -------------------------------------------------------------------------- */
 .sub-nav {
-  grid-area: subnav;
-  box-shadow: 0.5rem 0.5rem 0.5rem var(--colorAB2);
-  display: flex;
-  width: 100%;
+  /* [RESET DÉTERMINISTE] : On écrase sélectivement les styles UA du popover 
+     sans utiliser 'all: unset;' pour préserver le 'display: none' critique au culling. */
+  border: none;
   margin: 0;
   padding: 0;
+  background-color: transparent;
+
+  grid-area: subnav;
+  box-shadow: 0.5rem 0.5rem 0.5rem var(--colorAB2);
+  width: 100%;
+
+  @media ($from-nav) {
+    /* [DESKTOP OVERRIDE] : Écrase le comportement popover sur grand écran.
+       L'élément réintègre le flux Grid ('static' annule le 'fixed' UA). */
+    display: flex;
+    position: static;
+  }
 
   & .current {
     background-color: var(--color2);
 
     @media ($from-nav) {
       position: relative;
-      /* @note La valeur doit être suffisante pour passer au-dessus des items de ".breadcrumb." */
       z-index: 10;
 
       &::after {
@@ -114,37 +134,69 @@
   }
 
   @media ($to-nav) {
-    position: absolute;
-    z-index: 800;
+    /* [TOP-LAYER ANCHORING] : Repositionnement explicite dans le viewport (Mobile). */
+    position: fixed;
     top: 3em;
     left: 0;
     width: 100vw;
     flex-wrap: wrap;
-    transform: translateX(-110vw);
+    
+    /* [SYNCHRONISATION PIPELINE] : 'allow-discrete' retarde l'application de 
+       'display: none' par le C++ jusqu'à l'exécution complète de la plus longue
+       transition enfant (Delay 0.6s + Duration 0.4s = 1s max). */
+    transition: display 1s allow-discrete, overlay 1s allow-discrete;
+
+    &:popover-open {
+      /* Modification isolée du modèle de boîte, conditionnée à l'état actif. */
+      display: flex;
+    }
+
+    /* [GPU ACCELERATION] : Le ::backdrop natif remplace la mutation du DOM 
+       (anciennement body.active::before). Le filtrage est déporté sur le thread GPU. */
+    &::backdrop {
+      background-color: var(--colorAB7);
+      backdrop-filter: blur(2px) grayscale(1);
+      opacity: 0;
+      transition: opacity 0.4s, display 1s allow-discrete, overlay 1s allow-discrete;
+    }
+
+    &:popover-open::backdrop {
+      opacity: 1;
+    }
+
+    @starting-style {
+      &:popover-open::backdrop {
+        opacity: 0;
+      }
+    }
   }
 
   & li {
     list-style: none;
+    
     @media ($to-nav) {
       flex: 1;
       flex-basis: 50%;
       background-color: var(--colorG15);
-      /* transform: rotate(90deg); */
-      /* @todo En test pour les performances. */
-      transform: rotate(90deg) translateZ(0);
+      
+      /* [TRANSFORM FLATTENING] : Application des matrices de transformation 
+         uniquement sur les nœuds feuilles. Évite au compositeur de calculer 
+         des matrices combinées (Parent * Enfant) à chaque frame. */
+      transform: translateX(-110vw) rotate(90deg) translateZ(0);
 
       @media (prefers-reduced-motion: no-preference) {
         transition: transform 0.4s ease-in-out;
       }
 
-      .active & {
-        /* @note L'utilisation des pourcentages provoque un effet de bord avec overflow:clip sur le body ; à éviter. Valeur au-delà de 100vw afin de cacher les ombres des boîtes. */
-        transform: translateX(110vw) rotate(0deg);
-      }
       @for $i from 1 to 12 {
         &:nth-child($i) {
           transition-delay: calc($i * 0.05s);
         }
+      }
+
+      /* Sélecteur descendant basé sur l'état parent (C++ géré) */
+      .sub-nav:popover-open & {
+        transform: translateX(0) rotate(0deg) translateZ(0);
       }
     }
 
@@ -178,13 +230,10 @@
 
   & a {
     overflow: hidden;
-    /* white-space: nowrap; */
     text-overflow: ellipsis;
-    /* color: var(--colorT2); */
     text-decoration: none;
 
     &:where(:focus, :hover, .active) {
-      /* color: var(--colorW); */
       background-color: var(--color2);
 
       & svg {
@@ -194,24 +243,12 @@
   }
 }
 
-@media ($to-nav) {
-  :where(html, body).active {
-    overflow: clip;
-  }
-
-  body.active {
-    &::before {
-      content: "";
-      position: absolute;
-      z-index: 1;
-      inset: 0;
-      background-color: var(--colorAB7);
-    }
-
-    & :where(main, footer, aside) {
-      user-select: none;
-      pointer-events: none;
-      filter: blur(2px) grayscale(1);
+/* [DATA LAYOUT INITIALIZATION] : Injection de la "Frame 0" dans le pipeline
+   de rendu lors de la promotion du composant depuis 'display: none'. */
+@starting-style {
+  @media ($to-nav) {
+    .sub-nav:popover-open li {
+      transform: translateX(-110vw) rotate(90deg) translateZ(0);
     }
   }
 }
@@ -224,6 +261,11 @@
   }
 }
 
+/* --------------------------------------------------------------------------
+   [UI CONTROLLER] : .cmd-nav
+   Le déclencheur ne stocke aucun état. Son apparence est purement dérivée 
+   de l'état de la cible via la pseudo-classe relationnelle :has().
+   -------------------------------------------------------------------------- */
 .cmd-nav {
   all: unset;
   grid-area: cmd;
@@ -242,11 +284,12 @@
       transform-origin: center;
       fill: var(--colorT);
       @media (prefers-reduced-motion: no-preference) {
-        transition: all 0.2s cubic-bezier(0.55, -0.65, 0, 2.32); /* ease-in-out */
+        transition: all 0.2s cubic-bezier(0.55, -0.65, 0, 2.32);
       }
     }
 
-    &:not(:focus-visible, :hover, [aria-expanded="true"]) {
+    /* Évaluation réactive : S'applique SI le sibling #sub-nav n'est PAS ouvert. */
+    &:not(:focus-visible, :hover):not(:has(~ #sub-nav:popover-open)) {
       & svg {
         border-radius: 50%;
         background-color: var(--color2);
@@ -262,7 +305,8 @@
       background-color: var(--color2);
     }
 
-    &[aria-expanded="true"] svg {
+    /* Évaluation réactive : S'applique SI le sibling #sub-nav EST ouvert. */
+    &:has(~ #sub-nav:popover-open) svg {
       & :nth-child(1) {
         y: 47px;
         transform: rotate(45deg);
@@ -277,5 +321,12 @@
         transform: rotate(-45deg);
       }
     }
+  }
+}
+
+/* [VIEWPORT LOCK] : Couplage fort entre le scroll root et la machine d'état. */
+@media ($to-nav) {
+  body:has(#sub-nav:popover-open) {
+    overflow: clip;
   }
 }

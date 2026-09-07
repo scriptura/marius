@@ -1,5 +1,8 @@
 {% extends templates/base.marius %}
 
+{% block head_description %}OFFLINE{% endblock %}
+{% block head_title %}OFFLINE{% endblock %}
+
 {% block main_content %}<article class="content-core">
     <header role="banner">
         <h1 class="main-heading">Problème réseau <span>.&nbsp;Page offline</span></h1>

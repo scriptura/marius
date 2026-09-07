@@ -17,11 +17,6 @@ entries = ["styles/main.mcss", "styles/print.mcss"]
 root = "libraries/deckgl"
 module = false
 
-[scripts.capabilities.navigation]
-entry = "scripts/navigation.js"
-markers = [".cmd-nav"]
-activation = "initNavigation"
-
 [scripts.capabilities.scroll-to-top]
 entry = "scripts/scroll-to-top.js"
 markers = [".footer"]
