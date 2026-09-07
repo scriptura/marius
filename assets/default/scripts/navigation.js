@@ -19,6 +19,10 @@ export const initNavigation = () => {
 	const subNav = document.querySelector(".sub-nav");
 	if (!btn || !subNav) return false;
 
+	btn.removeAttribute("popovertarget");
+	btn.removeAttribute("popovertargetaction");
+	subNav.removeAttribute("popover");
+
 	const html = document.documentElement;
 	const body = document.body;
 	const contentNode = document.getElementById("main-content");

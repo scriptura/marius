@@ -79,12 +79,23 @@
 }
 
 .sub-nav {
+  /* Reset en raison de popover */
+  position: relative;
+  border: none;
+  margin: 0;
+  padding: 0;
+  background-color: transparent;
+
   grid-area: subnav;
   box-shadow: 0.5rem 0.5rem 0.5rem var(--colorAB2);
   display: flex;
   width: 100%;
   margin: 0;
   padding: 0;
+
+  &:popover-open {
+    position: absolute;
+  }
 
   & .current {
     background-color: var(--color2);
@@ -228,7 +239,7 @@
   all: unset;
   grid-area: cmd;
 
-  @media (scripting: none), ($from-nav) {
+  @media ($from-nav) { /* Par défaut le bouton est géré par le navigateur avec l'attribut popover, donc on garde le bouton, plus besoin de (scripting: none) */
     display: none;
   }
 

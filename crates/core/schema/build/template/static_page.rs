@@ -32,9 +32,7 @@ use crate::capabilities::CapabilityInfo;
 use crate::manifest::AssetEntry;
 use crate::modules_lowering::{lower_modules_for_template, render_modules_as_static_html};
 use crate::template::common::{read_template_file, split_static_at_marker};
-use crate::template::page::{
-    MAX_EXTENDS_DEPTH, MAX_IMPORT_DEPTH, discover_imports, render_chain, splice_all_imports,
-};
+use crate::template::page::{MAX_EXTENDS_DEPTH, discover_imports, render_chain, splice_all_imports};
 use crate::{MODULES_PLACEHOLDER, SCRIPTS_PLACEHOLDER};
 
 /// Pages sans donnée dynamique : `(schema, table)`, résolues par
