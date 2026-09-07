@@ -3,6 +3,19 @@
 //! Phase 1.2 — Scanner lexical isolé : `&'src str` → sous-slices `RawSpan`.
 //! Zéro allocation heap, zéro sémantique résolue (pas de distinction
 //! keyword vs ident, pas de lookup de schéma).
+//!
+//! Phase 1.2bis — `{# … #}` : avalé en interne par `Mode::Literal`, sans
+//! jamais émettre de span pour le contenu commenté (voir
+//! `HANDOFF-commentaires-marius.md` §3, option b). Décisions figées :
+//! disponible dans les deux modes (Fragment/Page — le scanner reste
+//! agnostique, aucun paramètre `ScanMode` introduit) ; pas d'imbrication
+//! (fermeture à la première occurrence de `#}`) ; reconnu uniquement en
+//! `Mode::Literal`, jamais à l'intérieur d'un `{{ }}`/`{% %}` déjà ouvert.
+//! Un `{#` non fermé jusqu'à la fin de `src` produit un span sentinelle
+//! `SpanKind::UnterminatedComment` (seul et unique span émis dans ce cas),
+//! qui retombe automatiquement dans la branche catch-all déjà existante de
+//! `parse_tokens`/`parse_page_tokens` (`PageParseError::UnexpectedToken`) —
+//! zéro modification requise dans l'un ou l'autre parseur.
 
 // =============================================================================
 // Phase 1.2 — Scanner Lexical Isolé
@@ -19,21 +32,32 @@
 //     → Garanti en InBlock sous l'hypothèse ASCII (keywords, paths, identifiants SQL).
 //       Un byte non-ASCII en InBlock interrompt le token ; Phase 1.4 remonte l'erreur.
 //   - Aucune sémantique résolue ici : pas de distinction keyword vs ident, pas de lookup.
+//   - L'avalage de `{# … #}` (Mode::Literal uniquement) repose sur les mêmes
+//     garanties : `{#` et `#}` sont des motifs ASCII cherchés via `str::find`,
+//     qui ne retourne que des offsets sur frontière char valide.
 
 /// Catégorie syntaxique brute d'un span issu du scanner.
 ///
 /// `Punct` est émis uniquement en mode `InExpr` pour le séparateur `.`.
 /// En mode `InBlock`, `entity.field` est émis en un seul `Ident` — Phase 1.3
 /// se charge de la découpe sur `.`.
+///
+/// `UnterminatedComment` est le seul span jamais émis pour un `{# … #}` :
+/// un commentaire bien formé n'émet strictement aucun span (option b,
+/// voir doc de tête du module) ; ce variant ne sert qu'à faire remonter,
+/// via le canal d'erreur déjà existant du parseur (branche catch-all sur
+/// `SpanKind` inconnu), le cas d'un `{#` ouvert jamais refermé avant la
+/// fin de `src`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpanKind {
-    Literal,    // Texte HTML verbatim hors délimiteurs
-    ExprOpen,   // `{{`
-    ExprClose,  // `}}`
-    BlockOpen,  // `{%`
-    BlockClose, // `%}`
-    Ident,      // Identifiant (entity, field, keyword, chemin de fichier)
-    Punct,      // `.` — séparateur entity.field dans {{ … }} uniquement
+    Literal,             // Texte HTML verbatim hors délimiteurs
+    ExprOpen,            // `{{`
+    ExprClose,           // `}}`
+    BlockOpen,           // `{%`
+    BlockClose,          // `%}`
+    Ident,               // Identifiant (entity, field, keyword, chemin de fichier)
+    Punct,               // `.` — séparateur entity.field dans {{ … }} uniquement
+    UnterminatedComment, // `{#` ouvert, jamais refermé avant la fin de `src`
 }
 
 /// Sous-slice typée pointant directement dans la source brute du template.
@@ -98,18 +122,18 @@ impl<'src> Iterator for Scanner<'src> {
 
         match self.mode {
             // ─── Literal ───────────────────────────────────────────────────
-            // Cherche le prochain `{{` ou `{%`.
+            // Cherche le prochain `{{`, `{%` ou `{#`.
             // Émet le Literal précédant le délimiteur, puis le délimiteur lui-même
-            // (en deux appels distincts — pas de buffer intermédiaire).
+            // (en deux appels distincts — pas de buffer intermédiaire) — sauf pour
+            // `{#`, qui n'émet jamais de délimiteur : voir bloc dédié ci-dessous.
             Mode::Literal => {
                 let rest = &src[self.pos..];
 
                 // `str::find` retourne des offsets sur des frontières char valides.
-                let rel = match (rest.find("{{"), rest.find("{%")) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (Some(a), None) | (None, Some(a)) => Some(a),
-                    (None, None) => None,
-                };
+                let rel = [rest.find("{{"), rest.find("{%"), rest.find("{#")]
+                    .into_iter()
+                    .flatten()
+                    .min();
 
                 match rel {
                     // Pas de délimiteur : le reste est un unique Literal.
@@ -121,7 +145,8 @@ impl<'src> Iterator for Scanner<'src> {
                         self.pos = src.len();
                         Some(span)
                     }
-                    // Délimiteur immédiat : l'émettre et basculer de mode.
+                    // Délimiteur immédiat : l'émettre (ou l'avaler, pour `{#`)
+                    // et basculer de mode en conséquence.
                     Some(0) => {
                         let p = self.pos;
                         if src[p..].starts_with("{{") {
@@ -131,19 +156,52 @@ impl<'src> Iterator for Scanner<'src> {
                                 slice: &src[p..p + 2],
                                 kind: SpanKind::ExprOpen,
                             })
-                        } else {
-                            // starts_with("{%") — seule autre option possible
+                        } else if src[p..].starts_with("{%") {
                             self.mode = Mode::InBlock;
                             self.pos = p + 2;
                             Some(RawSpan {
                                 slice: &src[p..p + 2],
                                 kind: SpanKind::BlockOpen,
                             })
+                        } else {
+                            // starts_with("{#") — seule autre option possible.
+                            //
+                            // Option (b) du HANDOFF : le mode public ne change
+                            // jamais (on reste en Mode::Literal), et aucun span
+                            // n'est émis pour le contenu commenté. Recherche de
+                            // `#}` à partir de `p + 2` (juste après `{#`) —
+                            // première occurrence trouvée = fermeture, pas
+                            // d'imbrication (Décision 2 du HANDOFF).
+                            debug_assert!(src[p..].starts_with("{#"));
+                            let after_open = p + 2;
+                            match src[after_open..].find("#}") {
+                                Some(close_rel) => {
+                                    let close_start = after_open + close_rel;
+                                    self.pos = close_start + 2;
+                                    // Zéro span pour le commentaire : on reprend
+                                    // directement la recherche Literal normale.
+                                    self.next()
+                                }
+                                None => {
+                                    // `{#` jamais refermé avant la fin de `src` :
+                                    // seul et unique span émis pour ce commentaire,
+                                    // volontairement — fait remonter une erreur
+                                    // nommée via la branche catch-all déjà
+                                    // existante des parseurs (§4 du HANDOFF).
+                                    let span = RawSpan {
+                                        slice: &src[p..],
+                                        kind: SpanKind::UnterminatedComment,
+                                    };
+                                    self.pos = src.len();
+                                    Some(span)
+                                }
+                            }
                         }
                     }
-                    // Literal précède le délimiteur.
+                    // Literal précède le délimiteur (quel qu'il soit).
                     // On émet le Literal et on reste en mode Literal :
-                    // le délimiteur sera émis au prochain appel.
+                    // le délimiteur (ou l'avalage `{# #}`) sera traité au
+                    // prochain appel, une fois `pos` positionné dessus.
                     Some(rel) => {
                         let end = self.pos + rel;
                         let span = RawSpan {
@@ -356,5 +414,87 @@ mod tests_phase_1_2 {
             SpanKind::ExprOpen,
             "le premier span doit être ExprOpen, pas un Literal vide"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Phase 1.2bis — `{# … #}`
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Un commentaire simple, encadré de Literal des deux côtés, n'émet
+    /// strictement aucun span — seuls les deux Literal voisins survivent.
+    #[test]
+    fn scan_comment_swallowed_zero_span() {
+        let src = "a{# hidden #}b";
+        let got: Vec<_> = scan(src).collect();
+        assert_eq!(got, [s("a", SpanKind::Literal), s("b", SpanKind::Literal)]);
+    }
+
+    /// Un commentaire en tête de source (aucun Literal avant) n'émet aucun
+    /// span non plus — le premier span produit est celui qui suit `#}`.
+    #[test]
+    fn scan_comment_at_start_no_leading_empty_literal() {
+        let src = "{# note #}rest";
+        let got: Vec<_> = scan(src).collect();
+        assert_eq!(got, [s("rest", SpanKind::Literal)]);
+    }
+
+    /// Le piège documenté (HANDOFF §5.3, ADR §4.5ter à venir) : un `{% import %}`
+    /// placé à l'intérieur d'un `{# #}` est totalement neutralisé — aucun
+    /// BlockOpen / Ident / BlockClose ne fuite dans le flux de spans.
+    #[test]
+    fn scan_comment_neutralizes_embedded_directive() {
+        let src = "{# {% import foo.marius %} #}rest";
+        let got: Vec<_> = scan(src).collect();
+        assert_eq!(
+            got,
+            [s("rest", SpanKind::Literal)],
+            "aucune trace de la directive {{% import %}} interne ne doit fuiter"
+        );
+    }
+
+    /// Absence d'imbrication (Décision 2 du HANDOFF) : le commentaire se
+    /// ferme à la **première** occurrence de `#}`, même si un `{#` interne
+    /// est rencontré avant. Le texte qui suit cette première fermeture
+    /// redevient du Literal ordinaire, y compris s'il contient un `#}`
+    /// résiduel qui n'a plus rien à fermer.
+    #[test]
+    fn scan_comment_no_nesting_closes_on_first_close_marker() {
+        let src = "{# outer {# inner #} still-open";
+        let got: Vec<_> = scan(src).collect();
+        assert_eq!(got, [s(" still-open", SpanKind::Literal)]);
+    }
+
+    /// `{#` jamais refermé avant la fin de `src` : seul span émis pour ce
+    /// commentaire est la sentinelle `UnterminatedComment`, portant tout le
+    /// reste de la source à partir du `{#` ouvrant (pour contexte d'erreur).
+    #[test]
+    fn scan_comment_unterminated_emits_sentinel() {
+        let src = "before {# never closed";
+        let got: Vec<_> = scan(src).collect();
+        assert_eq!(
+            got,
+            [
+                s("before ", SpanKind::Literal),
+                s("{# never closed", SpanKind::UnterminatedComment),
+            ]
+        );
+    }
+
+    /// Un commentaire vide (`{##}`, aucun caractère entre les délimiteurs)
+    /// est un cas limite valide : zéro span, comme tout autre commentaire.
+    #[test]
+    fn scan_comment_empty_content() {
+        let src = "x{##}y";
+        let got: Vec<_> = scan(src).collect();
+        assert_eq!(got, [s("x", SpanKind::Literal), s("y", SpanKind::Literal)]);
+    }
+
+    /// Plusieurs commentaires consécutifs, chacun neutralisé indépendamment,
+    /// sans qu'aucun span ne fuite entre eux.
+    #[test]
+    fn scan_multiple_consecutive_comments() {
+        let src = "{#one#}{#two#}mid{#three#}";
+        let got: Vec<_> = scan(src).collect();
+        assert_eq!(got, [s("mid", SpanKind::Literal)]);
     }
 }

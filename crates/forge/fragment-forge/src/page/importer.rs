@@ -170,7 +170,9 @@ mod tests_collect_top_level_imports {
                 original_path: "head.marius",
             }),
             PageSourceToken::Block(PageBlockToken::BlockEnd),
-            PageSourceToken::Block(PageBlockToken::BlockOpen { name: "main_footer" }),
+            PageSourceToken::Block(PageBlockToken::BlockOpen {
+                name: "main_footer",
+            }),
             PageSourceToken::Import(ImportRef {
                 original_path: "footer.marius",
             }),

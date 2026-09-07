@@ -20,8 +20,8 @@ pub use linker::{BlockSubstitution, LinkPlan, collect_static_refs, link, link_ch
 pub use lowering::lower;
 pub use model::{
     ChildTemplateSpec, ImportRef, NamedBlockRange, PageArena, PageBlockToken,
-    PageComposeParseError, PageImportError, PageLinkError, PageValidationError,
-    ParsedPageTemplate, StaticPartialRef, TemplateId,
+    PageComposeParseError, PageImportError, PageLinkError, PageValidationError, ParsedPageTemplate,
+    StaticPartialRef, TemplateId,
 };
 pub use parser::{detect_extends, parse_page_tokens};
 pub use token::PageSourceToken;

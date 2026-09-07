@@ -23,8 +23,7 @@ use marius_fragment_forge::{
     AssetLookup, FlatPageToken, NamedBlockRange, PageArena, PageLinkError, ParsedPageTemplate,
     SchemaIndex, TemplateId, collect_blocks, collect_static_refs, detect_extends,
     extract_static_marker_facts, hoist_and_dedupe_scripts, link_chain, lower, parse_page_tokens,
-    relative_path_for_include_str, resolve_and_measure, scan, splice_hoisted_scripts,
-    validate_ast,
+    relative_path_for_include_str, resolve_and_measure, scan, splice_hoisted_scripts, validate_ast,
 };
 
 use crate::asset_lookup::resolve_asset_lookup;
@@ -32,7 +31,9 @@ use crate::capabilities::CapabilityInfo;
 use crate::manifest::AssetEntry;
 use crate::modules_lowering::{lower_modules_for_template, render_modules_as_static_html};
 use crate::template::common::{read_template_file, split_static_at_marker};
-use crate::template::page::{MAX_EXTENDS_DEPTH, discover_imports, render_chain, splice_all_imports};
+use crate::template::page::{
+    MAX_EXTENDS_DEPTH, discover_imports, render_chain, splice_all_imports,
+};
 use crate::{MODULES_PLACEHOLDER, SCRIPTS_PLACEHOLDER};
 
 /// Pages sans donnée dynamique : `(schema, table)`, résolues par
@@ -234,7 +235,10 @@ pub(crate) fn resolve_static_page(
             return Err(());
         }
 
-        let path = PathBuf::from(relative_path_for_include_str(manifest_dir, &current_extends));
+        let path = PathBuf::from(relative_path_for_include_str(
+            manifest_dir,
+            &current_extends,
+        ));
 
         if visited_paths.contains(&path) {
             println!(
@@ -340,8 +344,7 @@ pub(crate) fn resolve_static_page(
         &visited_paths[idx]
     };
 
-    let mut chain_blocks_owned: Vec<Vec<NamedBlockRange<'_>>> =
-        Vec::with_capacity(chain_ids.len());
+    let mut chain_blocks_owned: Vec<Vec<NamedBlockRange<'_>>> = Vec::with_capacity(chain_ids.len());
     for &id in &chain_ids {
         let blocks = collect_blocks(id, &arena.get(id).tokens).map_err(|errors| {
             println!(

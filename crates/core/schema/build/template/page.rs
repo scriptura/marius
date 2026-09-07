@@ -385,7 +385,10 @@ pub(crate) fn resolve_page_template<'src>(
             return Err(());
         }
 
-        let path = PathBuf::from(relative_path_for_include_str(manifest_dir, &current_extends));
+        let path = PathBuf::from(relative_path_for_include_str(
+            manifest_dir,
+            &current_extends,
+        ));
 
         if visited_paths.contains(&path) {
             println!(
@@ -519,8 +522,7 @@ pub(crate) fn resolve_page_template<'src>(
 
     // Collecte de blocs — un ensemble par maillon, dans l'ordre
     // feuille → Root (même ordre que `chain_ids`/`visited_paths`).
-    let mut chain_blocks_owned: Vec<Vec<NamedBlockRange<'_>>> =
-        Vec::with_capacity(chain_ids.len());
+    let mut chain_blocks_owned: Vec<Vec<NamedBlockRange<'_>>> = Vec::with_capacity(chain_ids.len());
     for &id in &chain_ids {
         let blocks = collect_blocks(id, &arena.get(id).tokens).map_err(|errors| {
             println!(
