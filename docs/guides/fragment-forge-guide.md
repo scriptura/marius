@@ -14,7 +14,7 @@
 
 **Hors périmètre de ce document** : ce guide couvre la compilation `.marius` → `render()`/HTML statique. Il ne couvre pas ce qui se passe *après* — comment `render()` est invoqué, à quelle fréquence, ni ce qui invalide le HTML déjà servi. Un `.marius` correct est une condition nécessaire, jamais suffisante, pour qu'un changement atteigne le navigateur (voir `guide-cycle-de-vie-runtime.md`).
 
-**Ce qui reste explicitement non couvert par la grammaire aujourd'hui**, développé en Partie 2 : l'imbrication de `{% block %}` (voir `HANDOFF-mode-page-blocs-imbriques.md` pour l'état de réflexion sur une extension future) et les commentaires `.marius` (aucune syntaxe de commentaire n'existe — voir §4.5ter).
+**Ce qui reste explicitement non couvert par la grammaire aujourd'hui**, développé en Partie 2 : l'imbrication de `{% block %}` (voir `HANDOFF-mode-page-blocs-imbriques.md` pour l'état de réflexion sur une extension future). Les commentaires `.marius` (`{# … #}`) sont, eux, couverts — voir §4.5ter.
 
 ---
 
@@ -58,8 +58,9 @@ Le modèle actuel fait dicter la structure par PostgreSQL. Le template ne fait q
 | `{% if entity.field %} … {% endif %}` | Inclusion conditionnelle | `if record.{field} != 0 { … }` |
 | `{% include chemin %}` | Inclusion d'un fragment statique résolu au build | `buf.push_str(include_str!(...))` |
 | texte brut | HTML verbatim | `buf.push_str("...")` |
+| `{# … #}` | Commentaire — avalé par le scanner | rien : zéro span, zéro code généré (§4.5ter) |
 
-Trois constructions, pas plus. Tout le reste est une erreur de compilation.
+Trois constructions qui produisent effectivement quelque chose au build, plus un quatrième mécanisme — le commentaire — qui par définition n'en produit aucun. Tout le reste est une erreur de compilation. `{# … #}` n'est pas spécifique au mode fragment : la même syntaxe fonctionne à l'identique en mode page (Partie 2), le scanner qui la reconnaît étant partagé par construction entre les deux modes.
 
 **Piège de syntaxe, vérifié contre le scanner** : un chemin (`include`, et en Partie 2 `extends`/`static`/`import`) s'écrit **sans guillemets** — `{% include templates/partials/nav.html %}`, jamais `{% include "templates/partials/nav.html" %}`. Le scanner ne connaît aucun token de littéral de chaîne : il découpe tout contenu de bloc en séquences contiguës non-blanc. Des guillemets écrits par réflexe Jinja ne provoquent **pas** une erreur de syntaxe immédiate — ils sont capturés tels quels comme partie du chemin, et l'échec n'apparaît qu'en aval, au moment de la résolution du fichier, avec un chemin visiblement corrompu par les guillemets dans le message — un symptôme trompeur si vous ne savez pas d'où il vient.
 
@@ -336,19 +337,29 @@ Une fois `{% import templates/head.marius %}` développé, `head_title`/`head_de
 - **Aucune déduplication.** Contrairement à `{% static %}`, deux occurrences de `{% import same.marius %}` produisent deux expansions indépendantes, chacune pouvant contenir ses propres blocs.
 - **Traçabilité partielle des erreurs.** `OrphanBlock`/erreurs de linking pointant vers du contenu importé désignent le fichier du maillon `extends` qui a fait l'import, pas le fragment importé lui-même — un bloc orphelin déclaré dans `head.marius` sera rapporté comme déclaré dans `base.marius` si c'est `base.marius` qui l'importe. Limite connue, pas un bug.
 
-### 4.5ter Absence de syntaxe de commentaire — piège à connaître
+### 4.5ter Commentaires `.marius` — syntaxe `{# … #}`, et le piège HTML qui subsiste
 
-Il n'existe **aucune** construction `.marius` pour commenter du code hors production. En particulier, un commentaire HTML **n'est pas un commentaire pour le compilateur** :
+**Syntaxe** : `{# contenu quelconque #}`. Le scanner avale tout le bloc en interne — aucun span n'est produit pour son contenu, donc aucune trace, ni dans le HTML compilé ni dans l'AST intermédiaire. C'est la façon correcte de désactiver temporairement une ligne (un `{% import %}`, un `{% static %}`, un `{% block %}`…) pendant une itération, sans la retirer du fichier.
+
+Trois règles gouvernent son comportement :
+
+- **Disponible dans les deux modes**, fragment et page, sans distinction — le scanner qui le reconnaît est partagé par construction entre les deux.
+- **Pas d'imbrication.** Un commentaire se ferme à la **première** occurrence de `#}` rencontrée, point. Cohérent avec le modèle HTML (`<!-- -->` ne s'imbrique pas non plus). Piège à connaître : commenter une région qui contient déjà un `{# #}` tronque le commentaire plus tôt que prévu — la suite redevient du HTML actif, pas du commentaire.
+- **Reconnu uniquement hors de `{{ }}`/`{% %}`.** `{#` n'est cherché que dans le flux HTML de premier niveau — jamais à l'intérieur d'une expression ou d'un bloc déjà ouverts. Un `{# %}` glissé au milieu d'un identifiant n'est jamais interprété comme un commentaire. En pratique : `{# #}` commente une ligne ou un bloc entier, jamais un fragment d'expression isolé.
+
+**Effet de bord cosmétique** : le blanc (espaces, retour à la ligne) qui entourait la ligne commentée reste, lui, un `Literal` HTML ordinaire — commenter une ligne entière peut laisser une ligne vide dans le HTML compilé. Jamais fonctionnel, jamais une erreur.
+
+**Non fermé, c'est une erreur de compilation nommée**, pas un comportement silencieux : un `{#` jamais refermé avant la fin du fichier fait échouer `cargo build`, au même titre qu'un `{{`/`{%` non fermé.
+
+**Le piège qui subsiste malgré `{# #}` : un commentaire HTML n'est toujours pas un commentaire pour le compilateur.**
 
 ```jinja
 <!-- {% import templates/foo.marius %} -->
 ```
 
-Le scanner ne connaît pas la syntaxe `<!-- -->` — il cherche `{{`/`{%` n'importe où dans le texte, y compris à l'intérieur de ce qu'un navigateur afficherait comme un commentaire. La ligne ci-dessus est développée exactement comme si les chevrons de commentaire n'existaient pas : `foo.marius` est activement importé.
+Le scanner ne connaît pas la syntaxe `<!-- -->` — il cherche `{{`/`{%`/`{#` n'importe où dans le texte, y compris à l'intérieur de ce qu'un navigateur afficherait comme un commentaire. La ligne ci-dessus est développée exactement comme si les chevrons de commentaire n'existaient pas : `foo.marius` est activement importé. `{# … #}` est la seule construction qui neutralise réellement ce genre de ligne — pas `<!-- -->`, même maintenant.
 
-**Deux marqueurs échappent à ce piège, mais par un mécanisme entièrement différent** : `<!-- MARIUS_SCRIPTS -->` et `<!-- MARIUS_MODULES -->` ne sont jamais interprétés comme des commentaires *ni* comme des constructions `.marius` — ce sont des sous-chaînes littérales, recherchées par `str::find` dans le contenu déjà résolu d'un token `Static`, après que tout le reste du pipeline de composition a tourné. Ils fonctionnent précisément *parce qu'ils ne contiennent aucun délimiteur* `{{`/`{%`, pas parce que le scanner les reconnaît comme des ancres spéciales.
-
-Pour désactiver temporairement un `{% import %}`/`{% static %}`/`{% block %}` pendant une itération, retirez la ligne — il n'existe aujourd'hui aucune façon de la neutraliser autrement qu'en la retirant du fichier.
+**Deux marqueurs échappent à ce piège, mais par un mécanisme entièrement différent** : `<!-- MARIUS_SCRIPTS -->` et `<!-- MARIUS_MODULES -->` ne sont jamais interprétés comme des commentaires *ni* comme des constructions `.marius` — ce sont des sous-chaînes littérales, recherchées par `str::find` dans le contenu déjà résolu d'un token `Static`, après que tout le reste du pipeline de composition a tourné. Ils fonctionnent précisément *parce qu'ils ne contiennent aucun délimiteur* `{{`/`{%`/`{#`, pas parce que le scanner les reconnaît comme des ancres spéciales. Ne les enveloppez pas dans un `{# #}` : ça les ferait disparaître du contenu `Static` avant que le hoisting ne les cherche.
 
 ### 4.6 Algorithme de fusion — ce qui se passe à `cargo build`
 
@@ -451,6 +462,9 @@ fn render_segments<'seg>(record: &Self::Record, varlena: &'seg {Name}VarlenOwned
 ## 5. Référence rapide
 
 ```
+Commun aux deux modes :
+  {# … #}                         ← commentaire, zéro span émis, pas d'imbrication (§4.5ter)
+
 Mode fragment :
   {{ entity.field }}
   {% if entity.bool_field %} … {% endif %}
@@ -468,9 +482,13 @@ Interdit, dans les deux modes :
   {% for … %}
   {% else %}
   {% if %} sur un champ non bool
-  Imbrication if/if, block/block, block/if
+  Imbrication if/if, block/block, block/if, et {# #} imbriqué
   join / where / filter / group
-  Commentaires .marius — <!-- --> est actif, pas neutralisé (§4.5ter)
+  <!-- --> comme commentaire .marius — reste actif, pas neutralisé (§4.5ter) ; utiliser {# #}
 ```
 
 Toute violation est une erreur de compilation (`cargo build` échoue), jamais un comportement silencieux au runtime.
+
+---
+
+_Document mis à jour le 8 septembre 2026_
