@@ -1,6 +1,6 @@
 /**
  * @module DisclosureSystem
- * @version 1.2.1
+ * @version 1.2.2
  * @author Olivier C
  * * --- RAISON D'ÊTRE & VISION ARCHITECTURALE ---
  * Ce moteur traite les Onglets (.tabs) et les Accordéons (.accordion) comme une seule
@@ -171,6 +171,11 @@ const animatePanel = (panel, isOpening) => {
 		panel.style.maxHeight = "0px"; //[cite: 1]
 		panel.offsetHeight; // Force reflow (Layout Thrashing contrôlé)[cite: 1]
 		panel.style.maxHeight = `${panel.scrollHeight}px`; //[cite: 1]
+
+		// Fix pour Firefox : le rAF est parfois exécuté avant la fin de la transition CSS.
+		// INVARIANT DOD : Lecture bloquante. Force Gecko à résoudre et commiter
+		// l'arbre de layout avant la mise en file d'attente du rAF.
+		panel.offsetHeight;
 
 		panel.addEventListener(
 			"transitionend",

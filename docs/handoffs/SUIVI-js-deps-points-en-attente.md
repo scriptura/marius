@@ -1,4 +1,4 @@
-# Points en attente — session js_deps (chantiers 1 à 4 + Phase 2 walsn)
+# Points en attente — note de suivit
 
 Note de suivi, pas un handoff de reprise de travail — chaque point ci-dessous
 est soit une décision explicitement différée, soit une découverte faite en
@@ -24,10 +24,6 @@ Pour le réactiver un jour :
   `store.bin`.
 - `pages_homepage` (troisième entrée de l'ancien `ROUTE_TABLE`) n'a jamais
   été creusée cette session — état inconnu, à vérifier séparément.
-
-## 2. `js_deps` : 4 bits réservés, jamais câblés côté marqueurs
-
-Tâche faite.
 
 ## 3. Duplication de logique de conversion NOT NULL (db-forge)
 
@@ -62,16 +58,3 @@ d'`immutable_keys` — structurel, vrai indépendamment de `js_deps`, présent
 avant toute intervention de cette session. Signalé, jamais corrigé (hors
 périmètre demandé).
 
-## 6. Phase 2 `walsn` — un angle non entièrement vérifié
-
-`store_registry.rs` (générique, `P::Record: Pod`) et les fichiers du
-pipeline `pack.bin` (`batch_renderer.rs`/`pack_html_index.rs`/
-`pack_html_format.rs`) ont été vérifiés : aucun ne suppose une
-représentation particulière de `walsn`, tout fonctionne avec le nouveau
-`u64`. Mais je n'ai jamais vu l'intégralité de `crates/shell/render` (le
-crate est bien plus large que les fichiers fournis) — si un consommateur de
-`walsn` existe ailleurs, encore non identifié, avec une attente différente
-(offset dans une région `mmap` spécifique, ordre d'octets), il faudrait le
-vérifier séparément. Probabilité jugée faible (le mécanisme réel repose sur
-`content_core_walsn`/`trg_content_core_notify`, tous deux déjà couverts),
-mais pas une certitude absolue.
