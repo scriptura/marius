@@ -1,9 +1,10 @@
 // crates/forge/fragment-forge/src/page/blocks.rs
 
-//! Phases 5.2–5.4 — `collect_blocks` : appariement par pile des
-//! `BlockOpen`/`BlockEnd` d'un fichier admis en arène, production des
-//! `NamedBlockRange`, fail-slow (imbrication détectée, mots-clés non
-//! supportés mappés vers `PageValidationError`).
+//! Phases 5.2–5.4, révisées HANDOFF imbrication `{% block %}` (Option A) —
+//! `collect_blocks` : appariement par pile des `BlockOpen`/`BlockEnd` d'un
+//! fichier admis en arène, production des `NamedBlockRange` (arène plate,
+//! `parent_index` pour l'imbrication — jamais rejetée), fail-slow (mots-clés
+//! non supportés mappés vers `PageValidationError`).
 
 #[cfg(test)]
 use crate::fragment::token::FlatPageToken;
@@ -30,8 +31,9 @@ use crate::page::token::PageSourceToken;
 //      `PageValidationError::ForLoopDetected`/`RelationalKeyword`.
 //
 //   2. Profondeur d'imbrication > 1 : couverte depuis la Phase 5.3
-//      ci-dessous (`NestedBlock`) — plus un point hors périmètre depuis ce
-//      diff.
+//      ci-dessous — un bloc imbriqué est rattaché à son parent, jamais
+//      rejeté (HANDOFF imbrication `{% block %}`, Option A actée). Plus un
+//      point hors périmètre depuis ce diff.
 //
 // ─── Point ouvert, non tranché par ce diff ─────────────────────────────────
 //
@@ -40,8 +42,8 @@ use crate::page::token::PageSourceToken;
 //   fin de flux — n'est PAS un cas couvert par le chemin heureux testé ici,
 //   et n'est représenté par aucune variante existante de
 //   `PageValidationError` (`NonBoolIfCondition`, `ForLoopDetected`,
-//   `RelationalKeyword`, `NestedBlock` : aucune ne nomme un déséquilibre
-//   structurel). Introduire une nouvelle variante pour ce cas dépasserait le
+//   `RelationalKeyword` : aucune ne nomme un déséquilibre structurel).
+//   Introduire une nouvelle variante pour ce cas dépasserait le
 //   périmètre de cette phase (« ne préparer aucun comportement relevant des
 //   phases ultérieures »). Choix retenu : un `panic!` documenté, nommé,
 //   assorti d'un message explicite — jamais un `todo!`/`unimplemented!` muet
@@ -50,42 +52,38 @@ use crate::page::token::PageSourceToken;
 //   titre que le point ouvert déjà signalé au Document 2 §6.1.
 //
 // =============================================================================
-// PHASE 5.3 — `collect_blocks` : détection `NestedBlock` (Document 2 §3)
+// PHASE 5.3, révisée — `collect_blocks` : rattachement de l'imbrication
+// (HANDOFF imbrication `{% block %}`, §3.2, Option A actée)
 // =============================================================================
-// Extension de 5.2 (roadmap §5.3) : une seule condition ajoutée dans la
-// boucle existante, aucune restructuration de la pile. Invariant introduit :
-// l'imbrication est rejetée nommément, jamais acceptée comme plage valide.
+// Historique : cette phase produisait `PageValidationError::NestedBlock`
+// dès que `open_stack` était non-vide à l'ouverture d'un nouveau bloc —
+// interdiction par choix d'implémentation (aucune contrainte de capacité
+// runtime ne l'imposait, cf. HANDOFF §1). Révision : le `BlockOpen` rencontré
+// pendant que la pile est non-vide est désormais rattaché au bloc au sommet
+// de la pile, via `NamedBlockRange::parent_index` — jamais rejeté.
 //
-// ─── Mécanisme ──────────────────────────────────────────────────────────
+// ─── Mécanisme — l'arène plate se construit au moment de l'ouverture ──────
 //
-//   La pile LIFO appariait déjà correctement n'importe quelle profondeur
-//   (propriété algorithmique de 5.2, documentée dans son commentaire de
-//   tête). Cette phase n'ajoute donc aucune capacité d'appariement — elle
-//   ajoute une *interdiction* : si `open_stack` est déjà non-vide au moment
-//   d'empiler un nouveau `BlockOpen`, ce `BlockOpen` est en position
-//   imbriquée, ce qui produit `PageValidationError::NestedBlock { name }`
-//   (`name` du bloc imbriqué fautif, pas du bloc englobant — c'est
-//   l'occurrence la plus profonde qui viole la contrainte de platitude).
+//   Différence structurelle avec 5.2 (historique) : `ranges` n'attend plus
+//   la fermeture (`BlockEnd`) pour recevoir une entrée. `BlockOpen` pousse
+//   immédiatement une `NamedBlockRange` provisoire (`end` temporairement
+//   égal à `start`, corrigé à la fermeture) — c'est cette poussée précoce
+//   qui permet à un enfant, ouvert avant que son parent ne soit refermé,
+//   de connaître l'indice définitif de son parent dans `ranges` au moment
+//   même de sa propre construction. `open_stack` ne porte donc plus
+//   `(name, start)` (forme historique) mais l'indice dans `ranges` de
+//   chaque bloc actuellement ouvert — le sommet de pile, s'il existe, EST
+//   le `parent_index` du prochain `BlockOpen` rencontré.
 //
-// ─── Fail-slow, pas fail-fast ────────────────────────────────────────────
+// ─── Profondeur non bornée, comme la pile LIFO le permettait déjà ─────────
 //
-//   L'empilement continue malgré l'erreur détectée (`open_stack.push`
-//   n'est jamais court-circuité) : la boucle va jusqu'au bout du flux,
-//   accumulant une erreur par `BlockOpen` en position imbriquée. Ce choix
-//   anticipe la vérification fail-slow prescrite en Phase 5.4 (« 2 erreurs
-//   simultanées → `Vec` de longueur 2 ») sans l'implémenter par avance :
-//   c'est une conséquence directe et minimale de « ne jamais interrompre la
-//   boucle sur une erreur nommée », pas un branchement additionnel préparé
-//   pour 5.4.
-//
-// ─── Pas de sortie mixte succès/erreur ───────────────────────────────────
-//
-//   `ranges` continue d'être peuplé même en présence d'erreurs (nécessaire
-//   pour que chaque `BlockEnd` trouve un `start` à dépiler), mais n'est
-//   jamais retourné si `errors` est non vide : la fonction retourne
-//   `Err(errors)` ou `Ok(ranges)`, jamais les deux à la fois. Les plages
-//   calculées en présence d'imbrication sont donc délibérément jetées, pas
-//   exposées comme un résultat partiellement fiable.
+//   Aucune limite de profondeur n'est introduite ici (aucun cas d'usage
+//   connu ne la justifie — HANDOFF §4, point non tranché, laissé tel quel :
+//   « à confirmer explicitement plutôt qu'à laisser un oubli », hors
+//   périmètre de cette révision). La pile LIFO appariait déjà correctement
+//   n'importe quelle profondeur (propriété algorithmique de 5.2 historique,
+//   inchangée) ; cette révision exploite cette propriété plutôt que de la
+//   contourner par une interdiction.
 //
 // =============================================================================
 // PHASE 5.4 — `collect_blocks` : `ForLoopDetected` / `RelationalKeyword` (Document 2 §3)
@@ -113,58 +111,69 @@ use crate::page::token::PageSourceToken;
 //   catégorisé — propriété vérifiée par construction (deux branches
 //   exhaustives sur un `bool`), pas par une liste à maintenir.
 //
-// ─── Fail-slow, orthogonal à `NestedBlock` ─────────────────────────────────
+// ─── Fail-slow, orthogonal à l'imbrication ─────────────────────────────────
 //
 //   Cette branche ne fait pas partie de la pile d'appariement (`open_stack`
 //   n'est ni lu ni modifié) : un mot-clé `Unsupported` peut coexister avec un
-//   bloc imbriqué dans le même flux, chacun poussant sa propre erreur dans
-//   `errors` sans interférence — même politique fail-slow que 5.3, sur un axe
-//   de validation indépendant.
+//   bloc imbriqué dans le même flux, chacun poussant sa propre erreur (ou,
+//   pour l'imbrication, sa propre entrée `ranges`) sans interférence — même
+//   politique fail-slow que par le passé, sur un axe de validation
+//   indépendant.
 pub fn collect_blocks<'src>(
     template: TemplateId,
     tokens: &[PageSourceToken<'src>],
 ) -> Result<Vec<NamedBlockRange<'src>>, Vec<PageValidationError<'src>>> {
-    let mut open_stack: Vec<(&'src str, usize)> = Vec::new();
-    let mut ranges = Vec::new();
+    // Pile des indices, dans `ranges`, des blocs actuellement ouverts —
+    // sommet de pile = parent direct du prochain `BlockOpen` rencontré.
+    // Forme révisée (HANDOFF imbrication `{% block %}`, §3.2) : porte un
+    // indice dans `ranges`, pas `(name, start)` (forme historique 5.2) —
+    // `ranges` reçoit désormais son entrée dès l'ouverture, pas à la
+    // fermeture (voir doc de section ci-dessus).
+    let mut open_stack: Vec<usize> = Vec::new();
+    let mut ranges: Vec<NamedBlockRange<'src>> = Vec::new();
     let mut errors = Vec::new();
 
     for (index, token) in tokens.iter().enumerate() {
         match token {
-            // Ouverture : empile `(name, start)`. `start` pointe juste après
-            // le marqueur `BlockOpen` lui-même — la plage couvre le contenu
-            // du bloc, jamais ses délimiteurs (convention actée par la doc
-            // de `NamedBlockRange`). Une pile déjà non-vide à cet instant
-            // signale une imbrication (Phase 5.3) : erreur accumulée,
-            // empilement néanmoins poursuivi (fail-slow, cf. doc de tête).
+            // Ouverture : pousse immédiatement une entrée provisoire dans
+            // `ranges` (`end` temporairement égal à `start`, corrigé à la
+            // fermeture ci-dessous), rattachée au bloc au sommet de la pile
+            // via `parent_index` — `None` si la pile est vide (bloc de
+            // premier niveau). `start` pointe juste après le marqueur
+            // `BlockOpen` lui-même — la plage couvre le contenu du bloc,
+            // jamais ses délimiteurs (convention actée par la doc de
+            // `NamedBlockRange`).
             PageSourceToken::Block(PageBlockToken::BlockOpen { name }) => {
-                if !open_stack.is_empty() {
-                    errors.push(PageValidationError::NestedBlock { name });
-                }
-                open_stack.push((name, index + 1));
-            }
-            // Fermeture : dépile et matérialise la plage `[start, index)`,
-            // `index` (position du `BlockEnd`) exclusif — même convention.
-            PageSourceToken::Block(PageBlockToken::BlockEnd) => {
-                let (name, start) = open_stack.pop().unwrap_or_else(|| {
-                    panic!(
-                        "collect_blocks (Phase 5.2) : BlockEnd sans BlockOpen \
-                         correspondant à l'index {index} — cas mal formé hors \
-                         périmètre du chemin heureux, non représenté par \
-                         PageValidationError à ce stade (voir doc de tête)"
-                    )
-                });
+                let parent_index = open_stack.last().copied();
+                let range_index = ranges.len();
                 ranges.push(NamedBlockRange {
                     name,
                     template,
-                    start,
-                    end: index,
+                    start: index + 1,
+                    end: index + 1,
+                    parent_index,
                 });
+                open_stack.push(range_index);
+            }
+            // Fermeture : dépile l'indice du bloc que cette fermeture
+            // referme, et corrige son `end` en place — `index` (position du
+            // `BlockEnd`) exclusif, même convention qu'avant.
+            PageSourceToken::Block(PageBlockToken::BlockEnd) => {
+                let range_index = open_stack.pop().unwrap_or_else(|| {
+                    panic!(
+                        "collect_blocks : BlockEnd sans BlockOpen correspondant \
+                         à l'index {index} — cas mal formé hors périmètre du \
+                         chemin heureux, non représenté par PageValidationError \
+                         à ce stade (voir doc de tête)"
+                    )
+                });
+                ranges[range_index].end = index;
             }
             // Mot-clé de grammaire non supporté (Phase 5.4, cf. doc de tête) :
             // mapping total vers l'erreur de validation nommée
             // correspondante. N'interagit pas avec `open_stack` — orthogonal
             // à l'appariement de blocs, fail-slow au même titre que
-            // `NestedBlock` ci-dessus.
+            // l'imbrication ci-dessus.
             PageSourceToken::Unsupported { keyword, .. } => {
                 if *keyword == "for" {
                     errors.push(PageValidationError::ForLoopDetected);
@@ -180,9 +189,9 @@ pub fn collect_blocks<'src>(
 
     assert!(
         open_stack.is_empty(),
-        "collect_blocks (Phase 5.2) : {} bloc(s) BlockOpen non refermé(s) en \
-         fin de flux — cas mal formé hors périmètre du chemin heureux, non \
-         représenté par PageValidationError à ce stade (voir doc de tête)",
+        "collect_blocks : {} bloc(s) BlockOpen non refermé(s) en fin de flux \
+         — cas mal formé hors périmètre du chemin heureux, non représenté \
+         par PageValidationError à ce stade (voir doc de tête)",
         open_stack.len()
     );
 
@@ -229,12 +238,14 @@ mod tests_phase_5_2_collect_blocks {
                     template,
                     start: 1,
                     end: 2,
+                    parent_index: None,
                 },
                 NamedBlockRange {
                     name: "b",
                     template,
                     start: 4,
                     end: 5,
+                    parent_index: None,
                 },
             ]
         );
@@ -242,24 +253,24 @@ mod tests_phase_5_2_collect_blocks {
 }
 
 // =============================================================================
-// Tests — Phase 5.3
+// Tests — Phase 5.3, révisée (HANDOFF imbrication `{% block %}`, Option A)
 // =============================================================================
 
 #[cfg(test)]
-mod tests_phase_5_3_nested_block_detection {
+mod tests_phase_5_3_nested_block_attachment {
     use super::{
-        FlatPageToken, PageBlockToken, PageSourceToken, PageValidationError, TemplateId,
-        collect_blocks,
+        FlatPageToken, NamedBlockRange, PageBlockToken, PageSourceToken, TemplateId, collect_blocks,
     };
 
-    /// Jalon Vert (roadmap §5.3) — un bloc imbriqué produit
-    /// `Err(vec![NestedBlock { name: "inner" }])` : le nom rapporté est celui
-    /// du bloc fautif (le plus profond), pas du bloc englobant. Le typage en
-    /// `Result` exclut par construction toute sortie mixte : ce test
-    /// documente cette absence de mélange succès/erreur en assertant
-    /// directement sur la variante `Err`, sans exposer de plage à côté.
+    /// Jalon Vert — un bloc imbriqué à un seul niveau n'est plus rejeté :
+    /// il produit une entrée `ranges` distincte, avec `parent_index`
+    /// pointant vers l'indice de son parent dans le même `Vec` retourné.
+    /// La plage du parent (`outer`) couvre bien tout son contenu, marqueurs
+    /// du bloc enfant inclus (`[start, end)` du parent englobe ceux de
+    /// `inner`) — c'est `parent_index`, pas les bornes, qui porte la
+    /// structure.
     #[test]
-    fn nested_block_produces_named_error() {
+    fn single_level_nesting_attaches_child_via_parent_index() {
         let template = TemplateId(0);
         let tokens = vec![
             PageSourceToken::Block(PageBlockToken::BlockOpen { name: "outer" }),
@@ -269,12 +280,83 @@ mod tests_phase_5_3_nested_block_detection {
             PageSourceToken::Block(PageBlockToken::BlockEnd),
         ];
 
-        let result = collect_blocks(template, &tokens);
+        let ranges = collect_blocks(template, &tokens).expect("imbrication admise, chemin heureux");
 
         assert_eq!(
-            result,
-            Err(vec![PageValidationError::NestedBlock { name: "inner" }])
+            ranges,
+            vec![
+                NamedBlockRange {
+                    name: "outer",
+                    template,
+                    start: 1,
+                    end: 4,
+                    parent_index: None,
+                },
+                NamedBlockRange {
+                    name: "inner",
+                    template,
+                    start: 2,
+                    end: 3,
+                    parent_index: Some(0),
+                },
+            ]
         );
+    }
+
+    /// Jalon Vert — imbrication à trois niveaux : chaque enfant référence
+    /// l'indice exact de son parent direct, jamais celui du Root de la
+    /// pile ni un indice fixe — `parent_index` suit la position réelle
+    /// dans `ranges`, pas la profondeur.
+    #[test]
+    fn three_level_nesting_each_child_points_to_its_direct_parent() {
+        let template = TemplateId(0);
+        let tokens = vec![
+            PageSourceToken::Block(PageBlockToken::BlockOpen { name: "main_nav" }),
+            PageSourceToken::Block(PageBlockToken::BlockOpen {
+                name: "current_tab",
+            }),
+            PageSourceToken::Block(PageBlockToken::BlockOpen { name: "tab_icon" }),
+            PageSourceToken::Runtime(FlatPageToken::Static("x")),
+            PageSourceToken::Block(PageBlockToken::BlockEnd),
+            PageSourceToken::Block(PageBlockToken::BlockEnd),
+            PageSourceToken::Block(PageBlockToken::BlockEnd),
+        ];
+
+        let ranges = collect_blocks(template, &tokens).expect("imbrication admise, chemin heureux");
+
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0].name, "main_nav");
+        assert_eq!(ranges[0].parent_index, None);
+        assert_eq!(ranges[1].name, "current_tab");
+        assert_eq!(ranges[1].parent_index, Some(0));
+        assert_eq!(ranges[2].name, "tab_icon");
+        assert_eq!(ranges[2].parent_index, Some(1));
+    }
+
+    /// Jalon Vert — deux enfants successifs (pas imbriqués l'un dans
+    /// l'autre) du même parent partagent le même `parent_index` : la pile
+    /// est bien dépilée entre les deux (`BlockEnd` du premier enfant avant
+    /// `BlockOpen` du second), aucune confusion entre "frère" et "enfant du
+    /// dernier frère".
+    #[test]
+    fn two_siblings_under_same_parent_share_parent_index() {
+        let template = TemplateId(0);
+        let tokens = vec![
+            PageSourceToken::Block(PageBlockToken::BlockOpen { name: "outer" }),
+            PageSourceToken::Block(PageBlockToken::BlockOpen { name: "first" }),
+            PageSourceToken::Block(PageBlockToken::BlockEnd),
+            PageSourceToken::Block(PageBlockToken::BlockOpen { name: "second" }),
+            PageSourceToken::Block(PageBlockToken::BlockEnd),
+            PageSourceToken::Block(PageBlockToken::BlockEnd),
+        ];
+
+        let ranges = collect_blocks(template, &tokens).expect("imbrication admise, chemin heureux");
+
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[1].name, "first");
+        assert_eq!(ranges[1].parent_index, Some(0));
+        assert_eq!(ranges[2].name, "second");
+        assert_eq!(ranges[2].parent_index, Some(0));
     }
 }
 

@@ -106,14 +106,26 @@ pub struct BlockSubstitution<'src> {
     pub source: NamedBlockRange<'src>,
 }
 
-/// Plan de fusion produit par `link`/`link_chain` : une substitution par
-/// bloc du Root, dans l'ordre du Root. Type de données pur — aucune méthode
-/// de fusion ici, c'est le rôle du Lowering (Document 2 §5, Phase 5.8+).
+/// Plan de fusion produit par `link`/`link_chain`. Type de données pur —
+/// aucune méthode de fusion ici, c'est le rôle du Lowering (Document 2 §5,
+/// Phase 5.8+, révisé HANDOFF imbrication `{% block %}` pour la récursion).
 ///
-/// `substitutions.len() == root_blocks.len()` est un invariant de ce type
-/// produit par `link`/`link_chain` (voir doc de tête ci-dessus) — pas
-/// revérifié à la construction (pas de constructeur dédié : le champ est
-/// public, produit uniquement par ces deux fonctions dans ce module).
+/// ─── Invariant révisé (HANDOFF imbrication `{% block %}`, Option A) ───────
+///
+///   Avant l'imbrication : `substitutions.len() == root_blocks.len()` était
+///   un invariant strict (chaque bloc du Root étant nécessairement de
+///   premier niveau, une entrée par bloc, toujours). Avec l'imbrication et
+///   l'écrasement complet (Option A, HANDOFF §2) : un bloc du Root redéfini
+///   par un ancêtre qui ne redéclare pas ses propres sous-blocs voit ces
+///   sous-blocs disparaître de `substitutions` — ils ne sont ni résolus ni
+///   émis, l'écrasement les efface avec le reste du contenu par défaut du
+///   Root. `substitutions.len()` peut donc être strictement inférieur au
+///   nombre total d'entrées de `root_blocks` (premier niveau + imbriquées) ;
+///   il reste toujours égal au nombre de blocs de premier niveau du Root
+///   plus, pour chaque substitution retenue, le nombre de sous-blocs
+///   effectivement déclarés par la source retenue (récursivement) — jamais
+///   revérifié par un constructeur dédié, la propriété est structurelle à
+///   `link_chain` (voir sa doc de section).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkPlan<'src> {
     pub substitutions: Vec<BlockSubstitution<'src>>,
@@ -142,13 +154,42 @@ pub struct LinkPlan<'src> {
 //
 // ─── Règle de résolution : « le plus proche de la feuille gagne » ─────────
 //
-//   Pour chaque plage du Root : on cherche, dans l'ordre feuille → Root
-//   parmi tous les maillons non-Root, le premier qui redéfinit ce nom.
-//   Trouvé : sa plage est la substitution. Sinon : plage par défaut du Root
-//   lui-même (comportement identique à `link`, étendu à N niveaux au lieu
-//   de 1). C'est une généralisation directe de la règle binaire ; à 2
-//   niveaux (`chain_blocks = [enfant, parent]`), le comportement est
-//   bit-à-bit identique à l'ancien `link`.
+//   Pour chaque plage de premier niveau du Root : on cherche, dans l'ordre
+//   feuille → Root parmi tous les maillons non-Root, le premier qui
+//   redéfinit ce nom. Trouvé : sa plage est la substitution. Sinon : plage
+//   par défaut du Root lui-même (comportement identique à `link`, étendu à
+//   N niveaux au lieu de 1). C'est une généralisation directe de la règle
+//   binaire ; à 2 niveaux (`chain_blocks = [enfant, parent]`), le
+//   comportement est bit-à-bit identique à l'ancien `link`.
+//
+// ─── Imbrication — résolution récursive, Option A (HANDOFF imbrication
+//     `{% block %}`, §2 et §3.3, actée) ─────────────────────────────────────
+//
+//   Seuls les blocs de *premier niveau* du Root amorcent la résolution
+//   ci-dessus (`parent_index == None`) — les blocs imbriqués du Root ne sont
+//   jamais itérés indépendamment au niveau racine : ils sont atteints
+//   uniquement en descendant depuis leur parent, jamais par une recherche
+//   par nom démarrée fixement sur le Root.
+//
+//   Une fois la source d'un bloc choisie (Root lui-même si aucune
+//   redéfinition, ou l'ancêtre trouvé sinon) : la résolution redescend dans
+//   les enfants de CETTE source — lus dans le `Vec<NamedBlockRange>` du
+//   maillon qui la porte, filtrés par `parent_index` — jamais dans les
+//   enfants du Root. Chaque enfant est résolu par le même algorithme,
+//   récursivement, avec un espace de recherche restreint aux maillons
+//   strictement plus proches de la feuille que le maillon qui a fourni la
+//   source du parent (`chain_blocks[..source_level_index]`) — le point de
+//   départ de la recherche se déplace donc à chaque niveau de redéfinition,
+//   jamais fixe sur le Root (HANDOFF §3.3, citation directe).
+//
+//   Conséquence directe de l'écrasement complet (Option A) : si la source
+//   retenue pour un bloc ne déclare, dans son propre fichier, aucun enfant
+//   du nom attendu, aucune substitution n'est émise pour cet enfant — les
+//   sous-blocs par défaut du Root, eux, ne sont jamais consultés une fois
+//   qu'une source différente du Root a été retenue pour le parent. C'est
+//   exactement la sémantique « redéfinir un bloc parent efface tous ses
+//   sous-blocs » (HANDOFF §2, Option A) : rendue possible ici parce que la
+//   recherche d'enfants part toujours de la source retenue, jamais du Root.
 //
 // ─── OrphanBlock : contre le Root, jamais contre un niveau intermédiaire ──
 //
@@ -184,22 +225,22 @@ pub fn link_chain<'src>(
     static_refs: &[StaticPartialRef<'src>],
     file_exists: impl Fn(&str) -> bool,
 ) -> Result<LinkPlan<'src>, Vec<PageLinkError<'src>>> {
-    let root_blocks = chain_blocks
-        .last()
-        .expect("chain_blocks non vide : au moins le Root, précondition d'appel");
-    let ancestors = &chain_blocks[..chain_blocks.len() - 1];
+    assert!(
+        !chain_blocks.is_empty(),
+        "chain_blocks non vide : au moins le Root, précondition d'appel"
+    );
+    let root_level_index = chain_blocks.len() - 1;
+    let root_blocks = chain_blocks[root_level_index];
+    let ancestors = &chain_blocks[..root_level_index];
 
-    let mut substitutions = Vec::with_capacity(root_blocks.len());
-    for root_range in *root_blocks {
-        let source = ancestors
-            .iter()
-            .find_map(|level| level.iter().find(|range| range.name == root_range.name))
-            .copied()
-            .unwrap_or(*root_range);
-        substitutions.push(BlockSubstitution {
-            name: root_range.name,
-            source,
-        });
+    let mut substitutions = Vec::new();
+    for root_range in root_blocks.iter().filter(|r| r.parent_index.is_none()) {
+        resolve_block_and_descendants(
+            *root_range,
+            root_level_index,
+            chain_blocks,
+            &mut substitutions,
+        );
     }
 
     let mut errors = Vec::new();
@@ -232,6 +273,76 @@ pub fn link_chain<'src>(
     }
 }
 
+/// Résout récursivement un bloc et sa descendance — cœur de l'Option A
+/// (HANDOFF imbrication `{% block %}`, §3.3). Voir doc de section de
+/// `link_chain` pour le mécanisme complet ; ce qui suit documente
+/// uniquement la mécanique locale de cette fonction.
+///
+/// `default_range` : la plage à résoudre si aucun ancêtre ne la redéfinit —
+/// soit un bloc de premier niveau du Root (premier appel, depuis
+/// `link_chain`), soit un enfant d'une source déjà choisie (appel
+/// récursif).
+///
+/// `owner_level_index` : l'indice, dans `chain_blocks`, du maillon qui
+/// déclare `default_range`. Détermine l'espace de recherche d'une
+/// redéfinition : uniquement `chain_blocks[..owner_level_index]`, jamais
+/// au-delà — un ancêtre ne peut redéfinir que ce qu'un maillon plus proche
+/// du Root que lui expose comme défaut, jamais remonter la chaîne.
+///
+/// Pousse dans `substitutions` exactement une entrée pour `default_range`
+/// (source retenue, redéfinie ou par défaut), puis récursivement une entrée
+/// par enfant de la source retenue — jamais par enfant de `default_range`
+/// elle-même quand une redéfinition a été trouvée (c'est tout l'écrasement
+/// de l'Option A : les enfants par défaut ne sont plus jamais consultés une
+/// fois une source différente retenue pour le parent).
+fn resolve_block_and_descendants<'src>(
+    default_range: NamedBlockRange<'src>,
+    owner_level_index: usize,
+    chain_blocks: &[&[NamedBlockRange<'src>]],
+    substitutions: &mut Vec<BlockSubstitution<'src>>,
+) {
+    let found = chain_blocks[..owner_level_index]
+        .iter()
+        .enumerate()
+        .find_map(|(level_index, level)| {
+            level
+                .iter()
+                .find(|range| range.name == default_range.name)
+                .map(|range| (*range, level_index))
+        });
+
+    let (source, source_level_index) = found.unwrap_or((default_range, owner_level_index));
+
+    substitutions.push(BlockSubstitution {
+        name: default_range.name,
+        source,
+    });
+
+    // Redescend dans les enfants de LA SOURCE retenue (lue dans le maillon
+    // qui la porte, `source_level_index`) — jamais dans les enfants de
+    // `default_range`. Quand `found` est `None`, `source_level_index ==
+    // owner_level_index` et `source == default_range` : la recherche
+    // continue naturellement depuis les propres enfants de `default_range`,
+    // au même niveau — cas "pas de redéfinition", inchangé par rapport à un
+    // parent qui serait resté le sien.
+    let source_level_blocks = chain_blocks[source_level_index];
+    let source_own_index = source_level_blocks
+        .iter()
+        .position(|range| *range == source)
+        .expect(
+            "source provient de source_level_blocks (trouvée par recherche dans ce même \
+             slice, ou égale à default_range dont owner_level_index désigne ce slice) — \
+             doit s'y trouver par construction",
+        );
+
+    for child in source_level_blocks
+        .iter()
+        .filter(|range| range.parent_index == Some(source_own_index))
+    {
+        resolve_block_and_descendants(*child, source_level_index, chain_blocks, substitutions);
+    }
+}
+
 /// Cas particulier à 2 maillons de `link_chain` (Phase 5.10) — signature
 /// historique (Phases 5.5/5.6) conservée pour compatibilité des appelants et
 /// des tests existants. Toute la logique vit dans `link_chain` ; ce wrapper
@@ -260,6 +371,7 @@ mod tests_phase_5_5_link {
             template,
             start,
             end,
+            parent_index: None,
         }
     }
 
@@ -364,6 +476,7 @@ mod tests_phase_5_6_link_static_check {
             template,
             start,
             end,
+            parent_index: None,
         }
     }
 
@@ -503,6 +616,7 @@ mod tests_phase_5_10_link_chain {
             template,
             start,
             end,
+            parent_index: None,
         }
     }
 
@@ -590,6 +704,195 @@ mod tests_phase_5_10_link_chain {
                     source: range("title", child, 10, 20),
                 }],
             }
+        );
+    }
+}
+
+// =============================================================================
+// Tests — Résolution récursive Option A (HANDOFF imbrication `{% block %}`)
+// =============================================================================
+
+#[cfg(test)]
+mod tests_nested_block_resolution_option_a {
+    use super::{NamedBlockRange, PageLinkError, TemplateId, link_chain};
+
+    fn range(
+        name: &str,
+        template: TemplateId,
+        start: usize,
+        end: usize,
+        parent_index: Option<usize>,
+    ) -> NamedBlockRange<'_> {
+        NamedBlockRange {
+            name,
+            template,
+            start,
+            end,
+            parent_index,
+        }
+    }
+
+    /// Jalon Vert — sans aucune redéfinition, un bloc imbriqué du Root
+    /// (`current_tab`, enfant de `main_nav`) est résolu vers lui-même, au
+    /// même titre qu'un bloc de premier niveau : l'absence de redéfinition
+    /// ne dépend pas de la profondeur.
+    #[test]
+    fn no_override_resolves_nested_root_block_to_itself() {
+        let root = TemplateId(0);
+        let root_blocks = vec![
+            range("main_nav", root, 0, 10, None),
+            range("current_tab", root, 2, 4, Some(0)),
+        ];
+        let leaf_blocks: Vec<NamedBlockRange<'_>> = Vec::new();
+
+        let plan = link_chain(&[&leaf_blocks, &root_blocks], &[], |_| true)
+            .expect("aucun ancêtre, aucun orphelin possible");
+
+        assert_eq!(plan.substitutions.len(), 2);
+        assert_eq!(plan.substitutions[0].name, "main_nav");
+        assert_eq!(plan.substitutions[0].source.template, root);
+        assert_eq!(plan.substitutions[1].name, "current_tab");
+        assert_eq!(plan.substitutions[1].source.template, root);
+    }
+
+    /// Jalon Vert — cœur de l'Option A : un maillon intermédiaire qui
+    /// redéfinit `main_nav` sans redéclarer `current_tab` efface ce dernier.
+    /// Aucune substitution "current_tab" n'est émise — ni vers le Root, ni
+    /// vers personne — exactement « redéfinir un bloc parent efface tous
+    /// ses sous-blocs » (HANDOFF §2, Option A).
+    #[test]
+    fn override_without_redeclaring_child_wipes_the_child() {
+        let root = TemplateId(2);
+        let mid = TemplateId(1);
+        let leaf: Vec<NamedBlockRange<'_>> = Vec::new();
+
+        let root_blocks = vec![
+            range("main_nav", root, 0, 10, None),
+            range("current_tab", root, 2, 4, Some(0)),
+        ];
+        // `mid` redéfinit `main_nav` en entier, sans redéclarer `current_tab`.
+        let mid_blocks = vec![range("main_nav", mid, 0, 5, None)];
+
+        let plan = link_chain(&[&leaf, &mid_blocks, &root_blocks], &[], |_| true)
+            .expect("main_nav a un slot Root, mid ne déclare rien d'orphelin");
+
+        assert_eq!(
+            plan.substitutions.len(),
+            1,
+            "une seule substitution : current_tab est effacé avec le reste \
+             du contenu par défaut de main_nav, pas hérité du Root"
+        );
+        assert_eq!(plan.substitutions[0].name, "main_nav");
+        assert_eq!(plan.substitutions[0].source.template, mid);
+        assert!(
+            !plan.substitutions.iter().any(|s| s.name == "current_tab"),
+            "current_tab ne doit apparaître dans aucune substitution"
+        );
+    }
+
+    /// Jalon Vert — un maillon intermédiaire qui redéfinit `main_nav` ET
+    /// redéclare son propre `current_tab` : la résolution du sous-bloc
+    /// repart des enfants de CETTE source (le `main_nav` de `mid`), jamais
+    /// des enfants du Root — le `current_tab` retenu est bien celui de
+    /// `mid`, pas celui du Root.
+    #[test]
+    fn override_redeclaring_child_resolves_from_the_source_own_children() {
+        let root = TemplateId(2);
+        let mid = TemplateId(1);
+        let leaf: Vec<NamedBlockRange<'_>> = Vec::new();
+
+        let root_blocks = vec![
+            range("main_nav", root, 0, 10, None),
+            range("current_tab", root, 2, 4, Some(0)),
+        ];
+        let mid_blocks = vec![
+            range("main_nav", mid, 0, 8, None),
+            range("current_tab", mid, 2, 4, Some(0)), // enfant de la source `mid.main_nav`
+        ];
+
+        let plan = link_chain(&[&leaf, &mid_blocks, &root_blocks], &[], |_| true)
+            .expect("aucun orphelin : main_nav et current_tab ont chacun un slot Root");
+
+        assert_eq!(plan.substitutions.len(), 2);
+        assert_eq!(plan.substitutions[0].name, "main_nav");
+        assert_eq!(plan.substitutions[0].source.template, mid);
+        assert_eq!(plan.substitutions[1].name, "current_tab");
+        assert_eq!(
+            plan.substitutions[1].source.template, mid,
+            "current_tab doit provenir de mid (source de main_nav), jamais du Root"
+        );
+    }
+
+    /// Jalon Vert — scénario nominal du HANDOFF (§2, scénario d'ouverture) :
+    /// `mid` réécrit toute la structure de `main_nav` en redéclarant
+    /// `current_tab` comme slot ; la feuille, plus dérivée, ne touche QUE
+    /// `current_tab`, sans jamais redéclarer `main_nav`. La redescente
+    /// récursive doit chercher la redéfinition de `current_tab` parmi les
+    /// maillons strictement plus proches de la feuille que `mid` (donc la
+    /// feuille elle-même) — et la trouver, malgré la déclaration en
+    /// premier niveau du fichier feuille (correspondance par nom, jamais
+    /// par position ou par imbrication structurelle miroir).
+    #[test]
+    fn leaf_can_override_only_the_nested_slot_if_intermediate_redeclared_it() {
+        let root = TemplateId(2);
+        let mid = TemplateId(1);
+        let leaf = TemplateId(0);
+
+        let root_blocks = vec![
+            range("main_nav", root, 0, 10, None),
+            range("current_tab", root, 2, 4, Some(0)),
+        ];
+        let mid_blocks = vec![
+            range("main_nav", mid, 0, 8, None),
+            range("current_tab", mid, 2, 4, Some(0)),
+        ];
+        // La feuille ne redéfinit QUE current_tab, jamais main_nav.
+        let leaf_blocks = vec![range("current_tab", leaf, 5, 9, None)];
+
+        let plan = link_chain(&[&leaf_blocks, &mid_blocks, &root_blocks], &[], |_| true)
+            .expect("aucun orphelin");
+
+        assert_eq!(plan.substitutions.len(), 2);
+        assert_eq!(plan.substitutions[0].name, "main_nav");
+        assert_eq!(
+            plan.substitutions[0].source.template, mid,
+            "main_nav non touché par la feuille : reste résolu vers mid"
+        );
+        assert_eq!(plan.substitutions[1].name, "current_tab");
+        assert_eq!(
+            plan.substitutions[1].source.template, leaf,
+            "current_tab redéfini par la feuille : doit gagner sur mid ET sur le Root"
+        );
+    }
+
+    /// Jalon Vert — un bloc imbriqué déclaré par un ancêtre, dont le nom ne
+    /// correspond à AUCUN bloc du Root (ni de premier niveau, ni imbriqué),
+    /// reste détecté comme orphelin — l'imbrication de la déclaration
+    /// fautive elle-même (ici sous `main_nav` côté `mid`) ne le soustrait
+    /// pas à la vérification, qui reste purement par nom sur l'ensemble
+    /// plat des blocs du Root (HANDOFF §3.3, `OrphanBlock` récursif).
+    #[test]
+    fn orphan_nested_under_an_ancestor_block_is_still_detected() {
+        let root = TemplateId(2);
+        let mid = TemplateId(1);
+        let leaf: Vec<NamedBlockRange<'_>> = Vec::new();
+
+        let root_blocks = vec![range("main_nav", root, 0, 10, None)];
+        let mid_blocks = vec![
+            range("main_nav", mid, 0, 8, None),
+            // `extra_widget` est imbriqué sous le `main_nav` de `mid`, mais
+            // n'a aucun pendant, imbriqué ou non, dans le Root.
+            range("extra_widget", mid, 2, 4, Some(0)),
+        ];
+
+        let result = link_chain(&[&leaf, &mid_blocks, &root_blocks], &[], |_| true);
+
+        assert_eq!(
+            result,
+            Err(vec![PageLinkError::OrphanBlock {
+                name: "extra_widget",
+                template: mid,
+            }])
         );
     }
 }

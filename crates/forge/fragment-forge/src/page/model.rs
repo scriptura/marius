@@ -132,16 +132,42 @@ pub struct TemplateId(pub u32);
 /// silencieusement incohérent (troncature ou contenu halluciné) que
 /// produirait un couple `(usize, usize)` nu appliqué au mauvais `Vec`.
 ///
+/// ─── Imbrication — arène plate à `parent_index`, jamais de `Vec<Self>`
+///     imbriqué (HANDOFF imbrication `{% block %}`, §3.1, Option A actée) ──
+///
+///   `{% block %}` imbriqué (Mode Page) est désormais admis : un bloc
+///   contenu dans un autre est représenté par une entrée *supplémentaire*
+///   dans le même `Vec<NamedBlockRange>` que celui produit par
+///   `collect_blocks` pour le fichier entier — jamais par un champ
+///   `children: Vec<NamedBlockRange>` sur l'entrée elle-même. `parent_index`
+///   porte, pour une entrée donnée, l'indice (dans ce même `Vec`, tel que
+///   retourné par `collect_blocks` pour *ce* `template`) de l'entrée qui la
+///   contient directement ; `None` pour un bloc de premier niveau. Même
+///   principe que `PageArena`/`TemplateId` : une structure à plat, indexée
+///   par position, jamais un arbre emprunté.
+///
+///   Ce choix préserve `Copy` sur ce type — un `Vec<Self>` imbriqué l'aurait
+///   cassé, forçant `Clone` à chaque site d'usage existant (`link_chain`,
+///   `lower`, tous les tests déjà écrits qui font `let _copy = r_a;` sans
+///   `.clone()`). Aucun site d'appel existant n'a donc besoin d'être
+///   retouché pour ce seul changement de forme.
+///
+///   `parent_index` référence une position dans le `Vec` produit **pour le
+///   même `template`** — jamais un indice croisé entre deux fichiers. La
+///   correspondance entre maillons de la chaîne `extends` reste uniquement
+///   par `name` (inchangé), jamais par position d'indice.
+///
 /// Type de données pur : aucune méthode de validation ou de fusion. La
-/// construction de ces plages (parcours de l'AST enfant pour repérer les
-/// paires BlockOpen/BlockEnd, assignation du `TemplateId` courant) est un
-/// algorithme de la session parseur, pas de celle-ci.
+/// construction de ces plages (parcours de l'AST du fichier pour repérer les
+/// paires BlockOpen/BlockEnd, assignation du `TemplateId` courant et du
+/// `parent_index` selon la pile d'ouverture) est un algorithme de
+/// `collect_blocks` (module `blocks`), pas de ce type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NamedBlockRange<'src> {
-    /// Nom déclaré par `{% block name %}`. Clé de correspondance avec le
-    /// parent — deux blocs de même nom dans un même enfant sont une erreur
-    /// de linking (`PageLinkError::OrphanBlock` ou variante dédiée future),
-    /// pas une responsabilité de ce type.
+    /// Nom déclaré par `{% block name %}`. Clé de correspondance entre
+    /// maillons de la chaîne `extends` — deux blocs de même nom dans un même
+    /// fichier, imbriqués ou non, restent une clé de résolution par valeur,
+    /// pas une responsabilité vérifiée par ce type.
     pub name: &'src str,
     /// Arène d'origine des indices `start`/`end` ci-dessous.
     pub template: TemplateId,
@@ -151,6 +177,11 @@ pub struct NamedBlockRange<'src> {
     /// Index de fin de la plage de contenu (exclusif), dans l'AST référencé
     /// par `template`.
     pub end: usize,
+    /// Indice, dans le `Vec<NamedBlockRange>` produit par `collect_blocks`
+    /// pour ce même `template`, du bloc qui contient directement celui-ci.
+    /// `None` : bloc de premier niveau. Voir doc de tête pour la
+    /// justification du choix "arène plate" plutôt que `Vec<Self>` récursif.
+    pub parent_index: Option<usize>,
 }
 
 /// Template enfant, forme pré-fusion.
@@ -434,13 +465,11 @@ pub enum PageValidationError<'src> {
     /// dans un template. Le mode page reste un langage de présentation :
     /// toute logique relationnelle appartient à la couche SQL/schema.
     RelationalKeyword { keyword: &'src str },
-    /// `{% block %}` imbriqué dans un autre `{% block %}`. Symétrique de
-    /// `SemanticError::NestedIfNotSupported` : même contrainte de platitude,
-    /// appliquée à l'axe "bloc de fusion" plutôt qu'à l'axe "condition".
-    /// Vérifiable sur l'AST d'un seul template, sans résolution externe —
-    /// c'est pourquoi cette variante est Validation et non Link, malgré son
-    /// lien thématique avec `PageBlockToken`.
-    NestedBlock { name: &'src str },
+    // `NestedBlock` (variante historique, Phase 5.3) retirée : l'imbrication
+    // de `{% block %}` est désormais admise (HANDOFF imbrication `{% block
+    // %}`, Option A actée) — `collect_blocks` rattache le bloc imbriqué à
+    // son parent via `NamedBlockRange::parent_index` plutôt que de rejeter
+    // l'entrée. Voir doc de tête de `collect_blocks` (module `blocks`).
 }
 
 /// Référence à une inclusion statique déduplique-able : futur `{% static %}`
@@ -544,8 +573,12 @@ pub enum PageImportError<'src> {
     /// `{% import path %}` rencontré à l'intérieur d'un `{% block %}`
     /// ouvert. `block_name` désigne le bloc englobant fautif — un import ne
     /// peut se substituer qu'à un slot de premier niveau, jamais à du
-    /// contenu à l'intérieur d'un bloc (cela recréerait, une fois le
-    /// fragment développé, l'imbrication que `NestedBlock` interdit déjà).
+    /// contenu à l'intérieur d'un bloc. Contrainte maintenue telle quelle
+    /// depuis la levée de l'interdiction d'imbrication des `{% block %}`
+    /// (HANDOFF imbrication `{% block %}`, §3.5) : question jugée orthogonale
+    /// à celle-ci, explicitement non revue à cette occasion — un import
+    /// positionné à l'intérieur d'un bloc reste rejeté ici, quelle que soit
+    /// la profondeur d'imbrication désormais admise pour les blocs eux-mêmes.
     ImportInsideBlock {
         path: &'src str,
         block_name: &'src str,
@@ -584,12 +617,14 @@ mod tests_phase_3_0_page_mode_types {
             template: child_a,
             start: 3,
             end: 7,
+            parent_index: None,
         };
         let r_b = NamedBlockRange {
             name: "header",
             template: child_b,
             start: 3,
             end: 7,
+            parent_index: None,
         };
         let _copy = r_a; // Copy, pas de move
 
@@ -618,12 +653,14 @@ mod tests_phase_3_0_page_mode_types {
                     template: this_child,
                     start: 0,
                     end: 2,
+                    parent_index: None,
                 },
                 NamedBlockRange {
                     name: "body",
                     template: this_child,
                     start: 3,
                     end: 9,
+                    parent_index: None,
                 },
             ],
         };

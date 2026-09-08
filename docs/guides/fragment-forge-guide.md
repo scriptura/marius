@@ -14,8 +14,6 @@
 
 **Hors périmètre de ce document** : ce guide couvre la compilation `.marius` → `render()`/HTML statique. Il ne couvre pas ce qui se passe *après* — comment `render()` est invoqué, à quelle fréquence, ni ce qui invalide le HTML déjà servi. Un `.marius` correct est une condition nécessaire, jamais suffisante, pour qu'un changement atteigne le navigateur (voir `guide-cycle-de-vie-runtime.md`).
 
-**Ce qui reste explicitement non couvert par la grammaire aujourd'hui**, développé en Partie 2 : l'imbrication de `{% block %}` (voir `HANDOFF-mode-page-blocs-imbriques.md` pour l'état de réflexion sur une extension future). Les commentaires `.marius` (`{# … #}`) sont, eux, couverts — voir §4.5ter.
-
 ---
 
 ## 1. Introduction — le contrat de lecture
@@ -287,9 +285,36 @@ cargo:error=DB-Forge [blog.post] : bloc `sidebar` déclaré dans layout_blog.mar
 ne correspond à aucun slot du Root (base.marius) — bloc mort, à supprimer ou renommer
 ```
 
-**Aucune imbrication `{% block %}` n'est supportée** : un `{% block %}` déclaré à l'intérieur d'un autre `{% block %}` échoue avec `NestedBlock`, quel que soit le fichier ou le mécanisme (`extends` direct ou fragment développé via `{% import %}`, §4.5bis) qui l'amène à cette position. Voir `HANDOFF-mode-page-blocs-imbriques.md` pour l'état de réflexion sur une levée future de cette contrainte — non tranché aujourd'hui, ne pas anticiper de syntaxe pour ce cas.
+**Imbrication `{% block %}` — supportée, écrasement complet du parent (« Option A »).** Un `{% block %}` peut désormais être déclaré à l'intérieur d'un autre `{% block %}`, sur autant de niveaux que nécessaire — aucune limite de profondeur n'est imposée. La règle qui gouverne la résolution d'un sous-bloc est celle-ci, et elle a une conséquence qui surprend si elle n'est pas anticipée : **redéfinir un bloc parent efface tous ses sous-blocs**. Un maillon qui redéfinit un bloc parent doit redéclarer sa propre structure interne (y compris ses éventuels sous-blocs) s'il veut que ses propres descendants dans la chaîne puissent encore la surcharger finement — le contenu par défaut du sous-bloc, tel que déclaré par le Root, n'est jamais consulté une fois qu'une source différente du Root a été retenue pour le parent.
 
-**Empreinte mémoire d'un bloc du Root surchargé** : quand un maillon plus dérivé redéfinit un bloc, le contenu par défaut du Root pour ce bloc **n'est jamais projeté** dans l'AST fusionné — `lower()` ne parcourt et n'émet que les tokens de la source retenue, jamais les deux. Le contenu perdant n'atteint jamais `generate_aot_snippet` : zéro octet en `.rodata`, par construction du pipeline de fusion.
+```jinja
+{# templates/base.marius — Root #}
+{% block main_nav %}
+  <nav>Navigation par défaut</nav>
+  {% block current_tab %}<span>Accueil</span>{% endblock %}
+{% endblock %}
+```
+
+```jinja
+{# templates/shop_layout.marius — extends base.marius #}
+{% block main_nav %}
+  <nav>Navigation boutique</nav>
+  {% block current_tab %}<span>Boutique</span>{% endblock %}
+{% endblock %}
+```
+
+```jinja
+{# templates/product_page.marius — extends shop_layout.marius #}
+{% block current_tab %}<span>Fiche produit</span>{% endblock %}
+```
+
+Ici, `product_page.marius` ne touche jamais `main_nav` : sa structure retenue reste celle de `shop_layout.marius` (« Navigation boutique »). En revanche `current_tab` remonte jusqu'à `product_page.marius`, parce que `shop_layout.marius` a pris soin de redéclarer ce sous-bloc en le redéfinissant — s'il ne l'avait pas fait, `current_tab` aurait disparu avec le reste du contenu par défaut de `main_nav`, et rien dans `product_page.marius` n'aurait pu le faire réapparaître, quel que soit son nom.
+
+**La résolution d'un sous-bloc repart toujours de la source retenue pour son parent, jamais du Root.** Concrètement : une fois qu'un maillon a été retenu comme source d'un bloc, seuls les maillons **strictement plus proches de la feuille que ce maillon** sont consultés pour résoudre ses sous-blocs — jamais les maillons plus proches du Root, et jamais les sous-blocs par défaut du Root lui-même. C'est ce mécanisme, appliqué récursivement à chaque niveau de redéfinition, qui produit l'effet d'écrasement décrit ci-dessus.
+
+**`OrphanBlock` reste détectable à n'importe quelle profondeur.** Un sous-bloc déclaré par un maillon non-Root, imbriqué ou non, dont le nom ne correspond à aucun bloc du Root — de premier niveau ou lui-même imbriqué — est rejeté exactement comme un bloc de premier niveau orphelin : la vérification reste purement par nom sur l'ensemble complet des blocs du Root, sans égard à la profondeur de la déclaration fautive.
+
+**Empreinte mémoire d'un bloc du Root surchargé.** Quand un maillon plus dérivé redéfinit un bloc, le contenu par défaut du Root pour ce bloc **n'est jamais projeté** dans l'AST fusionné — `lower()` ne parcourt et n'émet que les tokens de la source retenue, jamais les deux. Le contenu perdant n'atteint jamais `generate_aot_snippet` : zéro octet en `.rodata`, par construction du pipeline de fusion. Pour un bloc imbriqué, cette règle s'applique à toute la sous-arborescence effacée par un écrasement complet (Option A ci-dessus) : ni le contenu par défaut du sous-bloc du Root, ni ses éventuels propres descendants, ne sont jamais parcourus une fois que le parent a été résolu vers une source différente du Root.
 
 ### 4.5 `{% static chemin %}`
 
@@ -329,9 +354,9 @@ Une fois `{% import templates/head.marius %}` développé, `head_title`/`head_de
 
 **Contraintes, vérifiées à chaque niveau indépendamment :**
 
-- **Position top-level uniquement.** Un `{% import %}` à l'intérieur d'un `{% block %}` ouvert est rejeté (`ImportInsideBlock`) — jamais toléré, même si le fragment ciblé ne contient lui-même aucun bloc. Un import ne peut se substituer qu'à un slot de premier niveau ; l'accepter à l'intérieur d'un bloc recréerait, une fois le fragment développé, l'imbrication que `NestedBlock` interdit déjà par ailleurs.
+- **Position top-level uniquement.** Un `{% import %}` à l'intérieur d'un `{% block %}` ouvert est rejeté (`ImportInsideBlock`) — jamais toléré, même si le fragment ciblé ne contient lui-même aucun bloc. Un import ne peut se substituer qu'à un slot de premier niveau, jamais à du contenu à l'intérieur d'un bloc. Contrainte maintenue telle quelle depuis que l'imbrication des `{% block %}` a été admise (§4.4) : question jugée orthogonale, non revue à cette occasion — un import positionné à l'intérieur d'un bloc reste rejeté, quelle que soit la profondeur d'imbrication désormais admise pour les blocs eux-mêmes.
 - **Un fragment importé ne peut pas lui-même `{% extends %}`.** Il n'a aucune position physique propre — un fragment importé n'est jamais le Root d'une fusion, `{% extends %}` y serait dénué de sens.
-- **Aucune imbrication de `{% block %}`, y compris à travers un import.** Si `head.marius` déclare `{% block main_head %}...{% block head_title %}...{% endblock %}...{% endblock %}`, l'expansion produit exactement la même erreur `NestedBlock` que si ce contenu avait été écrit en dur, imbriqué, dans `base.marius`. **Piège le plus probable en pratique** : un fragment conçu à l'origine comme un `{% block %}` unique enveloppant plusieurs sous-parties doit être aplati avant d'être extrait dans son propre fichier — retirez l'enveloppe, gardez les sous-blocs comme frères de premier niveau.
+- **L'imbrication de `{% block %}` à travers un import suit la même règle que partout ailleurs (§4.4).** Si `head.marius` déclare `{% block main_head %}...{% block head_title %}...{% endblock %}...{% endblock %}`, l'expansion produit exactement la même structure imbriquée que si ce contenu avait été écrit en dur dans `base.marius` — plus une erreur depuis que l'imbrication est admise. Un fragment conçu à l'origine comme un `{% block %}` unique enveloppant plusieurs sous-parties n'a donc plus besoin d'être aplati avant extraction ; l'enveloppe peut être conservée telle quelle, avec les mêmes conséquences de résolution qu'un bloc imbriqué écrit directement dans le fichier qui importe (redéfinir l'enveloppe efface ses sous-blocs, sauf redéclaration explicite — §4.4).
 - **Profondeur bornée à 4 niveaux, indépendamment de la profondeur `extends`.** Un fragment importé peut lui-même importer d'autres fragments, jusqu'à 4 niveaux d'imbrication d'imports — comptés séparément de la chaîne `extends` (un Root peut être à la fois au bout d'une chaîne `extends` de 4 fichiers *et* importer sur 4 niveaux : les deux compteurs ne se cumulent jamais).
 - **Détection de cycle**, propre à chaque branche d'import (deux fragments distincts important indépendamment le même troisième fragment n'est jamais un cycle — seul un fragment qui s'importe lui-même, directement ou via une chaîne de sous-imports, l'est).
 - **Aucune déduplication.** Contrairement à `{% static %}`, deux occurrences de `{% import same.marius %}` produisent deux expansions indépendantes, chacune pouvant contenir ses propres blocs.
@@ -369,10 +394,14 @@ Le scanner ne connaît pas la syntaxe `<!-- -->` — il cherche `{{`/`{%`/`{#` n
    top-level, bornés à 4 niveaux, cycle détecté indépendamment
 3. Admettre chaque maillon en arène : parser, développer ses imports
    (remplacement positionnel des tokens Import par les tokens du fragment ciblé)
-4. Collecter les blocs de chaque maillon (NestedBlock détecté ici si présent)
-5. Résoudre chaque bloc du Root : maillon le plus proche de la feuille qui le
-   redéfinit, sinon valeur par défaut du Root (OrphanBlock si un maillon
-   non-Root déclare un bloc absent du Root)
+4. Collecter les blocs de chaque maillon — l'imbrication est admise, un bloc
+   déclaré à l'intérieur d'un autre est rattaché à son parent, jamais rejeté
+5. Résoudre chaque bloc de premier niveau du Root : maillon le plus proche de
+   la feuille qui le redéfinit, sinon valeur par défaut du Root (OrphanBlock
+   si un maillon non-Root déclare un bloc absent du Root, à n'importe quelle
+   profondeur). Pour un bloc imbriqué : la résolution repart des sous-blocs
+   de LA SOURCE retenue pour son parent, jamais des sous-blocs du Root —
+   redéfinir un parent efface ses sous-blocs par défaut (§4.4, Option A)
 6. Fusionner (lower) : projection plate Vec<FlatPageToken> à partir du seul Root
 7. Résoudre chaque {% static %} : taille réelle, chemin relatif, cargo:rerun-if-changed
 8. Validation sémantique : entité, champs, type bool des conditions, absence de
@@ -400,7 +429,7 @@ Le résultat de la fusion est un AST **plat**, du même type `FlatPageToken` que
 | Fragment importé avec `extends` | Un fichier ciblé par `{% import %}` déclare lui-même `{% extends %}` |
 | `StaticFileNotFound` | Chemin de `{% static %}` introuvable |
 | `OrphanBlock` | Bloc déclaré à un niveau non-Root sans correspondant dans le Root |
-| `NestedBlock` / `NestedIfNotSupported` | Imbrication détectée (`{% block %}` ou `{% if %}`) |
+| `NestedIfNotSupported` | `{% if %}` imbriqué dans un autre `{% if %}` (mode fragment ou AST fusionné) — contrainte distincte de l'imbrication `{% block %}` (§4.4, admise), imposée par `STATIC_CAP`/`DYNAMIC_CAP` sur le chemin HTTP chaud |
 | `UnknownField` | Champ absent du schéma (point de convergence, identique au mode fragment) |
 | `NonBoolIfCondition` | `{% if %}` sur un champ non `bool` |
 | `ForLoopDetected` | `{% for %}` détecté |
@@ -472,7 +501,7 @@ Mode fragment :
 
 Mode page :
   {% extends chemin %}            ← 1re construction du fichier, chaîne jusqu'à 4 fichiers
-  {% block name %} … {% endblock %}   ← jamais imbriqué, résolu contre le Root uniquement
+  {% block name %} … {% endblock %}   ← imbrication admise, résolu contre le Root, écrasement complet du parent (§4.4)
   {% import chemin %}             ← top-level uniquement, jusqu'à 4 niveaux, fragment reparsé
   {% static chemin %}             ← contenu opaque, jamais reparsé, dédupliqué
   {% asset clé %}                 ← résolu contre manifest.toml (marius-assets)
@@ -482,7 +511,7 @@ Interdit, dans les deux modes :
   {% for … %}
   {% else %}
   {% if %} sur un champ non bool
-  Imbrication if/if, block/block, block/if, et {# #} imbriqué
+  Imbrication if/if (mode fragment et AST fusionné), et {# #} imbriqué
   join / where / filter / group
   <!-- --> comme commentaire .marius — reste actif, pas neutralisé (§4.5ter) ; utiliser {# #}
 ```
