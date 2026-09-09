@@ -95,6 +95,19 @@
 
   &:popover-open {
     position: absolute;
+    /* Le navigateur applique un display: block au popover par défaut. 
+       On maintient le modèle flex. */
+    display: flex;
+    /* On court-circuite le hors-champ translateX(-110vw) de $to-nav */
+    transform: none;
+
+    &::backdrop {
+      background: transparent;
+    }
+
+    /* 2. Projection descendante : Offset_Y = 100vh, Spread = 100vh */
+    box-shadow: 0 100vh 0 100vh var(--colorAB7);
+
   }
 
   & .current {
@@ -156,6 +169,11 @@
         &:nth-child($i) {
           transition-delay: calc($i * 0.05s);
         }
+      }
+      /* Reset immédiat du pipeline de transformation sur les enfants */
+      .sub-nav:popover-open & {
+        transform: none;
+        transition: none;
       }
     }
 
