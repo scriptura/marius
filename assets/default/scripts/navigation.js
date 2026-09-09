@@ -1,6 +1,25 @@
 /**
  * @module NavigationSystem
- * @summary Pipeline de contrôle O(1) avec teardown déterministe encapsulé.
+ * @summary Pipeline de contrôle O(1) avec amélioration progressive et teardown déterministe.
+ *
+ * 1. AMÉLIORATION PROGRESSIVE (HAND-OFF DÉCLARATIF -> IMPÉRATIF)
+ *    - Le composant DOM est instancié nativement fonctionnel via l'API Popover (fallback zero-JS).
+ *    - L'initialisation ampute de manière synchrone les attributs matériels (`popover`, 
+ *      `popovertarget`) pour transférer la pleine autorité au pipeline JavaScript.
+ *    - Ce transfert permet le déploiement d'un comportement enrichi : animations matricielles 
+ *      séquencées et isolation stricte de l'arbre de focus via l'attribut `inert`.
+ *
+ * 2. TEARDOWN DÉTERMINISTE (LIFECYCLE MANAGEMENT)
+ *    - Encapsulation des branchements asynchrones (`addEventListener`) sous un `AbortController`.
+ *    - Garantit une purge O(1) des listeners précédents, prévenant toute fuite mémoire ou 
+ *      désynchronisation d'état lors de la re-projection dynamique du fragment HTML par le moteur.
+ *
+ * 3. EXÉCUTION FRUGALE & DATA-ORIENTED
+ *    - AOT Media Query : Évaluation statique du point de rupture (`matchMedia`) en amont de 
+ *      l'interaction pour court-circuiter le Layout Thrashing synchrone du navigateur.
+ *    - Zéro Allocation : La mutation des attributs d'état (`aria-expanded`, `aria-hidden`) exploite 
+ *      l'internement littéral des chaînes (String literal interning) pour garantir un toggle
+ *      sans allocation sur le tas (heap).
  */
 
 let activeController = null;

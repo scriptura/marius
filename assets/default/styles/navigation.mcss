@@ -1,28 +1,29 @@
 /**
- * @module NavigationRenderer
- * @summary Pipeline de rendu hybride (JS dynamique / API Popover statique).
+ * @architecture Navigation Hybride — Strategy Pattern CSS/JS
+ * @summary Fallback déclaratif (Popover API) + Amélioration progressive (JS Pipeline)
  *
- * Arbitrages d'architecture et de data layout :
+ * 1. MODÈLE HYBRIDE & AMÉLIORATION PROGRESSIVE
+ *    - Fallback (Zero-JS) : Utilisation des attributs natifs `popover` et `popovertarget`.
+ *      La navigation s'appuie entièrement sur le mécanisme de Top Layer du navigateur.
+ *    - Runtime (JS disponible) : L'initialisation JavaScript retire de manière synchrone les
+ *      attributs popover (`removeAttribute`) pour basculer vers un pipeline de contrôle enrichi :
+ *      animations matricielles séquencées, gestion dynamique de l'état `inert` du DOM, et 
+ *      gestion explicite de l'accessibilité (`aria-expanded`, `aria-hidden`).
  *
- * 1. Isolation des graphes d'état :
- *    Le pipeline d'animation (JS) s'appuie sur la mutation de l'arbre DOM (`.active`)
- *    et des vecteurs de translation (`translateX`). Le fallback (Popover native) est 
- *    strictement déclaratif, sans allocation mémoire côté applicatif, géré
- *    directement par le navigateur dans le top-layer.
+ * 2. BYPASS DES TRANSFORMATIONS SPATIALES (:popover-open)
+ *    - En mode fallback, les animations JS basées sur les classes `.active` et la translation
+ *      hors-champ (`transform: translateX(-110vw)`) sont inactives.
+ *    - Le pseudo-moteur CSS intercepte l'état matériel `:popover-open` pour imposer une
+ *      réinitialisation géométrique immédiate (`transform: none` sur `.sub-nav` et ses enfants `li`),
+ *      garantissant l'affichage instantané des éléments sans calculs de transition.
  *
- * 2. Invariants de positionnement (O(1) Resolution) :
- *    L'interception de l'état matériel `:popover-open` applique une annulation
- *    immédiate de la grappe de transformations (`transform: none; transition: none;`).
- *    Ceci prévient les conflits de calcul (layout thrashing) entre le hors-champ 
- *    structurel du CSS mobile et la promotion d'affichage du top-layer natif.
- *
- * 3. Masquage spatial asymétrique (Z-Depth Subterfuge) :
- *    La topologie exige que le déclencheur `.cmd-nav` (Y < 3em) reste interactif.
- *    - Le `::backdrop` natif est neutralisé (`transparent`) pour empêcher 
- *      l'obscurcissement du contexte global (qui inclut le bouton hamburger).
- *    - Un masque est projeté via un vecteur d'ombrage pur (`box-shadow: 0 100vh 0 100vh`). 
- *      Cette approche garantit une couverture strictement descendante (sous l'origine 
- *      du conteneur) sans nécessiter l'injection d'un nœud DOM supplémentaire.
+ * 3. ISOLATION TOP-LAYER ET OMBRE VECTORIELLE DESCENDANTE
+ *    - Le comportement par défaut du Top Layer (`::backdrop`) obscurcit l'intégralité du viewport,
+ *      masquant le bouton de commande `.cmd-nav` situé dans la barre supérieure ($Y = 3\text{em}$).
+ *    - Arbitrage : Le `::backdrop` natif est rendu totalement transparent (`background: transparent`).
+ *    - L'assombrissement du contenu inférieur est réimplanté via une projection vectorielle
+ *      descendante (`box-shadow: 0 100vh 0 100vh var(--colorAB7)`) ancrée sur le bord inférieur de
+ *      `.sub-nav`. Cela conserve l'icône de fermeture/hamburger totalement visible et interactive.
  */
 
 .nav {
