@@ -1,3 +1,30 @@
+/**
+ * @module NavigationRenderer
+ * @summary Pipeline de rendu hybride (JS dynamique / API Popover statique).
+ *
+ * Arbitrages d'architecture et de data layout :
+ *
+ * 1. Isolation des graphes d'état :
+ *    Le pipeline d'animation (JS) s'appuie sur la mutation de l'arbre DOM (`.active`)
+ *    et des vecteurs de translation (`translateX`). Le fallback (Popover native) est 
+ *    strictement déclaratif, sans allocation mémoire côté applicatif, géré
+ *    directement par le navigateur dans le top-layer.
+ *
+ * 2. Invariants de positionnement (O(1) Resolution) :
+ *    L'interception de l'état matériel `:popover-open` applique une annulation
+ *    immédiate de la grappe de transformations (`transform: none; transition: none;`).
+ *    Ceci prévient les conflits de calcul (layout thrashing) entre le hors-champ 
+ *    structurel du CSS mobile et la promotion d'affichage du top-layer natif.
+ *
+ * 3. Masquage spatial asymétrique (Z-Depth Subterfuge) :
+ *    La topologie exige que le déclencheur `.cmd-nav` (Y < 3em) reste interactif.
+ *    - Le `::backdrop` natif est neutralisé (`transparent`) pour empêcher 
+ *      l'obscurcissement du contexte global (qui inclut le bouton hamburger).
+ *    - Un masque est projeté via un vecteur d'ombrage pur (`box-shadow: 0 100vh 0 100vh`). 
+ *      Cette approche garantit une couverture strictement descendante (sous l'origine 
+ *      du conteneur) sans nécessiter l'injection d'un nœud DOM supplémentaire.
+ */
+
 .nav {
   position: relative;
   /* @note Permet de passer au-dessus du pseudo élément de body (ce dernier faisant un effet d'ombrage sur le contenu en version mobile) et aussi de certains éléments définis par des sources externes (comme les Maps Leaflet). */
