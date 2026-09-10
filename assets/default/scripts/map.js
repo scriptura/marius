@@ -1,14 +1,15 @@
 /**
  * @file map.js
- * @version 2.0.0
+ * @version 2.1.0
  * @description
- * Rendu cartographique GPU via Deck.gl UMD.
+ * Rendu cartographique GPU via Deck.gl UMD avec overlay d'accessibilité (A11y).
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * ARCHITECTURE
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * Le pipeline sépare strictement les données, le picking et le rendu visuel.
+ * Le pipeline sépare strictly les données, le picking, l'accessibilité et
+ * le rendu visuel.
  *
  * DATA
  * ----
@@ -35,8 +36,17 @@
  * - déplacement vertical via `getPixelOffset` ;
  * - transitions gérées exclusivement par Deck.gl.
  *
- * Cette séparation est une décision d'architecture : une animation visuelle
- * ne doit jamais modifier la géométrie servant au picking.
+ * A11Y OVERLAY (ACCESSIBILITÉ)
+ * ───────────────────────────
+ * Conteneur DOM Fantôme (HTMLButtonElement)
+ *
+ * - activé uniquement si `dataLength <= A11Y_MAX_ITEMS` (garde mémoire) ;
+ * - capture le focus clavier natif (`Tab`) et les lecteurs d'écran ;
+ * - mappe directement les événements `focus`/`blur` sur la machine à états
+ *   d'animation GPU (`hoveredIndex`, `animationGeneration`) ;
+ * - projection spatiale synchronisée lors des changements de vue via
+ *   `WebMercatorViewport.project()` sans provoquer de reflow DOM (utilisant
+ *   exclusivement `transform: translate3d`).
  *
  * TILE LAYER
  * ----------
@@ -65,10 +75,6 @@
  * états successifs. Lorsqu'une trajectoire comporte plusieurs mouvements,
  * ceux-ci sont chaînés par `onEnd()`.
  *
- * Ce choix évite de demander à une transition unique d'exprimer une trajectoire
- * non monotone et permet de conserver une valeur source et une valeur cible
- * explicites pour chaque mouvement.
- *
  * ─────────────────────────────────────────────────────────────────────────────
  * DROP INITIAL
  * ─────────────────────────────────────────────────────────────────────────────
@@ -83,38 +89,16 @@
  * Deck.gl est opérationnel, sert à établir explicitement l'état source dans
  * le mécanisme de transition.
  *
- * Cette transition technique n'est pas une étape visuelle du mouvement :
- * elle sert uniquement à amorcer correctement la transition suivante.
- *
- * La chute fonctionnelle est ensuite déclenchée vers l'offset nominal.
- * À son terme, un rebond d'entrée est exécuté comme deux transitions
- * monotones successives.
- *
- * Une fois cette séquence terminée, le système passe définitivement en mode
- * interactif normal.
- *
- * Le picking reste disponible mais n'est activé pour les changements d'état
- * de hover qu'après la fin complète de l'animation d'entrée.
- *
  * ─────────────────────────────────────────────────────────────────────────────
  * HOVER BOUNCE
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * Le bounce de survol est indépendant du drop initial.
+ * Le bounce de survol / focus est indépendant du drop initial.
  *
  * Chaque demi-mouvement est une transition monotone :
  *
  *   repos → apogée
  *   apogée → repos
- *
- * Les transitions sont chaînées uniquement à leur terminaison.
- *
- * Lorsqu'un marker cesse d'être survolé, la transition courante est invalidée
- * et une transition de retour vers la position nominale est engagée.
- *
- * Les événements de picking répétés alors que l'index survolé ne change pas
- * sont ignorés. Seuls les changements effectifs d'état de hover déclenchent
- * une nouvelle animation.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * GÉNÉRATIONS D'ANIMATION
@@ -122,13 +106,6 @@
  *
  * `animationGeneration` constitue l'autorité logique permettant d'invalider
  * les callbacks de transitions devenus obsolètes.
- *
- * Une transition Deck.gl peut continuer à produire un callback alors qu'un
- * nouvel état d'animation est déjà actif. Un callback ne peut donc pas être
- * considéré comme l'autorité sur l'état courant du système.
- *
- * Chaque transition capture la génération active lors de sa création.
- * Son `onEnd()` n'agit que si cette génération est toujours courante.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * INVARIANTS
@@ -142,30 +119,10 @@
  * - les trajectoires complexes sont décomposées en transitions monotones ;
  * - les callbacks obsolètes sont invalidés par génération ;
  * - l'animation d'entrée est exécutée une seule fois par instance de map ;
- * - le système de hover ne prend le relais qu'après la phase d'entrée.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * HITBOX
- * ─────────────────────────────────────────────────────────────────────────────
- *
- * La couche de picking utilise une géométrie indépendante de l'icône.
- *
- * L'IconLayer utilise son propre système d'ancrage pour positionner le visuel,
- * tandis que le ScatterplotLayer utilise son centre géométrique pour le
- * picking.
- *
- * Le décalage appliqué à la couche de picking compense cette différence afin
- * que la zone interactive corresponde à la position du marker au repos.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * TUILES
- * ─────────────────────────────────────────────────────────────────────────────
- *
- * Les transformations visuelles appliquées aux tuiles sont réalisées dans
- * le shader de la couche bitmap spécialisée.
- *
- * La transformation est donc effectuée dans le pipeline GPU sans créer une
- * seconde représentation CPU des tuiles.
+ * - le système de hover/focus ne prend le relais qu'après la phase d'entrée ;
+ * - l'accessibilité DOM (A11y) est activée uniquement si dataLength <= A11Y_MAX_ITEMS ;
+ * - le repositionnement des nœuds A11y s'effectue via `transform: translate3d`
+ *   sans trigger de reflow.
  */
 
 // Extraction depuis le namespace global instancié par le script statique UMD.
@@ -176,6 +133,10 @@ const { DeckGL, TileLayer, IconLayer, ScatterplotLayer } = window.deck;
 const TILE_DEFAULT = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 
 const SUBDOMAINS = Object.freeze(["a", "b", "c"]);
+
+// ─── Accessibilité (A11y) ───────────────────────────────────────────────────
+
+const A11Y_MAX_ITEMS = 100;
 
 // ─── Géométrie des markers ───────────────────────────────────────────────────
 
@@ -198,7 +159,6 @@ const MARKER_BOUNCE_HALF_DURATION = 350;
 // ─── Drop initial ────────────────────────────────────────────────────────────
 
 const MARKER_DROP_DURATION = 600;
-//const MARKER_DROP_WAIT = 1;
 const MARKER_DROP_BOUNCE_OFFSET = -30;
 const MARKER_DROP_BOUNCE_HALF_DURATION = 150;
 
@@ -265,10 +225,7 @@ const parseTileServer = (template) => {
 
 // ─── Easings physiques ───────────────────────────────────────────────────────
 
-// Mouvement vers l'apogée : départ rapide, ralentissement progressif.
 const easeOutQuad = (t) => t * (2 - t);
-
-// Mouvement vers la position nominale : départ lent, accélération progressive.
 const easeInQuad = (t) => t * t;
 
 // ─── Pipeline GPU : Shader de post-traitement des tuiles ─────────────────────
@@ -379,21 +336,10 @@ const initMap = async (config) => {
 			popup,
 		};
 
-		if (lng < minX) {
-			minX = lng;
-		}
-
-		if (lat < minY) {
-			minY = lat;
-		}
-
-		if (lng > maxX) {
-			maxX = lng;
-		}
-
-		if (lat > maxY) {
-			maxY = lat;
-		}
+		if (lng < minX) minX = lng;
+		if (lat < minY) minY = lat;
+		if (lng > maxX) maxX = lng;
+		if (lat > maxY) maxY = lat;
 	}
 
 	// ─── Phase 2 : Calcul de la matrice de vue globale ───────────────────────
@@ -426,7 +372,6 @@ const initMap = async (config) => {
 			};
 		} else {
 			const rect = el.getBoundingClientRect();
-
 			const width = rect.width || 800;
 			const height = rect.height || 400;
 
@@ -468,33 +413,86 @@ const initMap = async (config) => {
 		el.appendChild(attrNode);
 	}
 
+	// ─── Phase 3.1 : Overlay DOM d'accessibilité (A11y) ─────────────────────
+
+	const isA11yEnabled = dataLength <= A11Y_MAX_ITEMS;
+	let a11yButtons = null;
+	let a11yContainer = null;
+
+	if (isA11yEnabled) {
+		a11yContainer = document.createElement("div");
+		a11yContainer.className = "deck-a11y-overlay";
+		a11yContainer.style.cssText =
+			"position: absolute; inset: 0; pointer-events: none; z-index: 2; overflow: hidden;";
+
+		a11yButtons = new Array(dataLength);
+
+		for (let i = 0; i < dataLength; i++) {
+			const item = gpuData[i];
+			const btn = document.createElement("button");
+
+			btn.type = "button";
+			btn.setAttribute("aria-label", item.popup);
+			btn.style.cssText =
+				"position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; " +
+				"overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; " +
+				"pointer-events: auto;";
+
+			btn.addEventListener("focus", () => {
+				if (dropPhase !== 2 || hoveredIndex === i) return;
+				hoveredIndex = i;
+				animationGeneration++;
+
+				const generation = animationGeneration;
+
+				deckgl.setProps({
+					layers: [
+						tileLayer,
+						pickLayer,
+						createVisualLayer(
+							MARKER_BOUNCE_OFFSET,
+							generation,
+							"bounce-up",
+							"normal",
+						),
+					],
+				});
+			});
+
+			btn.addEventListener("blur", () => {
+				if (dropPhase !== 2 || hoveredIndex !== i) return;
+				hoveredIndex = -1;
+				animationGeneration++;
+
+				const generation = animationGeneration;
+
+				deckgl.setProps({
+					layers: [
+						tileLayer,
+						pickLayer,
+						createVisualLayer(0, generation, "leave", "normal"),
+					],
+				});
+			});
+
+			a11yContainer.appendChild(btn);
+			a11yButtons[i] = btn;
+		}
+
+		el.appendChild(a11yContainer);
+	}
+
 	const resolvedServer = parseTileServer(tileServer);
 
 	// ─── État d'interaction ─────────────────────────────────────────────────
 
 	let hoveredIndex = -1;
-
-	/*
-	 * Chaque transition capture la génération courante.
-	 *
-	 * Si l'état d'interaction change avant la terminaison d'une transition,
-	 * la génération suivante invalide le callback de la transition précédente.
-	 */
 	let animationGeneration = 0;
-
-	/*
-	 * État global du cycle d'entrée.
-	 *
-	 * L'état est également utilisé pour empêcher le système de picking de
-	 * déclencher le comportement de hover avant que l'animation d'entrée
-	 * soit terminée.
-	 */
 	let dropPhase = 0;
 
 	// ─── Calcul du décalage initial ──────────────────────────────────────────
 
 	const rect = el.getBoundingClientRect();
-
 	const dropOffset = -(rect.height + MARKER_SIZE);
 
 	// ─── Identifiants stables ────────────────────────────────────────────────
@@ -509,29 +507,22 @@ const initMap = async (config) => {
 
 	const tileLayer = new TileLayer({
 		id: tileLayerId,
-
 		data: resolvedServer,
-
 		minZoom,
 		maxZoom,
-
 		tileSize: 256,
-
 		renderSubLayers: (props) => {
 			const { boundingBox } = props.tile;
 
 			return new ThemedBitmapLayer(props, {
 				data: null,
-
 				image: props.data,
-
 				bounds: [
 					boundingBox[0][0],
 					boundingBox[0][1],
 					boundingBox[1][0],
 					boundingBox[1][1],
 				],
-
 				tileTheme: themeValue,
 			});
 		},
@@ -541,22 +532,31 @@ const initMap = async (config) => {
 
 	let deckgl;
 
+	// ─── Synchronisation de la projection A11y ────────────────────────────────
+
+	const syncA11yPositions = (viewState) => {
+		if (!isA11yEnabled || !deckgl) return;
+
+		const width = el.clientWidth || 800;
+		const height = el.clientHeight || 400;
+
+		const viewport = new deck.WebMercatorViewport({
+			width,
+			height,
+			...viewState,
+		});
+
+		for (let i = 0; i < dataLength; i++) {
+			const [x, y] = viewport.project(gpuData[i].position);
+			const btn = a11yButtons[i];
+
+			// Repositionnement GPU compositor via translate3d (sans trigger de reflow)
+			btn.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+		}
+	};
+
 	// ─── Construction des couches visuelles et transitions ───────────────────
 
-	/*
-	 * `visualMode` distingue les deux responsabilités de la même IconLayer :
-	 *
-	 * - en mode d'entrée, tous les markers utilisent le même offset ;
-	 * - en mode normal, seul le marker survolé utilise l'offset d'animation.
-	 *
-	 * Le mode est capturé par chaque instance de couche. La position visuelle
-	 * d'une instance ne dépend donc pas d'une lecture opportuniste d'un état
-	 * global modifié pendant l'exécution de la transition.
-	 *
-	 * Le système de transitions reste unique : les différentes animations
-	 * choisissent simplement leur durée et leur easing à partir de leur
-	 * identifiant de transition.
-	 */
 	const createVisualLayer = (
 		targetOffset,
 		generation,
@@ -581,11 +581,6 @@ const initMap = async (config) => {
 				return [0, 0];
 			},
 
-			/*
-			 * Une seule configuration de transition est attachée à la
-			 * propriété animée. Le type de mouvement détermine uniquement
-			 * ses paramètres temporels et son easing.
-			 */
 			transitions: {
 				getPixelOffset: {
 					duration:
@@ -610,13 +605,6 @@ const initMap = async (config) => {
 					onEnd: () => {
 						if (generation !== animationGeneration) return;
 
-						/*
-						 * Le micro-mouvement d'amorçage établit la valeur
-						 * courante nécessaire à la transition d'entrée.
-						 *
-						 * Il ne constitue pas une étape fonctionnelle du
-						 * mouvement du marker.
-						 */
 						if (transition === "teleport") {
 							deckgl.setProps({
 								layers: [
@@ -628,7 +616,6 @@ const initMap = async (config) => {
 							return;
 						}
 
-						// Fin de la chute : le rebond d'entrée commence.
 						if (transition === "drop") {
 							deckgl.setProps({
 								layers: [
@@ -645,7 +632,6 @@ const initMap = async (config) => {
 							return;
 						}
 
-						// Fin de la montée du rebond d'entrée : retour vers la position nominale.
 						if (transition === "drop-bounce-up") {
 							deckgl.setProps({
 								layers: [
@@ -657,11 +643,6 @@ const initMap = async (config) => {
 							return;
 						}
 
-						/*
-						 * Fin complète de l'entrée :
-						 * la couche visuelle repasse en mode normal et le
-						 * système de hover peut désormais prendre le relais.
-						 */
 						if (transition === "drop-bounce-down") {
 							dropPhase = 2;
 
@@ -676,15 +657,8 @@ const initMap = async (config) => {
 							return;
 						}
 
-						// Fin du retour vers la position nominale après un mouseout.
 						if (transition === "leave") return;
 
-						/*
-						 * Les deux transitions de hover sont volontairement
-						 * chaînées par leur terminaison.
-						 *
-						 * Chaque transition ne décrit qu'un seul mouvement.
-						 */
 						if (transition === "bounce-up") {
 							deckgl.setProps({
 								layers: [
@@ -726,41 +700,18 @@ const initMap = async (config) => {
 
 	const pickLayer = new ScatterplotLayer({
 		id: pickLayerId,
-
 		data: gpuData,
-
 		pickable: true,
-
 		stroked: false,
 		filled: true,
-
 		radiusUnits: "pixels",
-
 		getRadius: MARKER_HIT_RADIUS,
-
-		/*
-		 * Cette couche ne participe jamais aux animations visuelles.
-		 * Son offset reste constant afin que le déplacement de l'IconLayer
-		 * n'affecte pas la zone interactive.
-		 */
 		getPixelOffset: () => [0, MARKER_SIZE / 2],
-
 		getFillColor: [255, 255, 255, 0],
-
 		getPosition: (d) => d.position,
 
 		onHover: ({ index }) => {
-			/*
-			 * Les événements de picking peuvent être nombreux alors que
-			 * l'état de hover reste identique. Aucun nouveau cycle n'est
-			 * donc créé tant que l'index ne change pas.
-			 */
 			if (index === hoveredIndex) return;
-
-			/*
-			 * Pendant l'animation d'entrée, le picking reste muet du point
-			 * de vue du système d'animation.
-			 */
 			if (dropPhase !== 2) return;
 
 			hoveredIndex = index;
@@ -768,7 +719,6 @@ const initMap = async (config) => {
 
 			const generation = animationGeneration;
 
-			// Entrée sur un marker.
 			if (index >= 0) {
 				deckgl.setProps({
 					layers: [
@@ -786,7 +736,6 @@ const initMap = async (config) => {
 				return;
 			}
 
-			// Sortie du marker.
 			deckgl.setProps({
 				layers: [
 					tileLayer,
@@ -799,12 +748,6 @@ const initMap = async (config) => {
 
 	// ─── Phase 4 : Injection GPU ─────────────────────────────────────────────
 
-	/*
-	 * L'IconLayer est créée directement dans son état visuel initial.
-	 *
-	 * Cette première valeur constitue le point de départ réel de l'animation
-	 * d'entrée. La couche de picking est créée indépendamment et reste fixe.
-	 */
 	const visualLayer = createVisualLayer(
 		dropOffset,
 		animationGeneration,
@@ -814,19 +757,19 @@ const initMap = async (config) => {
 
 	deckgl = new DeckGL({
 		container: el,
-
 		initialViewState,
-
 		controller: true,
 
+		onViewStateChange: ({ viewState }) => {
+			syncA11yPositions(viewState);
+			return viewState;
+		},
+
 		getTooltip: ({ object }) => {
-			if (!object) {
-				return null;
-			}
+			if (!object) return null;
 
 			return {
 				html: `<strong>${object.popup}</strong>`,
-
 				style: {
 					backgroundColor: "#ffffff",
 					color: "#333333",
@@ -842,11 +785,9 @@ const initMap = async (config) => {
 
 		layers: [tileLayer, pickLayer, visualLayer],
 
-		/*
-		 * Le contexte Deck.gl doit être opérationnel avant que le mécanisme
-		 * d'amorçage de la transition d'entrée soit engagé.
-		 */
 		onLoad: () => {
+			syncA11yPositions(initialViewState);
+
 			deckgl.setProps({
 				layers: [
 					tileLayer,
@@ -864,13 +805,6 @@ const initMap = async (config) => {
 
 	// ─── Déclenchement du drop ───────────────────────────────────────────────
 
-	/*
-	 * Le déclenchement de l'animation d'entrée modifie uniquement l'état
-	 * logique du cycle puis fournit à Deck.gl la nouvelle cible visuelle.
-	 *
-	 * La transition elle-même reste responsable de l'interpolation.
-	 */
-	//window.setTimeout(() => {
 	dropPhase = 1;
 
 	deckgl.setProps({
@@ -880,7 +814,6 @@ const initMap = async (config) => {
 			createVisualLayer(0, animationGeneration, "drop", "drop"),
 		],
 	});
-	//}, MARKER_DROP_WAIT);
 };
 
 // ─── Pipeline de boot (Intersection Observer) ────────────────────────────────
@@ -900,9 +833,7 @@ const observeMaps = (configs) => {
 				const el = entry.target;
 				const config = pending.get(el);
 
-				if (!config) {
-					continue;
-				}
+				if (!config) continue;
 
 				initMap(config);
 
@@ -925,7 +856,6 @@ const observeMaps = (configs) => {
 export const bootstrap = () => {
 	if (typeof window.deck === "undefined") {
 		console.warn("Pipeline AOT: deck.gl global namespace is missing.");
-
 		return;
 	}
 
