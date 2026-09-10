@@ -2,7 +2,7 @@
 
 **Emplacement prévu :** `docs/handoffs/handoff-checkpoint-segment-resolution.md`
 **Statut :** checkpoint de délibération intermédiaire — **pas un ADR, ne remplace pas le DESIGN**
-**Date de rédaction :** 2026-09
+**Date de rédaction :** 2026-09-10
 **Portée :** confrontation du `DESIGN-runtime-segment-pipeline.md` (post-ADR-011) au code réel du repository, préalable à l'implémentation de Phase 3
 
 ---
@@ -34,6 +34,20 @@ Phase 5    intégration Hyper/Axum, backend d'émission réel
 ```
 
 Ce checkpoint documente le travail de préparation de **Phase 3**, interrompu par la découverte d'un problème de fond dans la forme proposée par le DESIGN pour `SegmentDescriptor`.
+
+### ⚠️ Révision du séquencement historique — à ne pas manquer
+
+Le séquencement ci-dessus **diffère sur un point précis** de la version originale de `confrontation-code-sequencement-phase0A-5.md` :
+
+```
+RouteDescriptor :
+    anciennement Phase 2 (dans le document de séquencement original)
+    désormais Phase 4 (ce checkpoint)
+```
+
+**Pourquoi ce déplacement** : la version originale plaçait `RouteDescriptor` juste après `SourceKey`, en anticipant qu'il pourrait porter une forme provisoire à compléter plus tard. Cette session a explicitement écarté cette approche (cf. section F, « nouvelle abstraction concurrente ») : `RouteDescriptor` tel que le DESIGN le spécifie dépend structurellement de `SegmentDescriptor`/`EmissionBackendKind` (Phase 3) — l'introduire avant eux aurait exigé soit de le construire deux fois, soit de préjuger de leur forme. Le séquencement a donc été corrigé : `SourceId`/`SourceSpec` (autosuffisants, sans dépendance vers `SegmentDescriptor`) forment Phase 2 ; `RouteDescriptor` (qui assemble tout le reste) est repoussé en Phase 4, une fois `SegmentDescriptor` fermé.
+
+**Ce que cela implique pour `confrontation-code-sequencement-phase0A-5.md`** : ce document normatif n'a pas encore été corrigé pour refléter ce déplacement — voir section R pour l'amendement proposé. **Une nouvelle session qui consulterait les deux documents sans lire cette note trouverait deux numérotations de phase contradictoires sans en connaître l'origine.**
 
 ---
 
@@ -147,29 +161,48 @@ Retenu parce qu'il préserve l'invariant déjà établi (résolution unique d'`A
 - Reconstruction/allocation de `SegmentDescriptor` par requête.
 - Nouvelle abstraction de routage parallèle à `RouteDescriptor`.
 - Deux variantes de `SourceSpec::StaticArtifact` (« directement adressable » vs « indexé ») — démontré que c'est le même cas, la distinction relevant entièrement du niveau sélection, pas du niveau Source (cf. section H).
+- **La sélection portée par `SourceSpec` plutôt que par `SegmentDescriptor` — argument à conserver explicitement, pas seulement dans un tableau.** `SourceSpec` décrit l'origine d'une Source ; il ne peut pas porter la sélection d'un segment, parce que plusieurs segments référençant la même Source peuvent légalement nécessiter des sélections différentes (exemple : deux segments d'une même route affichant chacun un enregistrement distinct du même artefact indexé). Si la sélection vivait sur `SourceSpec`, une Source ne pourrait porter qu'une seule règle — ce qui rendrait ce cas structurellement irreprésentable. C'est cet argument, et non une préférence d'implémentation, qui a définitivement écarté cette option.
 
 ---
 
 ## G. Modèle actuellement retenu
 
+**Relation de référencement (structurelle — pas une chaîne 1:1)** : à ne jamais confondre avec le pipeline temporel ci-dessous. Un même `SourceKey` peut être référencé par plusieurs `SourceId` distincts (section K) — la relation descend en indexant, elle ne « produit » rien en cascade.
+
 ```
-SourceKey (identité AOT globale)
-    ↓
-SourceSpec (nature AOT de la Source — StaticArtifact{key} | VolatileSlot{capacity})
-    ↓
-SourceId (référence locale à la route)
-    ↓
-SegmentDescriptor (AOT : source + sélection opaque + flags — PAS de plage physique)
+SegmentDescriptor.source : SourceId
+        │
+        ▼  (indexe la table de sources de la route)
+    sources[] : &[SourceSpec]
+        │
+        ▼
+    SourceSpec
+        │
+        ▼  (uniquement pour la variante StaticArtifact)
+    StaticArtifact { key: SourceKey }
+        │
+        ▼
+    SourceKey  (identité AOT globale — plusieurs SourceId peuvent aboutir à la même valeur ici)
+```
+
+**Pipeline temporel de résolution (runtime, à chaque requête)** — distinct de la relation ci-dessus :
+
+```
+SegmentDescriptor (AOT : source: SourceId + sélection opaque + flags — PAS de plage physique)
     ↓
 ── frontière AOT / Runtime ──
     ↓
-sélection runtime (résolution des valeurs de sélection, une fois par requête)
+sélection runtime (résolution de la valeur de sélection nécessaire pour ce segment)
+    ↓
+résolution de génération (une fois par SourceKey distinct référencé par la route — section K, jamais par SourceId)
     ↓
 MaterializedSource (Source effectivement résolue — possède un Arc/handle, PAS Copy)
     ↓
-ResolvedRange (plage physique résultant de la sélection appliquée à une Source résolue — Copy, léger)
+résolution de plage physique (sélection + Source résolue → plage)
     ↓
-EmissionPlan (IR d'exécution — ranges + flags + backend_kind, rien de l'origine)
+ResolvedRange (plage physique — Copy, léger — forme Rust non figée)
+    ↓
+EmissionPlan (IR d'exécution — forme Rust non figée, cf. section J)
     ↓
 IoSlice[]
     ↓
@@ -186,6 +219,8 @@ Backend (totalement ignorant de l'origine des données)
 
 **Doit pouvoir représenter** : `Fixed(n)` (sélection = constante AOT — reste une sélection, cf. section N) ; `PathParam` (sélection = référence à une valeur runtime) ; plusieurs segments partageant une même Source, avec des sélections différentes ; des générations successives de l'artefact sans jamais être reconstruit ; `Volatile` (sélection absente, dans l'état actuel du modèle — cf. section N pour la nuance importante).
 
+**Point à ne pas perdre : `Fixed` et `PathParam` ne sont pas deux chemins architecturaux distincts.** Seule l'étape d'extraction de la valeur de sélection diffère entre les deux (une constante recopiée sans I/O pour `Fixed`, une lecture de paramètre d'URL pour `PathParam`). Une fois cette valeur obtenue, les deux convergent vers exactement le même mécanisme de résolution physique : `(génération résolue, valeur de sélection) → lookup → plage`. Il ne doit donc jamais exister de branche séparée entre ces deux cas au niveau de la résolution — seulement au niveau, antérieur, de l'obtention de la valeur.
+
 ---
 
 ## I. Sélection — distinction règle / valeur
@@ -193,9 +228,24 @@ Backend (totalement ignorant de l'origine des données)
 Le Core AOT IR ne doit **jamais** connaître `PathParam("id")` comme sémantique HTTP. Il connaît seulement une référence opaque, conceptuellement à deux formes :
 
 - **`Constant(i64)`** — valeur connue à la compilation (`Fixed(n)`).
-- **une référence opaque vers un emplacement du contexte de requête** (nommée provisoirement `RequestValueId` dans la délibération — **nom non figé, décision de nommage Rust non prise**) — un petit index désignant *« la valeur au slot N du contexte de requête »*, sans que le Core sache ce que ce slot représente en HTTP.
+- **une référence opaque vers un emplacement du contexte de requête** (nommée provisoirement `RequestValueId` dans la délibération) — un petit index désignant *« la valeur au slot N du contexte de requête »*, sans que le Core sache ce que ce slot représente en HTTP.
+
+**Ni l'une ni l'autre de ces deux formes ne constitue une décision de représentation Rust arrêtée.** `Constant(i64)` est un nom conceptuel autant que `RequestValueId` — le fait qu'il ressemble à une variante d'enum Rust valide ne signifie pas qu'il ait été choisi comme tel. Aucun `enum`, aucune signature de champ, n'a été fixé pour porter ces deux formes.
 
 La correspondance *« le slot N est rempli par le paramètre `:id` de l'URL »* reste entièrement extérieure au Core — hors de `marius_projection`, probablement dans une table compagnon de `RouteEntry`/le futur Request Context.
+
+### Vocabulaire — à distinguer systématiquement dans tout le document
+
+Quatre notions à ne jamais fusionner sous le seul mot « sélection » :
+
+| Terme | Ce qu'il désigne | Où il vit |
+|---|---|---|
+| **Sélection AOT** / **référence de sélection** | La règle portée par `SegmentDescriptor` — constante ou référence à un slot | Compilation (Forge) |
+| **Valeur de sélection runtime** | Le résultat concret de l'évaluation de cette règle pour une requête donnée (ex. l'`id` effectivement extrait de l'URL) | Résolue dans le contexte de la requête |
+| **Résolution de génération** | `SourceKey → Arc<PackHtmlIndex>` (ou handle d'arène) | Une fois par `SourceKey` distinct référencé par la route, par requête (section K) |
+| **Résolution de plage physique** | `(génération résolue, valeur de sélection) → (offset, len)` | Une fois par segment, par requête (section L) |
+
+**Ces deux dernières granularités ne doivent pas être confondues** : la résolution de génération est cadencée par `SourceKey` distinct (pouvant être bien inférieure au nombre de segments, si plusieurs segments partagent une Source) ; la résolution de plage est cadencée par segment (toujours égale au nombre de segments de la route). Le mot nu « sélection », employé ailleurs dans ce document sans qualificatif, désigne par convention la **référence AOT** (première ligne) — jamais la valeur résolue, toujours qualifiée explicitement de « runtime »/« résolue » quand c'est elle qui est visée.
 
 ---
 
@@ -206,7 +256,7 @@ La correspondance *« le slot N est rempli par le paramètre `:id` de l'URL »* 
 - **`MaterializedSource`** = Source effectivement résolue pour la requête, dont la durée de vie est garantie pendant toute la requête. Possède l'`Arc<PackHtmlIndex>` (cas `Mmap`) ou un handle d'arène (cas `Volatile`). **Non-`Copy`.** Le propriétaire est le **Request Context**, dans une structure à capacité fixe (bornée par le nombre de `SourceKey` distincts référencés par la route — jamais un `Vec`).
 - **`ResolvedRange`** = plage physique résultant de l'application de la sélection à une Source déjà résolue. Peut être `Copy`/léger (un pointeur et une longueur), parce que sa validité est garantie par l'`Arc` déjà détenu en amont — pas par lui-même.
 
-Aucun type Rust définitif n'est figé à ce stade.
+**Aucun type Rust définitif n'est figé à ce stade — pour aucun des quatre éléments suivants : `MaterializedSource`, `ResolvedRange`, `EmissionPlan`, `RequestValueId`.** La description conceptuelle de leur rôle et de leur contenu probable (ici, et dans le pipeline de la section G) ne doit pas être lue comme une définition de `struct`/`enum` — seules les *propriétés* qu'ils doivent respecter (Copy ou non, propriétaire, granularité) sont arrêtées.
 
 ---
 
@@ -261,6 +311,8 @@ Une formulation antérieure de cette délibération avait présenté l'absence d
 
 **Ne pas transformer ceci en contrainte universelle de `SegmentDescriptor`.** Le modèle général ne doit pas interdire, à l'avenir, une Source statique véritablement directement adressable (sans sélection d'aucune sorte) si un tel cas apparaît. L'absence de sélection est aujourd'hui une propriété du seul cas `Volatile` — pas un invariant structurel figé pour toujours.
 
+**Ceci ne contredit pas le rejet de la section F** (« deux variantes de `StaticArtifact` — démontré que c'est le même cas »). Le rejet de la section F porte sur l'introduction, *aujourd'hui*, d'une distinction de type ontologique dans `SourceSpec` pour un cas qui n'existe pas encore dans le repository réel — pas sur l'impossibilité future du cas lui-même. Les deux sections portent sur des questions différentes : F tranche « faut-il modéliser cette distinction maintenant » (non) ; N tranche « le modèle doit-il rendre ce cas impossible plus tard » (non plus).
+
 ---
 
 ## O. Points volontairement différés — ne pas chercher à les résoudre
@@ -288,11 +340,18 @@ Phase 5    NON COMMENCÉE
 
 ### Phase 3 — doit désormais fixer
 
+> **Contenu prévu de Phase 3 une fois le GO donné. Cette liste ne constitue pas une autorisation d'implémenter Phase 3 à ce stade.** La séquence de reprise est : validation du checkpoint → amendement du DESIGN (et de `confrontation-code-sequencement-phase0A-5.md`, cf. section A) → audit du DESIGN amendé → GO Phase 3. Un lecteur qui tombe directement sur cette sous-section doit repartir avec cette séquence, pas avec l'impression que le travail peut commencer immédiatement.
+
 - `SegmentDescriptor` (forme retenue : `source: SourceId`, sélection AOT opaque, `flags: SegmentFlags` — **sans** `offset`/`len`) ;
 - la représentation de la sélection AOT opaque (constante vs référence à une valeur runtime) ;
 - `SegmentFlags` ;
 - `EmissionBackendKind` ;
-- budgets (distincts de `MAX_RENDER_CHUNKS`, qui reste un budget de rendu Forge par enregistrement, sans rapport avec le budget de composition HTTP par route) ;
+- budgets — **quatre notions distinctes, à ne jamais fusionner** :
+  1. `MAX_RENDER_CHUNKS` — budget de rendu Forge, par enregistrement, à l'intérieur d'une seule Projection (Phase 0.A, déjà en place, inchangé) ;
+  2. budget HTTP `K` — nombre maximal de `SegmentDescriptor` composant une route/réponse (nouveau, Phase 3, inexistant aujourd'hui) ;
+  3. capacité `VolatileSlot { capacity: u32 }` — borne AOT de la production volatile, par Source (déjà présente dans `SourceSpec`, Phase 2) ;
+  4. `IOV_MAX`/`UIO_MAXIOV` — plafond imposé par le système d'exploitation sur un seul appel `writev`/`sendmsg` (constante externe, pas un budget architectural).
+  **`IOV_MAX` ne remplace pas `K` — il le contraint.** Le budget `K` choisi par l'architecture doit rester compatible avec ce plafond système ; ce sont deux vérifications de nature différente (l'une architecturale et ajustable, l'autre une limite dure du système d'exploitation) qui doivent toutes deux être satisfaites, pas l'une à la place de l'autre ;
 - vérification AOT `IOV_MAX`/`UIO_MAXIOV` (emplacement outillé encore non confirmé, cf. section O).
 
 **Note de périmètre** : le concept de sélection AOT opaque a été déplacé de Phase 4 vers Phase 3 au cours de cette délibération — il doit être fixé en même temps que `SegmentDescriptor` pour éviter d'avoir à rouvrir sa forme en Phase 4.
@@ -351,23 +410,140 @@ CE CHECKPOINT (délibération intermédiaire — non normatif)
 
 Aucune autre section du DESIGN n'est apparue incohérente à l'issue de cette délibération (`IOV_MAX` §7, critères `EmissionBackendKind` §9, budgets : inchangés).
 
+**Amendement distinct, hors DESIGN** : `confrontation-code-sequencement-phase0A-5.md` devra être amendé ultérieurement, après validation du présent modèle, pour refléter le déplacement de `RouteDescriptor` de Phase 2 vers Phase 4 (cf. section A). **Non appliqué maintenant** — cette révision normative attend elle aussi le même arbitrage que les amendements du DESIGN ci-dessus, pas une correction séparée anticipée.
+
+---
+
+## Working set de reprise — Phase 3
+
+Cartographie établie par vérification directe des fichiers reçus pendant cette session — pas une extrapolation. Statuts au sens de cette phase uniquement (`SegmentDescriptor`/`SegmentFlags`/`EmissionBackendKind`/budgets/`IOV_MAX`, sans son GO).
+
+```
+crates/core/projection/src/lib.rs
+  INDISPENSABLE
+  Types/fonctions déjà présents : SourceKey(pub u16), SourceId(pub u16),
+      SourceSpec{StaticArtifact{key}, VolatileSlot{capacity}}, RenderChunk<'a>,
+      trait Projection { MAX_RENDER_CHUNKS, render_chunks(), packfile_path(),
+      store_path(), store_registry() }.
+  Rôle : emplacement actuel de tout l'IR de catalogue AOT (Phases 1-2) et
+      emplacement le plus probable des nouveaux types de Phase 3 — même
+      raisonnement d'absence de dépendance nouvelle déjà appliqué à
+      SourceKey/SourceId/SourceSpec.
+
+crates/shell/render/src/registry.rs
+  CONTEXTE / VÉRIFICATION
+  Types réellement pertinents : enum IdSource { PathParam(&'static str),
+      Fixed(i64) } ; struct RouteEntry { pattern, packfile_key, id_source,
+      content_type }.
+  Rôle : définit la forme exacte de ce que la future sélection AOT opaque
+      devra pouvoir représenter sans le réimporter tel quel (section I). Ne
+      doit PAS être modifié en Phase 3 (déjà tranché) — à lire, pas à
+      toucher.
+
+crates/shell/server/src/handlers.rs
+  CONTEXTE / VÉRIFICATION
+  Fonctions pertinentes : serve_route() (extraction de id_source → id),
+      deliver() (lookup + émission actuelle).
+  Rôle : seule illustration concrète et à jour du chemin (route → id →
+      lookup → émission) que le modèle B généralise. Ne doit pas être
+      modifié en Phase 3.
+
+crates/shell/server/build.rs
+  CONTEXTE / VÉRIFICATION
+  Élément pertinent : aucun directement — le fichier ne connaît ni les
+      routes ni IdSource (vérifié, cf. échange précédent), ne génère que
+      ASSET_ROUTES (assets statiques, phf).
+  Rôle : seul candidat de placement observé jusqu'ici pour un futur calcul
+      backend_kind/vérification IOV_MAX (section O) — sa lecture n'apporte
+      qu'une négative (« ce n'est pas déjà là ») utile pour ne pas rouvrir
+      la recherche à zéro.
+
+crates/core/schema/build.rs
+  CONTEXTE / VÉRIFICATION — NON ENCORE REÇU
+  Rôle attendu, non confirmé : référencé deux fois par commentaire dans
+      crates/shell/server/build.rs comme faisant une validation de layout
+      analogue (même THEME_NAME, même profondeur de chemin). Seul fichier
+      encore manquant identifié comme potentiellement informatif pour la
+      question ouverte du propriétaire du calcul backend_kind/IOV_MAX. À
+      demander en priorité si cette question doit être close avant Phase 3.
+```
+
+**Explicitement hors périmètre pour Phase 3** — vérifié plutôt que supposé, pour éviter qu'une nouvelle session parte à leur recherche sans nécessité :
+
+```
+crates/forge/db-forge/src/codegen/projection.rs
+crates/forge/fragment-forge/src/fragment/codegen.rs
+crates/core/schema/src/lib.rs
+  HORS PÉRIMÈTRE INITIAL
+  Raison : ces fichiers produisent/définissent l'axe Forge de rendu par
+      enregistrement (RenderChunk, MAX_RENDER_CHUNKS) — Phase 0.A, déjà
+      close. Cet axe est distinct par construction du budget de composition
+      HTTP par route (K) que Phase 3 doit introduire (cf. section P,
+      budgets). Aucune modification de ces fichiers n'est attendue pour
+      Phase 3.
+
+crates/core/projection/src/store_registry.rs
+  HORS PÉRIMÈTRE INITIAL
+  Raison : StoreRegistry<P>, axe store.bin (projection DOD persistée),
+      sans rapport avec la composition d'une réponse HTTP.
+```
+
+### Ordre de lecture recommandé
+
+```
+1. ce checkpoint (dans son intégralité, y compris section O)
+2. DESIGN-runtime-segment-pipeline.md — §7, §8, §9, §13 seulement (les
+   sections concernées par les amendements de la section R)
+3. crates/core/projection/src/lib.rs — l'IR actuel, point d'atterrissage
+4. crates/shell/render/src/registry.rs — IdSource/RouteEntry, pour calibrer
+   la sélection AOT opaque sans réimporter leur sémantique
+5. crates/shell/server/src/handlers.rs — le chemin actuel, pour vérifier
+   que toute forme retenue pour SegmentDescriptor reste capable de le
+   décrire
+6. crates/shell/server/build.rs — pour confirmer qu'il ne fait déjà rien
+   qui anticiperait une décision sur backend_kind/IOV_MAX
+```
+
+`confrontation-code-sequencement-phase0A-5.md` n'est volontairement pas placé en tête : sa numérotation de phase est partiellement obsolète (section A) — le lire avant ce checkpoint risquerait d'ancrer la mauvaise séquence avant correction.
+
 ---
 
 ## État de reprise
 
 ```
-Phase 3 n'est pas encore implémentée.
+Phase 0.A — CLOSED
+Phase 0.B — CLOSED
+Phase 1   — CLOSED
+Phase 2   — CLOSED
+Phase 3   — NOT IMPLEMENTED / EN ATTENTE DE GO
+Phase 4   — NOT STARTED
+Phase 5   — NOT STARTED
 
 La sémantique de SegmentDescriptor a été conceptuellement verrouillée
 autour du Modèle B :
 
     Source identity → selection → published generation → physical range → emission
 
-Le DESIGN doit encore être amendé conformément à cette délibération
-(amendements listés en section R — proposés, non appliqués).
+Le DESIGN, et accessoirement confrontation-code-sequencement-phase0A-5.md
+sur le seul point du déplacement de RouteDescriptor (section A), doivent
+encore être amendés conformément à cette délibération (amendements listés
+en section R — proposés, non appliqués).
 
-Le prochain arbitrage consiste à valider ce checkpoint et les amendements
-du DESIGN, puis seulement à donner le GO d'implémentation à Phase 3.
+La séquence de reprise, sans raccourci :
+
+    Ce checkpoint (déjà amendé pour la transmissibilité — pas pour le fond)
+        ↓
+    validation du checkpoint par vous
+        ↓
+    amendement effectif du DESIGN (et du document de séquencement)
+        ↓
+    audit du DESIGN amendé
+        ↓
+    GO Phase 3
+
+L'amendement de ce checkpoint pour sa transmissibilité (cette passe) ne
+constitue en rien une validation du DESIGN lui-même — les deux restent des
+étapes distinctes de cette séquence.
 ```
 
 **Points volontairement différés — ne pas tenter de les résoudre à la reprise** (détail complet en section O) : mécanisme Forge → `VolatileSlot` ; remplissage runtime des slots de sélection ; longueur effective/cycle de vie de `Volatile` ; formes Rust définitives de `MaterializedSource`/`ResolvedRange`/`EmissionPlan` ; propriétaire outillé du calcul `backend_kind`/vérification `IOV_MAX` ; `MSG_ZEROCOPY`.
