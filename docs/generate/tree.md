@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-05 02:16:41
+**Généré le:** 2026-09-10 13:18:54
 
 ## Racine du Workspace
 
@@ -31,7 +31,10 @@
 │   │       │   │   └── core.marius
 │   │       │   ├── offline
 │   │       │   │   └── offline.marius
-│   │       │   └── base.marius
+│   │       │   ├── base.marius
+│   │       │   ├── footer.marius
+│   │       │   ├── head.marius
+│   │       │   └── navigation.marius
 │   │       ├── Cargo.toml
 │   │       └── README.md
 │   ├── forge
@@ -72,6 +75,7 @@
 │   │   │   │   │   └── validator.rs
 │   │   │   │   ├── page
 │   │   │   │   │   ├── blocks.rs
+│   │   │   │   │   ├── importer.rs
 │   │   │   │   │   ├── linker.rs
 │   │   │   │   │   ├── lowering.rs
 │   │   │   │   │   ├── mod.rs
@@ -195,7 +199,7 @@
 ├── README.md
 └── biome.jsonc
 
-54 directories, 135 files
+54 directories, 139 files
 ```
 
 ## Documentation du projet
@@ -241,9 +245,11 @@
 │   └── CONTRAT-marius-one-page-extension.md
 ├── generate
 │   └── tree.md
-├── graveyard-of-documentations
+├── graveyard
 │   ├── ADDENDUM-modules-placeholder-static-pages.md
+│   ├── HANDOFF-commentaires-marius.md
 │   ├── HANDOFF-js-deps-capacites-frontend-v2.md
+│   ├── HANDOFF-mode-page-blocs-imbriques.md
 │   ├── enquete.md
 │   ├── logical-data-model.pgsql
 │   ├── manifest-reactive-projection-OLD.md
@@ -263,6 +269,7 @@
 │   ├── SUIVI-js-deps-points-en-attente.md
 │   ├── confrontation-code-sequencement-phase0A-5.md
 │   ├── handoff-cartographie-hyper(ADR-011).md
+│   ├── handoff-checkpoint-segment-resolution+++.md
 │   ├── note-post-phase-5.3-generate-main.md
 │   └── risks.md
 ├── manifestos
@@ -311,6 +318,6 @@
     ├── orchestration-main-specification.md
     └── provisioning-projection-specification.md
 
-17 directories, 92 files
+17 directories, 95 files
 ```
 
