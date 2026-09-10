@@ -117,7 +117,7 @@ fn batch(
 // II. Benchmarks render() — granularité enregistrement unique
 // =============================================================================
 
-/// Coût brut de render_segments() sur un enregistrement nominal.
+/// Coût brut de render_chunks() sur un enregistrement nominal.
 ///
 /// buf est recréé à chaque sample via with_inputs() — Divan isole le setup
 /// hors de la fenêtre de mesure. black_box(buf) empêche LLVM d'éliminer
@@ -128,7 +128,7 @@ fn batch(
 /// stub unreachable!(), CONTRAT-implementation-projection-segmentee.md
 /// Étape 5). record_nominal() a is_readable=0 : le champ segmenté n'est de
 /// toute façon jamais atteint ici — ce benchmark mesure le chemin non
-/// segmenté du template, pas le mécanisme Segment lui-même (voir la section
+/// segmenté du template, pas le mécanisme RenderChunk lui-même (voir la section
 /// dédiée « IV. Benchmarks chemin segmenté » plus bas pour ça).
 #[divan::bench(name = "render/single/nominal")]
 fn bench_render_single_nominal(bencher: Bencher) {
@@ -140,11 +140,11 @@ fn bench_render_single_nominal(bencher: Bencher) {
         .with_inputs(|| {
             (
                 String::with_capacity(CONTENT_CORE_TOTAL_CAP),
-                Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS),
+                Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS),
             )
         })
         .bench_local_values(|(mut buf, mut segments)| {
-            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            ContentCoreProjection::render_chunks(&storage, &varlena, &mut buf, &mut segments);
             // black_box sur buf.len() ET segments.len() : force LLVM à
             // considérer les deux comme observables, empêchant l'élimination
             // du rendu ou des push() dans segments.
@@ -152,7 +152,7 @@ fn bench_render_single_nominal(bencher: Bencher) {
         });
 }
 
-/// Coût brut de render_segments() sur un enregistrement pire cas.
+/// Coût brut de render_chunks() sur un enregistrement pire cas.
 ///
 /// Mesure le chemin le plus long de marius_html_escape() :
 /// toutes les branches activées, buf.len() proche de TOTAL_CAP.
@@ -169,11 +169,11 @@ fn bench_render_single_worst_case(bencher: Bencher) {
         .with_inputs(|| {
             (
                 String::with_capacity(CONTENT_CORE_TOTAL_CAP),
-                Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS),
+                Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS),
             )
         })
         .bench_local_values(|(mut buf, mut segments)| {
-            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            ContentCoreProjection::render_chunks(&storage, &varlena, &mut buf, &mut segments);
             black_box((buf.len(), segments.len()))
         });
 }
@@ -243,7 +243,7 @@ fn bench_render_sequential_worst_case(bencher: Bencher, batch_size: usize) {
 // is_readable=0 : la branche {% if %} qui contient le champ segmenté
 // (content) n'est jamais atteinte à l'exécution — I/II/III ne mesurent que
 // le chemin non segmenté du template. Cette section exerce spécifiquement
-// le mécanisme Segment, ajoutée le 23/07/2026 en préparation d'une
+// le mécanisme RenderChunk, ajoutée le 23/07/2026 en préparation d'une
 // interruption prolongée de disponibilité (pas exécutée cette session).
 
 /// Taille volontairement plus modeste que la borne DDL réelle (VARCHAR(2000000)) —
@@ -297,14 +297,14 @@ fn record_segmented_large() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
 /// 200 Mo reste raisonnable.
 const SEGMENTED_BATCH_SIZES: &[usize] = &[10, 100, 1_000];
 
-/// Coût d'un render_segments() unique avec un corps volumineux emprunté.
+/// Coût d'un render_chunks() unique avec un corps volumineux emprunté.
 ///
 /// ─── Ce que ce benchmark doit révéler ────────────────────────────────────────
 ///
 ///   Un temps quasi identique à render/single/nominal (§II) — PAS
 ///   proportionnel à la taille de `content`. C'est précisément la promesse
 ///   du mécanisme : le corps n'est jamais copié dans `buf`, seulement
-///   référencé (`Segment::Borrowed`, zéro copie). Si le temps mesuré ici
+///   référencé (`RenderChunk::Borrowed`, zéro copie). Si le temps mesuré ici
 ///   croît significativement avec SEGMENTED_BODY_LEN_TARGET, quelque chose
 ///   recopie encore le champ quelque part — régression à investiguer
 ///   immédiatement, pas un simple écart de performance à optimiser.
@@ -318,13 +318,13 @@ fn bench_render_segmented_single_large(bencher: Bencher) {
         .with_inputs(|| {
             (
                 String::with_capacity(CONTENT_CORE_TOTAL_CAP),
-                Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS),
+                Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS),
             )
         })
         .bench_local_values(|(mut buf, mut segments)| {
-            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            ContentCoreProjection::render_chunks(&storage, &varlena, &mut buf, &mut segments);
             // 3 segments attendus pour content.core (en-tête Buffered, corps
-            // Borrowed, pied Buffered — MAX_SEGMENTS = 3 dans le code généré).
+            // Borrowed, pied Buffered — MAX_RENDER_CHUNKS = 3 dans le code généré).
             // Échoue fort si le mécanisme ne s'est pas déclenché comme prévu,
             // plutôt que de laisser un chiffre de timing trompeur passer
             // silencieusement.

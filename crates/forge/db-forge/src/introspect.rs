@@ -172,7 +172,7 @@ pub async fn fetch_max_id(
 ///     au runtime (HTML déjà constitué — CONTRAT-implementation-varlena-raw.md).
 ///   Si COMMENT ON COLUMN ... IS 'marius:large_content' → Raw + is_segment,
 ///     contribution nulle à DYNAMIC_CAP, jamais concaténé dans buf — devient
-///     un Segment::Borrowed autonome (CONTRAT-implementation-projection-
+///     un RenderChunk::Borrowed autonome (CONTRAT-implementation-projection-
 ///     segmentee.md). Tag déclarant une propriété métier (contenu volumineux),
 ///     pas un mécanisme — le choix de la stratégie de rendu appartient au
 ///     générateur.
@@ -224,7 +224,7 @@ pub async fn fetch_varlena_cols(
         // 'marius:large_content' déclare une PROPRIÉTÉ métier (ce champ est un
         // contenu volumineux), pas un mécanisme — c'est au générateur de
         // choisir la stratégie de rendu (aujourd'hui : projection segmentée,
-        // Segment::Borrowed zéro-copie). Implique toujours EscapePolicy::Raw :
+        // RenderChunk::Borrowed zéro-copie). Implique toujours EscapePolicy::Raw :
         // un champ segmenté est par nature emprunté zéro-copie, incompatible
         // avec un passage par marius_html_escape (qui exige de recopier
         // caractère par caractère dans buf).

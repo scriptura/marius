@@ -163,7 +163,7 @@ fn record_segmented_large() -> (ContentCoreStorageRow, ContentCoreVarlenOwned) {
 // II. Benchmarks render() — granularité enregistrement unique
 // =============================================================================
 
-/// Coût brut de render_segments() sur un enregistrement nominal.
+/// Coût brut de render_chunks() sur un enregistrement nominal.
 ///
 /// Correction (23/07/2026) : appelait render() directement — cassé pour
 /// content.core, segmenté depuis CONTRAT-implementation-projection-
@@ -178,16 +178,16 @@ fn bench_render_single_nominal(bencher: Bencher) {
         .with_inputs(|| {
             (
                 String::with_capacity(CONTENT_CORE_TOTAL_CAP),
-                Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS),
+                Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS),
             )
         })
         .bench_local_values(|(mut buf, mut segments)| {
-            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            ContentCoreProjection::render_chunks(&storage, &varlena, &mut buf, &mut segments);
             black_box((buf.len(), segments.len()))
         });
 }
 
-/// Coût brut de render_segments() sur un enregistrement pire cas.
+/// Coût brut de render_chunks() sur un enregistrement pire cas.
 ///
 /// Correction (23/07/2026) : même correctif que bench_render_single_nominal.
 #[divan::bench(name = "render/single/worst_case")]
@@ -200,11 +200,11 @@ fn bench_render_single_worst_case(bencher: Bencher) {
         .with_inputs(|| {
             (
                 String::with_capacity(CONTENT_CORE_TOTAL_CAP),
-                Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS),
+                Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS),
             )
         })
         .bench_local_values(|(mut buf, mut segments)| {
-            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            ContentCoreProjection::render_chunks(&storage, &varlena, &mut buf, &mut segments);
             black_box((buf.len(), segments.len()))
         });
 }
@@ -316,12 +316,12 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
             // Divan ne voit pas d'input à mesurer et n'affiche pas les temps.
             //
             // buf est pré-chauffé ici (hors fenêtre de certification) : le
-            // premier render_segments() garantit que capacity >= TOTAL_CAP
+            // premier render_chunks() garantit que capacity >= TOTAL_CAP
             // après l'éventuel arrondi page de l'allocateur. Les allocations
             // de ce setup sont hors reset/read.
             //
-            // Correction (26/07/2026) : le Vec<Segment> produit par ce premier
-            // appel emprunte sur `varlena` (Segment::Borrowed) — impossible à
+            // Correction (26/07/2026) : le Vec<RenderChunk> produit par ce premier
+            // appel emprunte sur `varlena` (RenderChunk::Borrowed) — impossible à
             // renvoyer dans le même tuple que `varlena` lui-même (déplacé),
             // le borrow checker refuse à raison (E0505/E0515). Ce
             // pré-chauffage utilise donc un Vec jetable, local à cette
@@ -334,30 +334,30 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
             // projection-segmentee.md Étape 5.
             let (storage, varlena) = record_worst_case();
             let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
-            let mut warmup_segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
-            ContentCoreProjection::render_segments(
+            let mut warmup_segments = Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS);
+            ContentCoreProjection::render_chunks(
                 &storage,
                 &varlena,
                 &mut buf,
                 &mut warmup_segments,
             );
             drop(warmup_segments);
-            let segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+            let segments = Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS);
             (storage, varlena, buf, segments)
         })
         .bench_local_values(|(storage, varlena, mut buf, mut segments)| {
             // ── Fenêtre de certification ──────────────────────────────────────
             // buf.clear()/segments.clear() : len=0, capacity inchangée — prêts
-            // pour render_segments().
+            // pour render_chunks().
             buf.clear();
             segments.clear();
             // reset() : barrière SeqCst — garantit la visibilité avant l'appel.
             CountingAlloc::reset();
 
-            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            ContentCoreProjection::render_chunks(&storage, &varlena, &mut buf, &mut segments);
 
             // ── Lecture et assertion ──────────────────────────────────────────
-            // SeqCst : garantit que toutes les écritures de render_segments()
+            // SeqCst : garantit que toutes les écritures de render_chunks()
             // sont visibles.
             let allocs = CountingAlloc::alloc_count();
             let bytes = CountingAlloc::alloc_bytes();
@@ -365,7 +365,7 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
             assert_eq!(
                 allocs, 0,
                 "CERTIFICATION ÉCHOUÉE : {allocs} allocation(s) détectée(s) \
-                 dans render_segments() ({bytes} octets). \
+                 dans render_chunks() ({bytes} octets). \
                  DYNAMIC_CAP ({CONTENT_CORE_TOTAL_CAP}B) sous-estime le pire cas. \
                  Vérifier max_display_width (FieldKind) et max_escaped_len (VarlenField) \
                  dans crates/forge/fragment-forge/src/lib.rs."
@@ -378,7 +378,7 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
         });
 }
 
-/// Certifie que P::render_segments() n'alloue pas, même avec un champ
+/// Certifie que P::render_chunks() n'alloue pas, même avec un champ
 /// segmenté volumineux (plusieurs centaines de Ko) — CONTRAT-implementation-
 /// projection-segmentee.md, ajoutée le 23/07/2026 en préparation d'une
 /// interruption prolongée de disponibilité (pas exécutée cette session).
@@ -387,14 +387,14 @@ fn bench_certify_zero_alloc(bencher: Bencher) {
 ///
 ///   zero_alloc_in_render (ci-dessus) utilise record_worst_case(), dont le
 ///   champ content est toujours None (is_readable=0 dans cette fixture) — le
-///   mécanisme Segment n'y est jamais exercé. Cette certification-ci utilise
+///   mécanisme RenderChunk n'y est jamais exercé. Cette certification-ci utilise
 ///   record_segmented_large() : is_readable=1, content = ~200 Ko de HTML.
-///   Si Segment::Borrowed copiait silencieusement son contenu quelque part
+///   Si RenderChunk::Borrowed copiait silencieusement son contenu quelque part
 ///   (au lieu de rester une référence zéro-copie), cette certification
 ///   échouerait ici alors que la précédente resterait verte — c'est
 ///   précisément le scénario qu'elle est conçue pour détecter.
 #[divan::bench(
-    name = "certify/zero_alloc_in_render_segments_large_body",
+    name = "certify/zero_alloc_in_render_chunks_large_body",
     sample_count = 100
 )]
 fn bench_certify_zero_alloc_large_body(bencher: Bencher) {
@@ -405,15 +405,15 @@ fn bench_certify_zero_alloc_large_body(bencher: Bencher) {
             // varlena) pour ce qui est réellement renvoyé.
             let (storage, varlena) = record_segmented_large();
             let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
-            let mut warmup_segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
-            ContentCoreProjection::render_segments(
+            let mut warmup_segments = Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS);
+            ContentCoreProjection::render_chunks(
                 &storage,
                 &varlena,
                 &mut buf,
                 &mut warmup_segments,
             );
             drop(warmup_segments);
-            let segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+            let segments = Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS);
             (storage, varlena, buf, segments)
         })
         .bench_local_values(|(storage, varlena, mut buf, mut segments)| {
@@ -421,7 +421,7 @@ fn bench_certify_zero_alloc_large_body(bencher: Bencher) {
             segments.clear();
             CountingAlloc::reset();
 
-            ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+            ContentCoreProjection::render_chunks(&storage, &varlena, &mut buf, &mut segments);
 
             let allocs = CountingAlloc::alloc_count();
             let bytes = CountingAlloc::alloc_bytes();
@@ -429,10 +429,10 @@ fn bench_certify_zero_alloc_large_body(bencher: Bencher) {
             assert_eq!(
                 allocs, 0,
                 "CERTIFICATION ÉCHOUÉE : {allocs} allocation(s) détectée(s) dans \
-                 render_segments() avec un corps volumineux ({bytes} octets alloués). \
+                 render_chunks() avec un corps volumineux ({bytes} octets alloués). \
                  Le champ segmenté ne devrait jamais être copié — vérifier que \
                  generate_segmented_snippet (fragment-forge/lib.rs) émet bien \
-                 Segment::Borrowed(s) et non une recopie dans buf."
+                 RenderChunk::Borrowed(s) et non une recopie dans buf."
             );
 
             assert_eq!(

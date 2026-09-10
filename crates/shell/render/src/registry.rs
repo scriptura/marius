@@ -190,7 +190,6 @@ mod tests {
     use crate::pack_html_format::{PackfileEntry, write_packfile_footer};
     use crate::pack_html_index::ALIVE_INSTANCES;
     use std::io::{BufWriter, Write};
-    use std::os::unix::fs::FileExt;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     const KEY: &str = "jalon2_test_key";
@@ -267,10 +266,12 @@ mod tests {
                         panic!("id={id} absent — présent dans chaque génération")
                     });
 
-                    let mut buf = vec![0u8; len as usize];
-                    idx.file()
-                        .read_at(&mut buf, offset)
-                        .expect("read_at ne doit jamais échouer sur un fd valide");
+                    // blob() : lecture via le mapping persistant (Phase 0.B),
+                    // pas file()+read_at — exercice du chemin zéro-copie sous
+                    // remplacement concurrent de la génération publiée.
+                    let buf = idx
+                        .blob(offset, len)
+                        .expect("blob() ne doit jamais échouer sur une plage issue de lookup()");
 
                     if buf != expected {
                         mismatch.store(true, Ordering::Relaxed);
@@ -306,6 +307,96 @@ mod tests {
              les lecteurs et de l'écrivain — fuite détectée (une ancienne \
              génération n'a pas été libérée)"
         );
+    }
+
+    // =========================================================================
+    // Test — Phase 0.B, consigne 7 (arbitrage 2026-09)
+    //
+    // Propriété distincte du test précédent : celui-ci ne mesure pas
+    // seulement "chaque load() successif voit un contenu cohérent", mais
+    // qu'un unique Arc<PackHtmlIndex>, chargé UNE FOIS avant la tempête de
+    // store(), continue de résoudre blob() correctement pendant toute la
+    // durée du remplacement concurrent de la génération publiée dans le
+    // registre. La tranche empruntée dépend de la durée de vie de cet Arc
+    // précis, jamais de l'état courant du registre — store() ne mute aucune
+    // instance déjà chargée, il substitue seulement le pointeur pour les
+    // load() futurs.
+    // =========================================================================
+
+    #[test]
+    fn blob_slice_from_a_retained_arc_stays_valid_across_concurrent_store() {
+        ALIVE_INSTANCES.store(0, Ordering::Relaxed);
+
+        let initial = build_generation(0);
+
+        let mut indices = HashMap::new();
+        indices.insert(KEY, ArcSwap::from_pointee(initial));
+        let registry = Arc::new(LiveRegistry::with_indices(indices));
+
+        // Un seul load(), avant toute tempête de store() — c'est cet Arc
+        // précis, et lui seul, dont la survie de tranche est sous test.
+        let retained: Arc<PackHtmlIndex> =
+            registry.load(KEY).expect("clé provisionnée au démarrage");
+        let (id, expected) = IDS_AND_FRAGMENTS[0];
+        let (offset, len) = retained
+            .lookup(id)
+            .expect("id présent dans la génération initiale");
+
+        let mismatch = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::with_capacity(2);
+
+        // Lecteur unique : relit en boucle la tranche issue de `retained`,
+        // jamais un load() frais — c'est la garantie de durée de vie liée à
+        // l'Arc, pas au registre, qui est exercée ici.
+        {
+            let retained = Arc::clone(&retained);
+            let mismatch = Arc::clone(&mismatch);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..READS_PER_READER {
+                    let buf = retained.blob(offset, len).expect(
+                        "blob() doit rester résolvable pour toute la durée de vie de l'Arc retenu",
+                    );
+                    if buf != expected {
+                        mismatch.store(true, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+
+        // Écrivain : remplace la génération publiée dans le registre,
+        // sans jamais toucher `retained`.
+        {
+            let registry = Arc::clone(&registry);
+            handles.push(std::thread::spawn(move || {
+                for tag in 1..=NUM_GENERATIONS {
+                    let next = build_generation(tag);
+                    registry.store(KEY, Arc::new(next));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("un thread du test a paniqué");
+        }
+
+        assert!(
+            !mismatch.load(Ordering::Relaxed),
+            "une tranche empruntée sur l'Arc retenu a renvoyé un contenu \
+             incorrect pendant le remplacement concurrent de la génération \
+             publiée — violation de la propriété de durée de vie"
+        );
+
+        // `retained` est toujours vivant à ce point (variable locale non
+        // droppée) : sa tranche doit rester lisible même après la fin de la
+        // tempête de store().
+        assert_eq!(
+            retained.blob(offset, len),
+            Some(expected),
+            "la tranche doit rester résolvable après la fin des store() concurrents, \
+             tant que l'Arc retenu est vivant"
+        );
+
+        drop(retained);
     }
 
     #[test]

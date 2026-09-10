@@ -1,27 +1,25 @@
-// =============================================================================
 // crates/shell/render/src/batch_renderer.rs
-//
-// Moteur d'exécution Packfile HTML — distinct du store.bin (PackfileBuilder/
-// PackfileReader, marius_projection) qui porte les StorageRow brutes pour
-// fetch_batch. Ce fichier produit l'artefact HTML servi en lecture par sendfile
-// (ADR-006), pas les données sources.
-//
-// Invariants :
-//   O(1) syscalls  : un seul open() par fichier — fd conservé, jamais réouvert
-//                    par requête (côté lecture, voir specification-marius-render-shell.md).
-//   Zéro-alloc     : buf.clear() entre records (capacity conservée).
-//                    index pré-alloué à batch_len avant la boucle.
-//   Index physique : Vec<PackfileEntry> corrélant chaque ID à (offset, len),
-//                    bytemuck::Pod — castable directement depuis un mmap.
-//
-// Format on-disk complet : voir pack_html_format.rs (source de vérité unique —
-// PackfileEntry, PackfileFooter, write_packfile_footer).
-// =============================================================================
+
+//! Moteur d'exécution Packfile HTML — distinct du store.bin (PackfileBuilder/
+//! PackfileReader, marius_projection) qui porte les StorageRow brutes pour
+//! fetch_batch. Ce fichier produit l'artefact HTML servi en lecture par sendfile
+//! (ADR-006), pas les données sources.
+//!
+//! Invariants :
+//!   O(1) syscalls  : un seul open() par fichier — fd conservé, jamais réouvert
+//!                    par requête (côté lecture, voir specification-marius-render-shell.md).
+//!   Zéro-alloc     : buf.clear() entre records (capacity conservée).
+//!                    index pré-alloué à batch_len avant la boucle.
+//!   Index physique : Vec<PackfileEntry> corrélant chaque ID à (offset, len),
+//!                    bytemuck::Pod — castable directement depuis un mmap.
+//!
+//! Format on-disk complet : voir pack_html_format.rs (source de vérité unique —
+//! PackfileEntry, PackfileFooter, write_packfile_footer).
 
 use std::io::{BufWriter, Write};
 use std::marker::PhantomData;
 
-use marius_projection::{Projection, Segment};
+use marius_projection::{Projection, RenderChunk};
 
 use crate::pack_html_format::PackfileEntry;
 
@@ -74,13 +72,13 @@ impl<P: Projection> BatchRenderer<P> {
     ///      des segments `Buffered` — un champ `marius:large_content` n'y
     ///      contribue jamais, cf. CONTRAT-implementation-projection-segmentee.md).
     ///   2. batch_len == records.len() au moment de new().
-    ///   3. P::render_segments() n'alloue pas en interne pour la partie
+    ///   3. P::render_chunks() n'alloue pas en interne pour la partie
     ///      `Buffered` (invariant Fragment-Forge) — les segments `Borrowed`
     ///      sont zéro-copie par construction (`&str` emprunté sur `varlena`).
     ///
     /// # `segments` : allocation locale, pas un champ de `BatchRenderer`
     ///
-    ///   `Segment<'a>` emprunte sur `varlena` (`&'a P::VarlenOwned`), dont la
+    ///   `RenderChunk<'a>` emprunte sur `varlena` (`&'a P::VarlenOwned`), dont la
     ///   durée de vie est celle du slice `records` passé à *cet* appel —
     ///   différente à chaque appel de `render_batch`. En faire un champ de
     ///   `BatchRenderer` figerait la durée de vie du renderer entier sur un
@@ -99,15 +97,15 @@ impl<P: Projection> BatchRenderer<P> {
         offset_start: u64,
     ) -> std::io::Result<u64> {
         let mut offset = offset_start;
-        let mut segments: Vec<Segment> = Vec::with_capacity(P::MAX_SEGMENTS);
+        let mut segments: Vec<RenderChunk> = Vec::with_capacity(P::MAX_RENDER_CHUNKS);
 
         for (record, varlena) in records {
             // Réinitialise len à 0 sans libérer la mémoire allouée. Unique
             // clear() de tout le traitement de cet enregistrement — une
-            // implémentation segmentée de render_segments() peut continuer à
+            // implémentation segmentée de render_chunks() peut continuer à
             // écrire dans buf après un premier segment Buffered (en-tête,
             // puis pied après un segment Borrowed intercalé) sans jamais le
-            // vider entre les deux (cf. doc de Projection::render_segments).
+            // vider entre les deux (cf. doc de Projection::render_chunks).
             self.buf.clear();
             segments.clear();
 
@@ -120,7 +118,7 @@ impl<P: Projection> BatchRenderer<P> {
                 std::any::type_name::<P>(),
             );
 
-            P::render_segments(record, varlena, &mut self.buf, &mut segments);
+            P::render_chunks(record, varlena, &mut self.buf, &mut segments);
 
             // Écriture séquentielle de chaque segment, dans l'ordre — la
             // longueur totale de l'enregistrement est la somme des longueurs
@@ -130,8 +128,8 @@ impl<P: Projection> BatchRenderer<P> {
             let mut len: u32 = 0;
             for segment in &segments {
                 let bytes: &[u8] = match segment {
-                    Segment::Buffered { start, end } => &self.buf.as_bytes()[*start..*end],
-                    Segment::Borrowed(s) => s.as_bytes(),
+                    RenderChunk::Buffered { start, end } => &self.buf.as_bytes()[*start..*end],
+                    RenderChunk::Borrowed(s) => s.as_bytes(),
                 };
                 writer.write_all(bytes)?;
                 len += bytes.len() as u32;
@@ -266,7 +264,7 @@ mod tests {
 
     // ── Projection stub segmentée ─────────────────────────────────────────────
     // CONTRAT-implementation-projection-segmentee.md, Étape 4 : exerce
-    // render_segments() avec une implémentation réelle multi-segments
+    // render_chunks() avec une implémentation réelle multi-segments
     // (en-tête statique, corps volumineux emprunté, pied statique), sur le
     // modèle de ce que fragment-forge/db-forge généreront à l'Étape 5 pour un
     // champ marius:large_content.
@@ -295,23 +293,23 @@ mod tests {
         }
 
         // Jamais appelée : BatchRenderer::render_batch appelle toujours
-        // render_segments(), jamais render() directement. Présente uniquement
+        // render_chunks(), jamais render() directement. Présente uniquement
         // parce que le trait l'exige (pas de valeur par défaut pour render()
-        // lui-même — seule render_segments() en a une).
+        // lui-même — seule render_chunks() en a une).
         fn render(_record: &StubRecord, _varlena: &StubVarlenOwned, _buf: &mut String) {
             unreachable!(
                 "StubSegmentedProjection::render() ne devrait jamais être appelée : \
-                 BatchRenderer appelle systématiquement render_segments()."
+                 BatchRenderer appelle systématiquement render_chunks()."
             );
         }
 
-        const MAX_SEGMENTS: usize = 3;
+        const MAX_RENDER_CHUNKS: usize = 3;
 
-        fn render_segments<'a>(
+        fn render_chunks<'a>(
             record: &StubRecord,
             varlena: &'a StubVarlenOwned,
             buf: &mut String,
-            segments: &mut Vec<Segment<'a>>,
+            segments: &mut Vec<RenderChunk<'a>>,
         ) {
             use std::fmt::Write as _;
 
@@ -319,20 +317,20 @@ mod tests {
             buf.push_str("<article id=\"");
             write!(buf, "{}", record.id).unwrap();
             buf.push_str("\">");
-            segments.push(Segment::Buffered {
+            segments.push(RenderChunk::Buffered {
                 start: 0,
                 end: buf.len(),
             });
 
             // Corps volumineux — emprunté zéro-copie, jamais concaténé dans buf.
-            segments.push(Segment::Borrowed(varlena.body.as_str()));
+            segments.push(RenderChunk::Borrowed(varlena.body.as_str()));
 
             // Pied — repris À LA SUITE dans le MÊME buf, sans clear() entre
             // les deux (sinon le premier Buffered référencerait des octets
             // déjà écrasés). Second segment Buffered, plage distincte du premier.
             let footer_start = buf.len();
             buf.push_str("</article>");
-            segments.push(Segment::Buffered {
+            segments.push(RenderChunk::Buffered {
                 start: footer_start,
                 end: buf.len(),
             });

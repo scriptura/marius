@@ -115,11 +115,11 @@ mod tests {
         let (storage, varlena) = &results[0];
 
         let mut buf = String::with_capacity(CONTENT_CORE_TOTAL_CAP);
-        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS);
         // Correction (26/07/2026) : appelait render() directement — cassé
         // pour content.core, segmenté depuis CONTRAT-implementation-
         // projection-segmentee.md Étape 5.
-        ContentCoreProjection::render_segments(storage, varlena, &mut buf, &mut segments);
+        ContentCoreProjection::render_chunks(storage, varlena, &mut buf, &mut segments);
         println!("ContentCore[0] : {buf}");
 
         // ⚠️ Assertions non revérifiées contre le template réel actuel
@@ -185,18 +185,18 @@ mod tests {
 
         let initial_cap = CONTENT_CORE_TOTAL_CAP;
         let mut buf = String::with_capacity(initial_cap);
-        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS);
 
         // Correction (26/07/2026) : appelait render() directement — cassé
         // pour content.core, segmenté depuis CONTRAT-implementation-
         // projection-segmentee.md Étape 5 (render() y est un stub
-        // unreachable!(), render_segments() est la seule voie valide).
+        // unreachable!(), render_chunks() est la seule voie valide).
         // varlena.content == None ici (Default::default()) : le champ
         // segmenté ne traverse de toute façon jamais buf, borné ou non —
         // ce test reste donc un test valide de l'invariant no-realloc pour
         // la partie STATIC_CAP/DYNAMIC_CAP du composant, inchangé par la
         // segmentation.
-        ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+        ContentCoreProjection::render_chunks(&storage, &varlena, &mut buf, &mut segments);
 
         assert_eq!(
             buf.capacity(),
@@ -226,7 +226,7 @@ mod tests {
     /// est toujours `None` (`Default::default()`) — la branche segmentée
     /// (`{% if record.is_readable %}`) n'y est jamais exercée. Ce test-ci
     /// active `is_readable=1` avec un corps volumineux, pour prouver que
-    /// `buf` ne réalloue jamais MÊME quand `Segment::Borrowed` est
+    /// `buf` ne réalloue jamais MÊME quand `RenderChunk::Borrowed` est
     /// effectivement poussé — c'est l'invariant central du mécanisme, et il
     /// n'était certifié nulle part au niveau bloquant avant ce test (ajouté
     /// le 26/07/2026, CONTRAT-implementation-projection-segmentee.md ; seuls
@@ -250,7 +250,7 @@ mod tests {
 
         // Corps volumineux, largement au-delà de l'ancien seuil AOT de 64 Ko
         // (introspect.rs) — ne doit jamais influencer buf.capacity() puisqu'il
-        // devient un Segment::Borrowed autonome, jamais concaténé dans buf.
+        // devient un RenderChunk::Borrowed autonome, jamais concaténé dans buf.
         let large_body = "<p>Paragraphe de test pour le contenu segmenté.</p>\n".repeat(10_000);
 
         let varlena = ContentCoreVarlenOwned {
@@ -260,9 +260,9 @@ mod tests {
 
         let initial_cap = CONTENT_CORE_TOTAL_CAP;
         let mut buf = String::with_capacity(initial_cap);
-        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS);
 
-        ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+        ContentCoreProjection::render_chunks(&storage, &varlena, &mut buf, &mut segments);
 
         assert_eq!(
             buf.capacity(),
@@ -366,14 +366,14 @@ mod tests {
         };
 
         let mut buf = String::new();
-        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_SEGMENTS);
+        let mut segments = Vec::with_capacity(ContentCoreProjection::MAX_RENDER_CHUNKS);
         // Correction (26/07/2026) : appelait render() directement — cassé
         // depuis la segmentation. is_readable=0 par défaut ci-dessus : le
         // ratio mesuré ici ne reflète toujours que la partie STATIC/DYNAMIC
         // du composant (en-tête + pied), jamais le champ marius:large_content
         // — cohérent avec le sens même de ce diagnostic (CONTENT_CORE_TOTAL_CAP
         // ne compte plus ce champ non plus, cf. Étape 1 du Contrat).
-        ContentCoreProjection::render_segments(&storage, &varlena, &mut buf, &mut segments);
+        ContentCoreProjection::render_chunks(&storage, &varlena, &mut buf, &mut segments);
 
         let ratio = buf.len() as f64 / CONTENT_CORE_TOTAL_CAP as f64 * 100.0;
         eprintln!(

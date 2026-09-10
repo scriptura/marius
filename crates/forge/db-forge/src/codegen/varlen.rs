@@ -77,7 +77,7 @@ pub fn write_varlen_owned_struct(
         if v.is_segment {
             writeln!(
                 out,
-                "    /// Segment autonome (marius:large_content) — jamais concaténé \
+                "    /// RenderChunk autonome (marius:large_content) — jamais concaténé \
                  dans buf, ne dimensionne jamais la capacité totale du composant."
             )
             .unwrap();
