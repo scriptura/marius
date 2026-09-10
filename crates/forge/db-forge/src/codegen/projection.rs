@@ -454,7 +454,7 @@ pub fn write_projection_stub(
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // ── render() / render_segments() ──────────────────────────────────────────
+    // ── render() / render_chunks() ──────────────────────────────────────────
     // CONTRAT-implementation-projection-segmentee.md, Étape 5 : has_segment
     // recalculé ici à partir du même `varlena` que build.rs a déjà utilisé
     // pour choisir generate_aot_snippet vs generate_segmented_snippet — aucune
@@ -506,14 +506,14 @@ pub fn write_projection_stub(
     if has_segment {
         // Composant segmenté : render() n'est jamais invoquée en pratique —
         // BatchRenderer::render_batch appelle systématiquement
-        // render_segments() (Étape 4). Présente uniquement parce que le
+        // render_chunks() (Étape 4). Présente uniquement parce que le
         // trait l'exige (pas de valeur par défaut pour render() lui-même,
-        // contrairement à render_segments()) — cf. StubSegmentedProjection,
+        // contrairement à render_chunks()) — cf. StubSegmentedProjection,
         // même patron, déjà exercé par les tests de batch_renderer.rs.
         writeln!(out, "        let _ = (record, buf);").unwrap();
         writeln!(
             out,
-            "        unreachable!(\"{name}Projection::render() ne devrait jamais être appelée — composant segmenté, BatchRenderer appelle toujours render_segments().\");"
+            "        unreachable!(\"{name}Projection::render() ne devrait jamais être appelée — composant segmenté, BatchRenderer appelle toujours render_chunks().\");"
         )
         .unwrap();
     } else if render_body.is_empty() {
@@ -533,23 +533,23 @@ pub fn write_projection_stub(
     writeln!(out).unwrap();
 
     if has_segment {
-        // MAX_SEGMENTS = 2N+1, N = nombre de champs is_segment dans ce join
+        // MAX_RENDER_CHUNKS = 2N+1, N = nombre de champs is_segment dans ce join
         // (chaque champ segmenté ferme un run Buffered, pousse un Borrowed,
         // rouvre un run — cf. generate_segmented_snippet). Hypothèse
         // simplificatrice documentée : chaque champ segmenté n'apparaît
         // qu'une fois dans le template — vraie pour tous les cas réels à ce
-        // jour (content.core : 1 champ segmenté → MAX_SEGMENTS = 3). Un
+        // jour (content.core : 1 champ segmenté → MAX_RENDER_CHUNKS = 3). Un
         // champ référencé plusieurs fois sur-approvisionnerait le Vec sans
         // jamais casser la correction — coût négligeable, jamais un bug.
         let segment_count = varlena.iter().filter(|v| v.is_segment).count();
         let max_segments = 2 * segment_count + 1;
-        writeln!(out, "    const MAX_SEGMENTS: usize = {max_segments};").unwrap();
+        writeln!(out, "    const MAX_RENDER_CHUNKS: usize = {max_segments};").unwrap();
         writeln!(out).unwrap();
 
         writeln!(out, "    #[allow(clippy::collapsible_if)]").unwrap();
         writeln!(
             out,
-            "    fn render_segments<'seg>(record: &Self::Record, varlena: &'seg {name}VarlenOwned, buf: &mut String, segments: &mut Vec<marius_projection::Segment<'seg>>) {{"
+            "    fn render_chunks<'seg>(record: &Self::Record, varlena: &'seg {name}VarlenOwned, buf: &mut String, segments: &mut Vec<marius_projection::RenderChunk<'seg>>) {{"
         )
         .unwrap();
         // render_body est ici le corps produit par generate_segmented_snippet

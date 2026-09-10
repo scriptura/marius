@@ -258,7 +258,7 @@ pub fn generate_aot_snippet<'src, 'r>(
     out
 }
 
-/// Génère le corps de `render_segments()` pour un composant portant au moins
+/// Génère le corps de `render_chunks()` pour un composant portant au moins
 /// un champ `is_segment == true` — CONTRAT-implementation-projection-
 /// segmentee.md, Étape 5. Appelée par `build.rs` à la place de
 /// `generate_aot_snippet` uniquement quand `varlena.iter().any(|v|
@@ -269,8 +269,8 @@ pub fn generate_aot_snippet<'src, 'r>(
 /// Identique à `generate_aot_snippet` pour tout token qui n'est pas un champ
 /// `is_segment` — même émission `buf.push_str`/`marius_html_escape`/etc.,
 /// dans `buf`. La seule différence : un champ `is_segment` clôt le « run »
-/// `Buffered` courant (`segments.push(Segment::Buffered { start, end })`),
-/// pousse sa valeur comme `Segment::Borrowed` autonome (jamais concaténée
+/// `Buffered` courant (`segments.push(RenderChunk::Buffered { start, end })`),
+/// pousse sa valeur comme `RenderChunk::Borrowed` autonome (jamais concaténée
 /// dans `buf`), puis rouvre un nouveau run pour ce qui suit.
 ///
 /// `seg_start` est une variable Rust générée, déclarée une seule fois en tête
@@ -348,12 +348,12 @@ pub fn generate_segmented_snippet<'src, 'r>(
                         // vide légitimement poussé, aucun octet perdu).
                         writeln!(
                             out,
-                            "{indent}segments.push(marius_projection::Segment::Buffered {{ start: seg_start, end: buf.len() }});"
+                            "{indent}segments.push(marius_projection::RenderChunk::Buffered {{ start: seg_start, end: buf.len() }});"
                         )
                         .unwrap();
                         writeln!(
                             out,
-                            "{indent}if let Some(s) = {field}_ref {{ segments.push(marius_projection::Segment::Borrowed(s)); }}"
+                            "{indent}if let Some(s) = {field}_ref {{ segments.push(marius_projection::RenderChunk::Borrowed(s)); }}"
                         )
                         .unwrap();
                         writeln!(out, "{indent}seg_start = buf.len();").unwrap();
@@ -423,11 +423,11 @@ pub fn generate_segmented_snippet<'src, 'r>(
 
     // Clôture du dernier run — toujours émise, qu'il y ait eu 0 ou N champs
     // segmentés (si 0, ce run couvre tout buf, comportement équivalent à
-    // l'implémentation par défaut de render_segments — mais cette fonction
+    // l'implémentation par défaut de render_chunks — mais cette fonction
     // n'est de toute façon appelée par build.rs que si has_segment == true).
     writeln!(
         out,
-        "segments.push(marius_projection::Segment::Buffered {{ start: seg_start, end: buf.len() }});"
+        "segments.push(marius_projection::RenderChunk::Buffered {{ start: seg_start, end: buf.len() }});"
     )
     .unwrap();
 
@@ -664,12 +664,12 @@ mod tests_phase_2_2 {
             "déclaration seg_start absente:\n{got}"
         );
         assert!(
-            got.contains("segments.push(marius_projection::Segment::Buffered"),
+            got.contains("segments.push(marius_projection::RenderChunk::Buffered"),
             "push Buffered absent:\n{got}"
         );
         assert!(
             got.contains(
-                "if let Some(s) = content_ref { segments.push(marius_projection::Segment::Borrowed(s)); }"
+                "if let Some(s) = content_ref { segments.push(marius_projection::RenderChunk::Borrowed(s)); }"
             ),
             "push Borrowed absent ou mal formé:\n{got}"
         );
@@ -679,7 +679,7 @@ mod tests_phase_2_2 {
         );
         // Deux runs Buffered : avant et après le champ segmenté.
         assert_eq!(
-            got.matches("Segment::Buffered").count(),
+            got.matches("RenderChunk::Buffered").count(),
             2,
             "deux runs Buffered attendus (avant/après le champ segmenté):\n{got}"
         );
@@ -715,7 +715,7 @@ mod tests_phase_2_2 {
         // Le push Buffered/Borrowed à l'intérieur du if doit être indenté —
         // preuve qu'il est bien conditionnel, pas exécuté inconditionnellement.
         assert!(
-            got.contains("    segments.push(marius_projection::Segment::Buffered"),
+            got.contains("    segments.push(marius_projection::RenderChunk::Buffered"),
             "le push à l'intérieur du bloc if devrait être indenté :\n{got}"
         );
         assert!(
@@ -755,7 +755,7 @@ mod tests_phase_2_2 {
         );
 
         assert_eq!(
-            got.matches("Segment::Buffered").count(),
+            got.matches("RenderChunk::Buffered").count(),
             1,
             "un seul run Buffered attendu, couvrant tout buf:\n{got}"
         );
