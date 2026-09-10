@@ -458,7 +458,7 @@ crates/shell/server/build.rs
       qu'une négative (« ce n'est pas déjà là ») utile pour ne pas rouvrir
       la recherche à zéro.
 
-crates/core/schema/build.rs
+crates/core/schema/build.rs => remplacé par `crates/core/schema/build/*.rs` (voir `tree.md`)
   CONTEXTE / VÉRIFICATION — NON ENCORE REÇU
   Rôle attendu, non confirmé : référencé deux fois par commentaire dans
       crates/shell/server/build.rs comme faisant une validation de layout
@@ -466,6 +466,23 @@ crates/core/schema/build.rs
       encore manquant identifié comme potentiellement informatif pour la
       question ouverte du propriétaire du calcul backend_kind/IOV_MAX. À
       demander en priorité si cette question doit être close avant Phase 3.
+      Rectification : build.rs, trop volumineux, à été découpé en plusieurs fichiers par responsabilité :
+
+      marius/crates/core/schema/build$ tree
+        .
+        ├── asset_lookup.rs
+        ├── capabilities.rs
+        ├── main.rs
+        ├── manifest.rs
+        ├── markers.rs
+        ├── modules_lowering.rs
+        └── template
+            ├── common.rs
+            ├── dynamic.rs
+            ├── mod.rs
+            ├── page.rs
+            └── static_page.rs
+      Dans une première passe nous vous donnons `main.rs`, réclamez plus si besoin.
 ```
 
 **Explicitement hors périmètre pour Phase 3** — vérifié plutôt que supposé, pour éviter qu'une nouvelle session parte à leur recherche sans nécessité :
