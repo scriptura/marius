@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/scriptura/marius"
@@ -81,16 +81,16 @@ oxc_codegen = "=0.148.0"
 oxc_minifier = "=0.148.0"
 
 # Dépendances internes au workspace — version verrouillée pour tous les membres.
-marius = { version = "=0.5.0", path = "crates/marius" }
-marius-collector = { version = "=0.5.0", path = "crates/core/collector" }
-marius-projection = { version = "=0.5.0", path = "crates/core/projection" }
-marius-schema = { version = "=0.5.0", path = "crates/core/schema" }
-marius-render = { version = "=0.5.0", path = "crates/shell/render" }
-marius-server = { version = "=0.5.0", path = "crates/shell/server" }
-marius-db-forge = { version = "=0.5.0", path = "crates/forge/db-forge" }
-marius-fragment-forge = { version = "=0.5.0", path = "crates/forge/fragment-forge" }
-marius-guard-forge = { version = "=0.5.0", path = "crates/forge/guard-forge" }
-marius-bridge-forge = { version = "=0.5.0", path = "crates/forge/bridge-forge" }
+marius = { version = "=0.6.0", path = "crates/marius" }
+marius-collector = { version = "=0.6.0", path = "crates/core/collector" }
+marius-projection = { version = "=0.6.0", path = "crates/core/projection" }
+marius-schema = { version = "=0.6.0", path = "crates/core/schema" }
+marius-render = { version = "=0.6.0", path = "crates/shell/render" }
+marius-server = { version = "=0.6.0", path = "crates/shell/server" }
+marius-db-forge = { version = "=0.6.0", path = "crates/forge/db-forge" }
+marius-fragment-forge = { version = "=0.6.0", path = "crates/forge/fragment-forge" }
+marius-guard-forge = { version = "=0.6.0", path = "crates/forge/guard-forge" }
+marius-bridge-forge = { version = "=0.6.0", path = "crates/forge/bridge-forge" }
 
 [workspace.lints.clippy]
 clone_on_copy = "deny"

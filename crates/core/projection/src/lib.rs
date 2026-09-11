@@ -381,6 +381,558 @@ mod tests_source_spec {
     }
 }
 
+// ─── RequestValueId — référence opaque à un slot du contexte de requête
+//     (Phase 3, GO 2026-09) ──────────────────────────────────────────────
+//
+// DESIGN runtime-segment-pipeline post-ADR-011, §2.1. Nom provisoire retenu
+// tel quel depuis la délibération (handoff-checkpoint-segment-resolution.md
+// §I) : un indice désignant « la valeur au slot N du contexte de requête »,
+// sans qu'aucune sémantique HTTP ne soit connue ici. La correspondance
+// « le slot N est rempli par le paramètre :id de l'URL » reste entièrement
+// extérieure à ce crate — table compagnon du futur Request Context (Phase
+// 4), jamais ici. Mêmes conventions que SourceKey/SourceId (repr, dérivations,
+// absence de méthode de résolution) : un identifiant opaque, seul.
+/// Référence opaque à un emplacement du contexte de requête — jamais une
+/// valeur HTTP en elle-même (cf. `SegmentSelection` ci-dessous).
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct RequestValueId(pub u16);
+
+const _: () = assert!(
+    std::mem::size_of::<RequestValueId>() == std::mem::size_of::<u16>(),
+    "RequestValueId doit avoir exactement la taille de u16 (repr(transparent))"
+);
+const _: () = assert!(
+    std::mem::align_of::<RequestValueId>() == std::mem::align_of::<u16>(),
+    "RequestValueId doit avoir l'alignement de u16"
+);
+
+#[cfg(test)]
+mod tests_request_value_id {
+    use super::RequestValueId;
+
+    #[test]
+    fn layout_is_exactly_two_bytes_aligned_as_u16() {
+        assert_eq!(std::mem::size_of::<RequestValueId>(), 2);
+        assert_eq!(
+            std::mem::align_of::<RequestValueId>(),
+            std::mem::align_of::<u16>()
+        );
+    }
+
+    #[test]
+    fn is_copy_not_move() {
+        let a = RequestValueId(4);
+        let b = a;
+        assert_eq!(a, b);
+        assert_eq!(a, RequestValueId(4)); // `a` réutilisé après `b` — exige Copy
+    }
+
+    #[test]
+    fn equality_is_by_value() {
+        assert_eq!(RequestValueId(0), RequestValueId(0));
+        assert_ne!(RequestValueId(0), RequestValueId(1));
+    }
+}
+
+// ─── SegmentSelection — sélection AOT, référence jamais valeur (Phase 3,
+//     GO 2026-09) ──────────────────────────────────────────────────────
+//
+// DESIGN §2.1. Le Core IR ne connaît JAMAIS de sémantique HTTP (pas de
+// `PathParam("id")`, pas d'`IdSource` de registry.rs réimporté tel quel).
+// Deux formes, aucune décision de représentation Rust arrêtée au-delà de
+// ce qui suit — seule la PROPRIÉTÉ (référence AOT, jamais valeur runtime)
+// est un invariant verrouillé :
+//   - Constant(i64)   : valeur connue à la compilation (le cas Fixed(n) du
+//                       routage actuel — reste une sélection, pas une
+//                       absence de sélection).
+//   - RequestSlot(..) : référence opaque à un slot du contexte de requête
+//                       (le cas PathParam(name) du routage actuel — mais
+//                       SANS le nom du paramètre, qui est une sémantique
+//                       HTTP n'appartenant pas à ce crate).
+//
+// Fixed et PathParam (registry.rs::IdSource) ne sont PAS deux chemins
+// architecturaux distincts au niveau de la résolution (DESIGN §2.1) : seule
+// l'étape d'EXTRACTION de la valeur diffère (constante recopiée sans I/O
+// pour l'une, lecture de paramètre d'URL pour l'autre) ; une fois cette
+// valeur obtenue, les deux convergent vers exactement le même mécanisme de
+// résolution physique (Phase 4) — aucune branche séparée ne doit apparaître
+// à ce niveau, seulement, en amont, au niveau de l'obtention de la valeur.
+//
+// Volontairement PAS de #[repr(C)] à ce stade — même raisonnement que
+// SourceSpec ci-dessus : aucune nécessité démontrée (ce type ne traverse
+// aucune frontière FFI/mmap, n'entre dans aucune table binaire générée).
+// Propriétés requises vérifiées par construction (Copy dérivé, aucun champ
+// alloué) et par l'assertion needs_drop ci-dessous, plutôt que par une
+// assertion de layout.
+/// Référence AOT à la sélection d'un segment — jamais la valeur runtime
+/// résolue pour une requête donnée (cf. DESIGN §2.1, distinction
+/// sélection/valeur de sélection runtime).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SegmentSelection {
+    /// Valeur connue à la compilation — aucune extraction runtime requise.
+    Constant(i64),
+    /// Référence opaque vers un emplacement du contexte de requête —
+    /// jamais une valeur HTTP elle-même.
+    RequestSlot(RequestValueId),
+}
+
+const _: () = assert!(
+    !std::mem::needs_drop::<SegmentSelection>(),
+    "SegmentSelection ne doit jamais nécessiter de Drop"
+);
+
+#[cfg(test)]
+mod tests_segment_selection {
+    use super::{RequestValueId, SegmentSelection};
+
+    #[test]
+    fn is_copy_not_move() {
+        let a = SegmentSelection::Constant(42);
+        let b = a;
+        assert_eq!(a, b);
+        assert_eq!(a, SegmentSelection::Constant(42)); // `a` réutilisé après `b` — exige Copy
+    }
+
+    #[test]
+    fn equality_is_structural_per_variant() {
+        assert_eq!(SegmentSelection::Constant(1), SegmentSelection::Constant(1));
+        assert_ne!(SegmentSelection::Constant(1), SegmentSelection::Constant(2));
+        assert_eq!(
+            SegmentSelection::RequestSlot(RequestValueId(0)),
+            SegmentSelection::RequestSlot(RequestValueId(0))
+        );
+        assert_ne!(
+            SegmentSelection::RequestSlot(RequestValueId(0)),
+            SegmentSelection::RequestSlot(RequestValueId(1))
+        );
+    }
+
+    #[test]
+    fn different_variants_are_never_equal() {
+        assert_ne!(
+            SegmentSelection::Constant(0),
+            SegmentSelection::RequestSlot(RequestValueId(0))
+        );
+    }
+
+    #[test]
+    fn never_needs_drop() {
+        assert!(!std::mem::needs_drop::<SegmentSelection>());
+    }
+}
+
+// ─── SegmentFlags — drapeaux d'émission d'un segment (Phase 3,
+//     GO 2026-09) ──────────────────────────────────────────────────────
+//
+// DESIGN §2 : « ex: Volatile, réservé pour extension ». Un seul bit
+// nécessaire à cette phase — VOLATILE — condition NÉCESSAIRE de la
+// première clause de compatibilité SingleFile (DESIGN §9.1 : « aucun
+// segment de la route n'est de variante Volatile »). Bits restants
+// réservés, non nommés : les nommer par anticipation figerait un
+// vocabulaire d'extension sans cas d'usage démontré.
+//
+// Représentation bit-à-bit à la main (pas de dépendance à la crate
+// `bitflags`) : un seul bit à ce stade ne justifie pas une dépendance
+// nouvelle du crate ; à reconsidérer si le nombre de drapeaux croît.
+/// Drapeaux d'émission d'un segment — POD, `Copy`, sans sémantique au-delà
+/// de ce que chaque bit documente explicitement.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SegmentFlags(pub u8);
+
+impl SegmentFlags {
+    /// Aucun drapeau.
+    pub const NONE: SegmentFlags = SegmentFlags(0);
+    /// Le segment provient d'une Source volatile (`SourceSpec::VolatileSlot`).
+    /// Condition nécessaire — DESIGN §9.1 — pour EXCLURE une route du
+    /// backend `SingleFile` ; ne constitue pas à elle seule la condition
+    /// suffisante (cf. rapport de session — second critère §9.1 différé).
+    pub const VOLATILE: SegmentFlags = SegmentFlags(1 << 0);
+
+    /// Test d'appartenance bit-à-bit — `const fn`, utilisable dans une
+    /// future vérification à la compilation par un générateur AOT.
+    #[inline(always)]
+    pub const fn contains(self, flag: SegmentFlags) -> bool {
+        self.0 & flag.0 == flag.0
+    }
+
+    #[inline(always)]
+    pub const fn is_volatile(self) -> bool {
+        self.contains(Self::VOLATILE)
+    }
+}
+
+const _: () = assert!(
+    std::mem::size_of::<SegmentFlags>() == std::mem::size_of::<u8>(),
+    "SegmentFlags doit avoir exactement la taille de u8 (repr(transparent))"
+);
+
+#[cfg(test)]
+mod tests_segment_flags {
+    use super::SegmentFlags;
+
+    #[test]
+    fn none_contains_nothing() {
+        assert!(!SegmentFlags::NONE.is_volatile());
+        assert!(!SegmentFlags::NONE.contains(SegmentFlags::VOLATILE));
+    }
+
+    #[test]
+    fn volatile_flag_is_detected() {
+        assert!(SegmentFlags::VOLATILE.is_volatile());
+        assert!(SegmentFlags::VOLATILE.contains(SegmentFlags::VOLATILE));
+    }
+
+    #[test]
+    fn is_copy_not_move() {
+        let a = SegmentFlags::VOLATILE;
+        let b = a;
+        assert_eq!(a, b);
+        assert_eq!(a, SegmentFlags::VOLATILE); // `a` réutilisé après `b` — exige Copy
+    }
+
+    #[test]
+    fn layout_is_exactly_one_byte() {
+        assert_eq!(std::mem::size_of::<SegmentFlags>(), 1);
+    }
+}
+
+// ─── SegmentDescriptor — IR produite par la Forge (Phase 3, GO 2026-09) ──
+//
+// DESIGN §2, corrigé post-confrontation au code réel : NE PORTE NI
+// `offset` NI `len` (invalidé pour toute Source indexée — la majorité des
+// routes réelles, cf. handlers.rs::serve_route/deliver, où (offset, len)
+// provient de PackHtmlIndex::lookup() exécuté à chaque requête contre la
+// génération actuellement publiée, jamais une constante figée à la
+// compilation du binaire). `#[repr(C)]`/`Copy`/POD explicitement mandatés
+// par le DESIGN (§2, « propriétés non négociables ») — à la différence de
+// SourceSpec/SegmentSelection ci-dessus, cette exigence est ici déjà
+// tranchée par le DESIGN, pas laissée à l'appréciation de cette phase.
+/// Emplacement logique d'un morceau de la réponse HTTP — référence une
+/// Source (`SourceId`), une sélection au sein de cette Source
+/// (`SegmentSelection`) et des propriétés d'émission (`SegmentFlags`).
+/// Ne contient JAMAIS de plage physique résolue (`offset`/`len`) — cf.
+/// DESIGN §2/§3.1 (quatre cycles de validité).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SegmentDescriptor {
+    pub source: SourceId,
+    pub selection: SegmentSelection,
+    pub flags: SegmentFlags,
+}
+
+const _: () = assert!(
+    !std::mem::needs_drop::<SegmentDescriptor>(),
+    "SegmentDescriptor ne doit jamais nécessiter de Drop — chemin chaud \
+     sans allocation (ADR-011 §7)"
+);
+
+#[cfg(test)]
+mod tests_segment_descriptor {
+    use super::{SegmentDescriptor, SegmentFlags, SegmentSelection, SourceId};
+
+    fn sample(source: u16, selection: SegmentSelection, flags: SegmentFlags) -> SegmentDescriptor {
+        SegmentDescriptor {
+            source: SourceId(source),
+            selection,
+            flags,
+        }
+    }
+
+    #[test]
+    fn is_copy_not_move() {
+        let a = sample(1, SegmentSelection::Constant(7), SegmentFlags::NONE);
+        let b = a;
+        assert_eq!(a, b);
+        assert_eq!(
+            a,
+            sample(1, SegmentSelection::Constant(7), SegmentFlags::NONE)
+        ); // `a` réutilisé après `b` — exige Copy
+    }
+
+    #[test]
+    fn equality_is_structural() {
+        assert_eq!(
+            sample(1, SegmentSelection::Constant(1), SegmentFlags::NONE),
+            sample(1, SegmentSelection::Constant(1), SegmentFlags::NONE)
+        );
+        assert_ne!(
+            sample(1, SegmentSelection::Constant(1), SegmentFlags::NONE),
+            sample(2, SegmentSelection::Constant(1), SegmentFlags::NONE)
+        );
+        assert_ne!(
+            sample(1, SegmentSelection::Constant(1), SegmentFlags::NONE),
+            sample(1, SegmentSelection::Constant(2), SegmentFlags::NONE)
+        );
+        assert_ne!(
+            sample(1, SegmentSelection::Constant(1), SegmentFlags::NONE),
+            sample(1, SegmentSelection::Constant(1), SegmentFlags::VOLATILE)
+        );
+    }
+
+    #[test]
+    fn never_needs_drop() {
+        assert!(!std::mem::needs_drop::<SegmentDescriptor>());
+    }
+
+    // Table statique &'static [SegmentDescriptor] — usage attendu une fois
+    // RouteDescriptor introduit (Phase 4), exercé ici au niveau le plus
+    // simple possible pour vérifier que rien n'empêche cet usage.
+    #[test]
+    fn usable_in_a_static_slice() {
+        static SEGMENTS: &[SegmentDescriptor] = &[
+            SegmentDescriptor {
+                source: SourceId(0),
+                selection: SegmentSelection::Constant(1),
+                flags: SegmentFlags::NONE,
+            },
+            SegmentDescriptor {
+                source: SourceId(1),
+                selection: SegmentSelection::RequestSlot(super::RequestValueId(0)),
+                flags: SegmentFlags::VOLATILE,
+            },
+        ];
+        assert_eq!(SEGMENTS.len(), 2);
+        assert!(SEGMENTS[1].flags.is_volatile());
+        assert!(!SEGMENTS[0].flags.is_volatile());
+    }
+}
+
+// ─── EmissionBackendKind — décision de backend, par route (Phase 3,
+//     GO 2026-09, complété post-amendement §9.1) ────────────────────────
+//
+// DESIGN §9 : décidé par la Forge, une fois par route — jamais recalculé
+// au runtime (§9.2 : « le Request Context lit ce champ, il ne le déduit
+// jamais »). Le prédicat `is_single_file_compatible` ci-dessous implémente
+// le critère amendé de DESIGN §9.1 : `SingleFile` n'est certifié que
+// lorsqu'il est AOT-prouvable avec les informations actuellement
+// disponibles dans l'IR — jamais supposé. Il NE vérifie PAS et NE PEUT PAS
+// vérifier de contiguïté physique entre segments : `SegmentDescriptor` ne
+// porte aucune plage physique (§2), donc aucune information de
+// contiguïté n'existe à ce niveau pour être inspectée, ici ou ailleurs
+// dans l'IR AOT.
+/// Backend d'émission consommant un `EmissionPlan` (DESIGN §9) — décidé
+/// par la Forge, par route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmissionBackendKind {
+    /// `sendfile(fd, offset, len)` — un seul descripteur de fichier, une
+    /// seule plage. Certifié uniquement par `is_single_file_compatible`
+    /// (DESIGN §9.1 amendé) — jamais déduit autrement.
+    SingleFile,
+    /// `writev`/`sendmsg` sur `IoSlice[]` — cas général, y compris toute
+    /// route multi-segments même entièrement statique (DESIGN §9.1 amendé :
+    /// aucune preuve AOT de contiguïté disponible aujourd'hui).
+    Scatter,
+}
+
+/// Prédicat pur de compatibilité `SingleFile` — DESIGN §9.1 (amendé post-Phase
+/// 3). Certifie *exactement* ce que l'IR actuel permet de prouver à la
+/// compilation, ni plus ni moins :
+///
+/// - **`true`** si et seulement si la route ne comporte **qu'un seul**
+///   `SegmentDescriptor`, non volatil ;
+/// - **`false`** dans tous les autres cas, y compris plusieurs segments
+///   statiques partageant la même Source — la contiguïté de leurs plages
+///   n'est jamais une information disponible à ce niveau (§2, §3.1 : une
+///   plage physique n'est connue qu'à la résolution runtime, jamais à la
+///   compilation), donc jamais quelque chose que cette primitive pourrait
+///   légitimement affirmer. Ceci est une condition **suffisante et
+///   conservatrice**, pas la définition architecturale définitive de
+///   `SingleFile` (DESIGN §9.1) : une route multi-segments réellement
+///   contiguë existe peut-être, mais ce prédicat ne peut pas — et ne doit
+///   pas prétendre — le savoir avec l'IR d'aujourd'hui.
+///
+/// **Précondition : `segments` non vide.** Une route sans aucun segment
+/// est une erreur de génération AOT (DESIGN §9.1), jamais un cas
+/// d'exécution valide que ce prédicat aurait à trancher entre `true` et
+/// `false` — verrouillé par `debug_assert!` plutôt que par un `Result`
+/// ou un panic inconditionnel : l'obligation de ne jamais atteindre ce
+/// cas appartient au générateur de routes (Phase 4+), pas à cette
+/// primitive pure, qui ne fait qu'exprimer l'hypothèse pour le
+/// développement de ce générateur.
+pub fn is_single_file_compatible(segments: &[SegmentDescriptor]) -> bool {
+    debug_assert!(
+        !segments.is_empty(),
+        "is_single_file_compatible : route sans segment — erreur de \
+         génération AOT (DESIGN §9.1), jamais un cas valide à cette étape"
+    );
+    match segments {
+        [only] => !only.flags.is_volatile(),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests_emission_backend_kind {
+    use super::EmissionBackendKind;
+
+    #[test]
+    fn variants_are_distinct_and_copy() {
+        let a = EmissionBackendKind::SingleFile;
+        let b = a; // exige Copy
+        assert_eq!(a, b);
+        assert_ne!(
+            EmissionBackendKind::SingleFile,
+            EmissionBackendKind::Scatter
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_is_single_file_compatible {
+    use super::{
+        SegmentDescriptor, SegmentFlags, SegmentSelection, SourceId, is_single_file_compatible,
+    };
+
+    fn seg(source: u16, flags: SegmentFlags) -> SegmentDescriptor {
+        SegmentDescriptor {
+            source: SourceId(source),
+            selection: SegmentSelection::Constant(0),
+            flags,
+        }
+    }
+
+    #[test]
+    fn single_non_volatile_segment_is_single_file() {
+        let segments = [seg(0, SegmentFlags::NONE)];
+        assert!(is_single_file_compatible(&segments));
+    }
+
+    #[test]
+    fn single_volatile_segment_is_never_single_file() {
+        let segments = [seg(0, SegmentFlags::VOLATILE)];
+        assert!(!is_single_file_compatible(&segments));
+    }
+
+    #[test]
+    fn two_static_segments_same_source_are_scatter_not_single_file() {
+        // Même SourceId pour les deux — aucune contiguïté physique
+        // prouvable AOT ne peut en être déduite (DESIGN §9.1 amendé) :
+        // conservateur, donc Scatter, même si un observateur humain
+        // pourrait soupçonner une contiguïté réelle au runtime.
+        let segments = [seg(0, SegmentFlags::NONE), seg(0, SegmentFlags::NONE)];
+        assert!(!is_single_file_compatible(&segments));
+    }
+
+    #[test]
+    fn two_static_segments_different_sources_are_scatter() {
+        let segments = [seg(0, SegmentFlags::NONE), seg(1, SegmentFlags::NONE)];
+        assert!(!is_single_file_compatible(&segments));
+    }
+
+    #[test]
+    fn multi_segment_route_with_one_volatile_is_scatter() {
+        let segments = [seg(0, SegmentFlags::NONE), seg(1, SegmentFlags::VOLATILE)];
+        assert!(!is_single_file_compatible(&segments));
+    }
+
+    #[test]
+    #[should_panic(expected = "route sans segment")]
+    #[cfg(debug_assertions)]
+    fn empty_segments_violates_documented_precondition() {
+        // N'exerce le debug_assert! que sous debug_assertions (comme tout
+        // debug_assert!) — cf. commentaire de la primitive : le cas vide
+        // est une erreur de GÉNÉRATION AOT à empêcher en amont (Phase
+        // 4+), pas un cas que cette primitive doit gérer par une valeur
+        // de retour arbitraire.
+        let segments: [SegmentDescriptor; 0] = [];
+        let _ = is_single_file_compatible(&segments);
+    }
+}
+
+// ─── Budget HTTP de segments (K) et vérification IOV_MAX (Phase 3,
+
+//     GO 2026-09) ──────────────────────────────────────────────────────
+//
+// DESIGN §7/§8 ADR-011, checkpoint §P — quatre budgets distincts, à ne
+// jamais fusionner :
+//   1. Projection::MAX_RENDER_CHUNKS (déjà en place, Phase 0.A) — budget
+//      de rendu Forge, PAR ENREGISTREMENT, interne à UNE Projection.
+//   2. SegmentBudget (ici) — nombre maximal de SegmentDescriptor composant
+//      UNE ROUTE/réponse. Nouveau à cette phase.
+//   3. SourceSpec::VolatileSlot.capacity (déjà en place, Phase 2) — borne
+//      AOT de la production volatile, PAR SOURCE.
+//   4. IOV_MAX/UIO_MAXIOV (ici) — plafond du système d'exploitation sur un
+//      seul appel writev/sendmsg. Constante EXTERNE, pas un budget
+//      architectural choisi par Marius.
+// IOV_MAX ne remplace pas SegmentBudget — il le CONTRAINT (deux
+// vérifications de nature différente, toutes deux nécessaires).
+//
+// SegmentBudget n'est porté par aucune structure existante à cette phase :
+// son porteur naturel (RouteDescriptor.segments: &'static [SegmentDescriptor],
+// dont SegmentBudget serait la longueur) est Phase 4 — hors périmètre ici.
+// Ce type donne un nom stable au concept avant que son porteur concret
+// existe, sans préjuger de la forme de ce porteur.
+/// Nombre maximal de `SegmentDescriptor` composant une route — DESIGN
+/// §7/§8 ADR-011. Distinct de `Projection::MAX_RENDER_CHUNKS` et de
+/// `SourceSpec::VolatileSlot::capacity` (voir le commentaire de section
+/// ci-dessus).
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct SegmentBudget(pub usize);
+
+/// Limite IOV_MAX (`UIO_MAXIOV`) du build Linux actuel — **valeur de
+/// plateforme, pas une propriété universelle du Core** (cf. DESIGN §7 :
+/// distinction entre la règle architecturale, la valeur retenue pour le
+/// build actuel, et le lieu où cette valeur sera injectée/vérifiée une
+/// fois le générateur AOT existant — Phase 4+, non tranché ici). Cette
+/// constante représente uniquement le deuxième terme de cette distinction
+/// pour la plateforme ciblée aujourd'hui.
+pub const IOV_MAX_CURRENT_PLATFORM: usize = 1024;
+
+/// Règle architecturale pure (DESIGN §7 : « IOV_MAX ne remplace pas K — il
+/// le contraint ») : un `SegmentBudget` ne doit jamais dépasser la limite
+/// d'I/O vectoriel applicable. Générique sur `iov_limit` — ne présuppose
+/// pas `IOV_MAX_CURRENT_PLATFORM`, pour que la règle reste valide
+/// indépendamment de la plateforme de build qui l'invoquera. `const fn` :
+/// utilisable dans une future assertion à la compilation par un
+/// générateur AOT (`const _: () = assert!(segment_budget_fits_iov_limit(...))`),
+/// sans que cette phase ne décide QUI émet cette assertion ni DEPUIS QUEL
+/// crate (différé — cf. rapport de session).
+#[inline(always)]
+pub const fn segment_budget_fits_iov_limit(budget: SegmentBudget, iov_limit: usize) -> bool {
+    budget.0 <= iov_limit
+}
+
+#[cfg(test)]
+mod tests_segment_budget_and_iov {
+    use super::{IOV_MAX_CURRENT_PLATFORM, SegmentBudget, segment_budget_fits_iov_limit};
+
+    #[test]
+    fn budget_within_limit_passes() {
+        assert!(segment_budget_fits_iov_limit(SegmentBudget(3), 1024));
+    }
+
+    #[test]
+    fn budget_at_exact_limit_passes() {
+        assert!(segment_budget_fits_iov_limit(SegmentBudget(1024), 1024));
+    }
+
+    #[test]
+    fn budget_exceeding_limit_fails() {
+        assert!(!segment_budget_fits_iov_limit(SegmentBudget(1025), 1024));
+    }
+
+    #[test]
+    fn rule_is_generic_over_the_supplied_limit_not_hardcoded() {
+        // La règle ne doit pas être câblée sur IOV_MAX_CURRENT_PLATFORM —
+        // elle doit rester valide pour toute limite reçue en paramètre.
+        assert!(segment_budget_fits_iov_limit(SegmentBudget(2048), 4096));
+        assert!(!segment_budget_fits_iov_limit(SegmentBudget(2048), 1024));
+    }
+
+    #[test]
+    fn current_platform_constant_matches_documented_linux_value() {
+        assert_eq!(IOV_MAX_CURRENT_PLATFORM, 1024);
+    }
+
+    #[test]
+    fn const_evaluable_at_compile_time() {
+        const _: () = assert!(segment_budget_fits_iov_limit(SegmentBudget(64), 1024));
+    }
+}
+
 pub type BatchResult<P> =
     Result<Vec<(<P as Projection>::Record, <P as Projection>::VarlenOwned)>, sqlx::Error>;
 
