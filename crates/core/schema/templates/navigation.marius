@@ -1,9 +1,14 @@
 {% block main_nav %}
 <a class="sr-only" href="#main">Aller au contenu</a>
 <nav id="nav" class="nav" role="navigation">
+    <a class="logo-nav" href="/">
+        <span class="sr-only">Scriptura</span>
+    </a>
+    {#
     <div class="logo-nav">
         <span class="sr-only">Marius</span>
     </div>
+    #}
     <button id="cmd-nav" class="cmd-nav" type="button" aria-label="Main Menu" popovertarget="sub-nav"
         popovertargetaction="toggle">
         <svg viewBox="0 0 100 100" aria-hidden="true">
