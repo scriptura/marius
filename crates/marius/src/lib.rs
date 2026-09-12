@@ -1,4 +1,6 @@
-//! # Marius — Crate Façade (crates/forge/fragment-forge/src/lib.rs)
+// crates/marius/src/lib.rs
+
+//! # Marius — Crate Façade
 //!
 //! Réexporte les types publics fondamentaux depuis leurs crates canoniques.
 //!

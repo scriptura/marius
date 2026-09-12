@@ -1,5 +1,5 @@
-//! crates/shell/render/src/lib.rs
-//!
+// crates/shell/render/src/lib.rs
+
 //! Façade du crate marius-render.
 
 mod sweep;
@@ -7,6 +7,7 @@ mod sweep;
 pub mod batch_renderer;
 pub mod dispatcher;
 pub mod dumper;
+pub mod emission;
 pub mod ingest_and_swap;
 pub mod merge_store;
 pub mod pack_html_format;
@@ -82,3 +83,21 @@ pub use registry::{IdSource, LiveRegistry, RouteEntry, packfile_path_for};
 // ce type pour typer deliver(). Première fois que la frontière de crate
 // matérialise ce besoin — pas une extension anticipée par confort.
 pub use pack_html_index::PackHtmlIndex;
+
+// MaterializedSource, ResolvedRange, RequestArena, EmissionPlan,
+// SourceResolutionContext, resolve_generation, resolve_range,
+// source_spec_for — même convention que ci-dessus (types/fonctions
+// principaux d'un module, ré-exportés à plat). Phase 4 (GO 2026-09) :
+// runtime resolution + emission planning (DESIGN-runtime-segment-pipeline.md
+// §3/§3.2/§4/§11), volontairement NON branché sur `registry.rs`/`ROUTE_TABLE`/
+// le chemin HTTP existant — `registry.rs` et `pack_html_index.rs` restent
+// inchangés par cette phase, ce nouveau module les consomme uniquement en
+// lecture (`LiveRegistry`/`PackHtmlIndex` ne sont ni modifiés ni requis pour
+// que ce module compile et soit testé ; `resolve_generation` reçoit sa
+// source de vérité par injection, jamais par un appel direct à
+// `LiveRegistry`). Voir `emission.rs` pour le détail du périmètre exclu de
+// cette phase (Volatile, IoSlice, writev/sendmsg, Axum/Hyper/Tokio).
+pub use emission::{
+    EmissionPlan, MaterializedSource, RequestArena, ResolvedRange, SourceResolutionContext,
+    resolve_generation, resolve_range, source_spec_for,
+};

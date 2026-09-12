@@ -933,6 +933,97 @@ mod tests_segment_budget_and_iov {
     }
 }
 
+// ─── RouteDescriptor — contrat explicite Forge → Runtime (Phase 4,
+//     GO 2026-09) ──────────────────────────────────────────────────────
+//
+// DESIGN §13/§13.1, arbitrage explicite (cartographie Phase 4) : Static IR
+// pur — ne contient que des faits figés à la compilation, aucun handle
+// runtime (pas de `PackfileEntry`, pas d'`Arc`, pas de `RawFd`, pas
+// d'`ArcSwap`, pas de Tokio/Axum). C'est cette absence de dépendance
+// runtime qui rend son placement ici possible sans introduire de
+// dépendance nouvelle vers `marius_render`.
+//
+// Distinct de `RouteEntry` (`crates/shell/render::registry`, routage HTTP
+// actuel — `pattern`, `IdSource`, `content_type`, `packfile_key`) : aucune
+// migration entreprise, aucun lien de code entre les deux à ce stade
+// (DESIGN §13, amendement Phase 4). `RouteEntry` n'est ni lu ni référencé
+// ici.
+/// Contrat AOT complet d'une route, produit par la Forge — assemble tout ce
+/// que les sections précédentes (`SegmentDescriptor`, `SourceSpec`,
+/// `EmissionBackendKind`, capacité volatile) supposaient déjà cohérent par
+/// route, sans structure commune pour les rassembler avant cette phase.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouteDescriptor {
+    /// Fixe par route — porte la sélection (§2.1), pas de table parallèle
+    /// (invariant DESIGN §13.1).
+    pub segments: &'static [SegmentDescriptor],
+    /// Table de résolution des `SourceId` (locaux à cette route) vers leur
+    /// `SourceSpec` (§13.2).
+    pub sources: &'static [SourceSpec],
+    /// Décidé par la Forge, jamais recalculé au runtime (§9.2).
+    pub backend_kind: EmissionBackendKind,
+    /// Somme des capacités des segments `Volatile` de la route (§11.3).
+    pub volatile_capacity: u32,
+}
+
+const _: () = assert!(
+    !std::mem::needs_drop::<RouteDescriptor>(),
+    "RouteDescriptor ne doit jamais nécessiter de Drop — Static IR pur"
+);
+
+#[cfg(test)]
+mod tests_route_descriptor {
+    use super::{
+        EmissionBackendKind, RouteDescriptor, SegmentDescriptor, SegmentFlags, SegmentSelection,
+        SourceId, SourceSpec,
+    };
+
+    fn sample() -> RouteDescriptor {
+        static SEGMENTS: &[SegmentDescriptor] = &[SegmentDescriptor {
+            source: SourceId(0),
+            selection: SegmentSelection::Constant(1),
+            flags: SegmentFlags::NONE,
+        }];
+        static SOURCES: &[SourceSpec] = &[SourceSpec::StaticArtifact {
+            key: super::SourceKey(7),
+        }];
+        RouteDescriptor {
+            segments: SEGMENTS,
+            sources: SOURCES,
+            backend_kind: EmissionBackendKind::SingleFile,
+            volatile_capacity: 0,
+        }
+    }
+
+    #[test]
+    fn is_copy_not_move() {
+        let a = sample();
+        let b = a;
+        assert_eq!(a, b);
+        assert_eq!(a, sample()); // `a` réutilisé après `b` — exige Copy
+    }
+
+    #[test]
+    fn never_needs_drop() {
+        assert!(!std::mem::needs_drop::<RouteDescriptor>());
+    }
+
+    #[test]
+    fn usable_as_a_static_const_route_table_entry() {
+        // Exactement l'usage visé : une table de routes générée par la
+        // Forge, entièrement `'static`, aucune allocation.
+        static ROUTE: RouteDescriptor = RouteDescriptor {
+            segments: &[],
+            sources: &[],
+            backend_kind: EmissionBackendKind::Scatter,
+            volatile_capacity: 0,
+        };
+        assert_eq!(ROUTE.segments.len(), 0);
+        assert_eq!(ROUTE.backend_kind, EmissionBackendKind::Scatter);
+    }
+}
+
 pub type BatchResult<P> =
     Result<Vec<(<P as Projection>::Record, <P as Projection>::VarlenOwned)>, sqlx::Error>;
 
