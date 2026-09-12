@@ -59,6 +59,28 @@ arc-swap = "1.9.1"
 divan = "0.1"
 reqwest = { version = "0.13", default-features = false }
 
+# Intégration HTTP bas niveau (Phase 5, Option B — DESIGN-runtime-segment-pipeline.md,
+# Design Note Phase 5) : remplace `axum::serve` comme boucle d'acceptation
+# de référence dans `marius-server`, tout en conservant `Router` comme
+# service (adapté via `hyper_util::service::TowerToHyperService`).
+# `http1` seul activé : HTTP/2 différé explicitement (aucun besoin démontré
+# aujourd'hui) — `hyper-util`'s `server-auto` reste néanmoins la fondation
+# retenue pour que l'activation future de HTTP/2 soit un changement de
+# features, pas une refonte d'architecture (cf. Design Note §3).
+# `tower-service` volontairement PAS ajouté ici : le code écrit ne nomme
+# jamais le trait `tower_service::Service` directement (délégué entièrement
+# à `TowerToHyperService`) — à revoir si l'implémentation révèle un besoin
+# réel (cf. rapport de session).
+hyper = { version = "1", features = ["http1"] }
+hyper-util = { version = "0.1", features = [
+    "tokio",
+    "server",
+    "server-auto",
+    "server-graceful",
+    "service",
+    "http1",
+] }
+
 # Pipeline [scripts.components] + [service_worker] — passe de minification
 # finale (suppression des commentaires/espaces, compression AST,
 # renommage des bindings locaux). Cinq crates du même workspace `oxc`,

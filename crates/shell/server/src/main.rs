@@ -13,7 +13,12 @@
 //!   l'inlining maximal des instructions au *compile-time*.
 //! - **Supervision *Fail-Fast* (`JoinSet`) :** Les I/O réactives (`PgListener`, `Dispatcher`) ne sont
 //!   plus des tâches `tokio::spawn` isolées (détachées), mais structurellement regroupées sous un `JoinSet`.
-//!   Un `tokio::select!` arbitre entre la boucle HTTP `axum::serve` et la vérification `tasks.join_next()`. La défaillance
+//!   Un `tokio::select!` arbitre entre la boucle d'acceptation HTTP et la vérification `tasks.join_next()`.
+//!   Boucle d'acceptation (Phase 5, Option B) : bas niveau Hyper/hyper-util (`TokioIo` +
+//!   `TowerToHyperService` + `hyper_util::server::conn::auto::Builder`), `axum::serve` n'est plus
+//!   l'implémentation de référence — `Router`/routes/handlers restent inchangés, seule
+//!   l'acceptation/adaptation de connexion change (DESIGN-runtime-segment-pipeline.md, Design Note
+//!   Phase 5). La défaillance
 //!   abormale d'un seul acteur provoque un `process::exit(1)` immédiat, interdisant tout état zombie incohérent.
 //! - **Ressources Globales Partagées :** Le `PgPool` et le verrou limitateur d'I/O (`Arc<Semaphore>`)
 //!   sont injectés une seule fois au démarrage pour contraindre et plafonner l'empreinte concurrente globale
@@ -32,6 +37,18 @@ use std::time::Duration;
 use axum::routing::get;
 use axum::{Extension, Router};
 use tokio::sync::{Notify, Semaphore};
+
+// Phase 5 (Option B) — boucle de connexion bas niveau remplaçant
+// `axum::serve` : voir le bloc `tokio::select!` de `main()` ci-dessous et
+// `spawn_test_server` (module de tests). `Router` reste inchangé ; seule la
+// responsabilité d'acceptation/adaptation de connexion change.
+// `tower_service::Service` volontairement pas importé : jamais nommé
+// directement, l'adaptation est entièrement déléguée à
+// `TowerToHyperService` (cf. rapport de session).
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as HyperConnectionBuilder;
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
 
 use marius_render::{Dispatcher, DispatcherConfig, IdSource, LiveRegistry, RouteEntry};
 
@@ -335,31 +352,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     eprintln!("[marius-server] HTTP sur http://{bind_addr}");
 
-    // ── Supervision fail-fast (spec §6, actée) ───────────────────────────────
-    // Aucune des trois tâches n'est censée se terminer normalement : run()
-    // boucle indéfiniment, run_pg_listener aussi (sa boucle de reconnexion
-    // est interne). Une terminaison, quelle qu'elle soit, est un bug — le
-    // processus entier s'arrête bruyamment plutôt que de continuer à servir
-    // des lectures avec un shard figé sans signal. Pas de redémarrage
-    // silencieux (cf. Arbitrage / Hors scope, handoff Phase 5.3).
-    tokio::select! {
-        result = axum::serve(listener, app) => {
-            result?;
-        }
-        Some(finished) = tasks.join_next() => {
-            match finished {
-                Ok(()) => eprintln!(
-                    "[supervisor] une tâche supervisée s'est arrêtée normalement \
-                     — ne devrait jamais arriver"
-                ),
-                Err(join_err) => eprintln!(
-                    "[supervisor] une tâche supervisée a paniqué: {join_err}"
-                ),
+    // ── Boucle de connexion bas niveau (Phase 5, Option B) ──────────────────
+    // Remplace `axum::serve(listener, app)`. `app` (Router, routes,
+    // extracteurs, handlers) est conservé strictement inchangé : seule
+    // l'acceptation/adaptation de connexion passe par la pile Hyper bas
+    // niveau. `auto::Builder` : HTTP/1 activé (features Cargo), HTTP/2
+    // différé explicitement — même builder conservé pour que son
+    // activation future reste un changement de features, pas
+    // d'architecture (DESIGN-runtime-segment-pipeline.md, Design Note
+    // Phase 5 §3).
+    let conn_builder = HyperConnectionBuilder::new(TokioExecutor::new());
+    // Un seul GracefulShutdown pour toute la durée de vie du processus —
+    // jamais reconstruit par connexion (cf. hyper-util/examples/server_graceful.rs) :
+    // le construire par itération droperait son `watch::Sender` interne
+    // immédiatement après chaque connexion, déclenchant un arrêt gracieux
+    // prématuré de la connexion suivante.
+    let graceful = GracefulShutdown::new();
+
+    // ── Supervision fail-fast (spec §6, actée) — comportement inchangé ──────
+    // Boucle explicite : un seul `axum::serve` acceptait en interne toutes
+    // les connexions dans sa propre boucle ; l'accepter nous-mêmes exige de
+    // reproduire cette boucle ici. Le bras `tasks.join_next()` conserve
+    // EXACTEMENT son comportement d'origine — `process::exit(1)` immédiat,
+    // sans drain — invariant déjà documenté en tête de fichier, non
+    // renégocié par cette migration. Seul le bras d'erreur d'`accept()`
+    // (chemin de sortie normal, jamais exercé par les tests actuels) draine
+    // les connexions déjà acceptées via `graceful.shutdown().await` avant
+    // de propager l'erreur — amélioration défensive, pas un comportement
+    // observable changé (aucun `.with_graceful_shutdown()` n'existait
+    // avant cette migration : il n'y avait rien à « préserver » sur ce
+    // point précis, seulement à ne pas dégrader).
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                let (stream, _peer_addr) = match accept {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        eprintln!("[marius-server] accept() fatal: {e}");
+                        graceful.shutdown().await;
+                        return Err(e.into());
+                    }
+                };
+                let io = TokioIo::new(stream);
+                let hyper_service = TowerToHyperService::new(app.clone());
+                let conn = conn_builder.serve_connection(io, hyper_service);
+                let conn = graceful.watch(conn.into_owned());
+                tokio::spawn(async move {
+                    if let Err(err) = conn.await {
+                        eprintln!("[marius-server] erreur de connexion: {err}");
+                    }
+                });
             }
-            std::process::exit(1);
+            Some(finished) = tasks.join_next() => {
+                match finished {
+                    Ok(()) => eprintln!(
+                        "[supervisor] une tâche supervisée s'est arrêtée normalement \
+                         — ne devrait jamais arriver"
+                    ),
+                    Err(join_err) => eprintln!(
+                        "[supervisor] une tâche supervisée a paniqué: {join_err}"
+                    ),
+                }
+                std::process::exit(1);
+            }
         }
     }
-    Ok(())
 }
 
 // =============================================================================
@@ -432,6 +489,14 @@ mod tests {
     /// routage déjà fixée par le test (fixtures déjà écrites sur disque).
     /// Retourne l'adresse à interroger et l'`Arc<LiveRegistry>` du serveur
     /// (nécessaire au test de swap concurrent — point de vigilance n°4).
+    ///
+    /// Phase 5 (Option B) : sert désormais via la même pile bas niveau que
+    /// `main()` (`TokioIo` + `TowerToHyperService` + `auto::Builder`),
+    /// plutôt que `axum::serve` — même `Router`, mêmes routes, mêmes
+    /// handlers ; seule l'acceptation de connexion change. Un seul
+    /// `GracefulShutdown` pour toute la durée de vie de la tâche serveur de
+    /// test (même raison qu'en production : le reconstruire par connexion
+    /// déclencherait un arrêt prématuré de la suivante).
     async fn spawn_test_server(
         route_table: &'static [RouteEntry],
     ) -> (SocketAddr, Arc<LiveRegistry>) {
@@ -447,7 +512,23 @@ mod tests {
         let addr = listener.local_addr().expect("local_addr");
 
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serveur de test");
+            let conn_builder = HyperConnectionBuilder::new(TokioExecutor::new());
+            let graceful = GracefulShutdown::new();
+            loop {
+                let (stream, _peer_addr) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(e) => panic!("serveur de test — accept() échoué: {e}"),
+                };
+                let io = TokioIo::new(stream);
+                let hyper_service = TowerToHyperService::new(app.clone());
+                let conn = conn_builder.serve_connection(io, hyper_service);
+                let conn = graceful.watch(conn.into_owned());
+                tokio::spawn(async move {
+                    if let Err(err) = conn.await {
+                        eprintln!("[test] erreur de connexion: {err}");
+                    }
+                });
+            }
         });
 
         (addr, registry)

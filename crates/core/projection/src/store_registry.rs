@@ -1,6 +1,6 @@
-//! # marius-projection — crates/core/projection/src/store_registry.rs
-//!
-//! cf. DESIGN-store-registry.md
+// crates/core/projection/src/store_registry.rs
+
+//! # marius-projection - store_registry
 //!
 //! Registre mono-slot, atomiquement remplaçable, pour un PackfileReader<P>.
 //! Remplace le `static OnceLock<PackfileReader<P>>` généré aujourd'hui par
