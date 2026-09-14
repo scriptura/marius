@@ -3,8 +3,6 @@
 **Statut :** Proposé (pré-v1)
 **Révision de cette version :** consolidation post-discussion (clarification d'ontologie, invariant de capacité). Remplace le brouillon initial dans son intégralité.
 
----
-
 ## 1. Contexte
 
 Les premières versions de Marius considéraient une page HTML comme une unité indivisible. Chaque projection réactive produisait un document HTML complet, stocké dans un pack binaire puis servi directement par le runtime.
@@ -22,8 +20,6 @@ Le modèle « une page = une projection » mélange donc plusieurs domaines ayan
 
 **Périmètre explicite (post-discussion) :** le Minimum Viable Document d'une page — navigation, breadcrumb, pied de page, structure minimale — reste sous la doctrine ADR-008 : pré-composition à l'écriture, invalidation batchée par le Dispatcher. Cette ADR ne cherche plus à éliminer ce coût de duplication ; ADR-008 continue de le gérer, sans changement. Cette ADR traite exclusivement des projections dont le cycle de mutation est réellement découplé de celui de la page qui les contient — typiquement des états volatils dépendant de la requête ou de la session (§6, troisième ligne de la taxonomie ADR-008 §4.3), que ni ADR-008 ni ADR-009 ne couvrent puisqu'ils sont par construction hors du modèle AOT pré-rendu.
 
----
-
 ## 2. Décision
 
 La page HTML cesse d'être l'unité fondamentale de génération. La nouvelle unité architecturale devient la **Projection**.
@@ -35,8 +31,6 @@ Une projection représente un domaine fonctionnel cohérent partageant :
 - les mêmes invariants de cohérence.
 
 Une réponse HTTP devient l'ordonnancement déterministe du document pré-composé (ADR-008) et, lorsqu'elle en contient, des projections volatiles qui lui sont propres. Le runtime ne construit plus une page depuis zéro : il ordonnance des unités déjà compilées, entrelaçant au besoin du contenu statique pré-assemblé avec du contenu résolu à la requête. Cette ADR **ajoute** une seconde dimension au modèle ADR-008 ; elle ne le remplace pas.
-
----
 
 ## 3. Ontologie — quatre niveaux, pas trois
 
@@ -53,8 +47,6 @@ La rédaction initiale de cette ADR confondait trois choses distinctes sous un m
 
 Point de vigilance terminologique : le trait applicatif nommé `Projection` dans le code existant fusionne aujourd'hui les niveaux 1 et 2 (extraction de données, génération, écriture d'artefact, dans une seule interface, 1:1 avec une table SQL). Ce nommage est historique et antérieur à la présente clarification. Son évolution éventuelle (scission, renommage) relève du DESIGN Runtime, pas de la présente décision — cette ADR fixe le vocabulaire cible, pas la migration du code.
 
----
-
 ## 4. Segment
 
 Un Segment est une plage mémoire contiguë. Exemples de provenance possible :
@@ -66,8 +58,6 @@ Un Segment est une plage mémoire contiguë. Exemples de provenance possible :
 Le runtime ignore la signification du Segment. Il ne manipule que des plages mémoire.
 
 **`PackfileEntry` (structure d'indexation du packfile HTML existant) est une implémentation particulière d'un Segment, pas un renommage de celui-ci.** Tous les segments proviennent aujourd'hui d'un packfile ; rien n'impose que ce soit vrai demain. Cette distinction découple complètement l'architecture métier des primitives d'émission propres au système d'exploitation. La Forge raisonne en Projections et Artefacts ; le Runtime raisonne en Segments. La conversion vers les primitives d'émission (représentation POSIX finale) n'intervient qu'au dernier instant du runtime, et relève du DESIGN, pas de cette ADR.
-
----
 
 ## 5. Redéfinition du runtime
 
@@ -87,8 +77,6 @@ La Forge aplanit le graphe des projections lors de la compilation. Le runtime ig
 
 La résolution de l'URL doit être déterministe et optimisée AOT. La structure exacte (hash parfait, table indexée, arbre compact, etc.) ne relève pas de cette ADR. L'ADR impose uniquement que cette résolution ne réintroduise pas une logique de rendu ou de composition dynamique.
 
----
-
 ## 6. Frontière JavaScript
 
 Toute page doit demeurer complète sans JavaScript. Cette règle constitue un invariant architectural.
@@ -98,8 +86,6 @@ Une page sans JavaScript doit conserver : son contenu, sa navigation, son breadc
 JavaScript ne peut intervenir que comme accélérateur. Il ne constitue jamais une dépendance fonctionnelle de la page. Les composants dont le cycle de mutation est fortement volatil peuvent être chargés ou rafraîchis indépendamment (état utilisateur, panier, notifications, éléments transactionnels).
 
 La frontière entre projections statiques et projections volatiles est déterminée par le cycle de mutation des données, jamais par leur position dans le DOM.
-
----
 
 ## 7. Chemin chaud
 
@@ -122,8 +108,6 @@ Le runtime devient ainsi un ordonnanceur de mémoire plutôt qu'un moteur de ren
 
 Les deux premiers invariants ne sont pas satisfaits par l'implémentation de référence actuelle, y compris pour N = 1 (le chemin de lecture actuel alloue un `Vec<u8>` par requête). Leur mise en conformité relève du DESIGN Runtime, pas de la présente décision.
 
----
-
 ## 8. Budget de Segments
 
 Chaque projection possède un nombre fini de Segments. Une réponse HTTP possède donc un budget total de Segments. Cette métrique est une propriété AOT vérifiée par la Forge.
@@ -132,15 +116,11 @@ Le budget de Segments constitue une contrainte spatiale comparable à un budget 
 
 Le compilateur garantit. Le runtime exécute.
 
----
-
 ## 9. Neutralité du format
 
 Cette architecture ne dépend pas du HTML. Les Segments représentent uniquement des plages mémoire. Le runtime ignore leur contenu.
 
 Une projection pourrait tout aussi bien produire HTML, JSON, XML, RSS, texte ou données binaires. Le HTML devient un backend parmi d'autres. Le moteur reste identique.
-
----
 
 ## 10. Conséquences
 
@@ -155,8 +135,6 @@ Cette évolution permet simultanément :
 - de préserver un chemin chaud déterministe ;
 - de maintenir une architecture sans calcul de rendu au runtime ;
 - de conserver une séparation stricte entre conception (Forge) et exécution (Runtime).
-
----
 
 ## 11. Hors périmètre de cette ADR
 
