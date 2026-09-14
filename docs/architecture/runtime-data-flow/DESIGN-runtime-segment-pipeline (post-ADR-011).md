@@ -10,8 +10,6 @@
 
 **Fichiers vus lors de la confrontation ayant motivé cet amendement** : `crates/shell/render/src/registry.rs` (`LiveRegistry`, `IdSource`, `RouteEntry`), `crates/shell/server/src/handlers.rs` (`serve_route`, `deliver`), `crates/core/projection/src/lib.rs` (`SourceKey`, `SourceId`, `SourceSpec`, `RenderChunk`, trait `Projection` — déjà en place, Phases 1-2 closes), `crates/shell/server/build.rs` (confirme l'absence de tout calcul `backend_kind`/`IOV_MAX` existant). Voir `handoff-checkpoint-segment-resolution.md` pour le détail de la confrontation.
 
----
-
 ## 1. Chaîne d'IR — vue d'ensemble
 
 ```
@@ -37,8 +35,6 @@ Chaque niveau perd de la sémantique métier et gagne en proximité matérielle 
 `IoSlice` n'est pas le niveau 4 de l'ontologie métier, c'est déjà une traduction vers une API système particulière. Un futur backend (`io_uring`, QUIC/HTTP3) remplacerait cette seule ligne sans toucher à `SegmentDescriptor`, `MaterializedSource` ni `EmissionPlan`.
 
 **Le backend d'émission ne distingue jamais `Mmap` de `Volatile`.** Cette distinction disparaît intégralement lors de la construction de l'`EmissionPlan` puis des `IoSlice` (§7) : à partir de ce point, le backend ne manipule que des couples `(ptr, len)` sans origine attachée. C'est une conséquence directe de la descente monotone (§6) — verrouillée ici explicitement pour éviter qu'une future implémentation ne réintroduise un `match` sur la variante de Source à l'intérieur du backend, ce qui romprait la séparation IR Marius / représentation POSIX.
-
----
 
 ## 2. `SegmentDescriptor` — IR produite par la Forge
 
@@ -79,8 +75,6 @@ La correspondance « le slot N est rempli par le paramètre `:id` de l'URL » re
 La sélection est portée par `SegmentDescriptor` lui-même, jamais par un tableau parallèle indexé séparément (cf. §13.1) : deux tableaux desynchronisables introduiraient un invariant non typé (« l'entrée N de la table de sélection correspond au segment N ») que le compilateur ne peut pas vérifier.
 
 **Cas `Volatile`** : dans l'état actuel du modèle, une Source volatile n'a pas de sélection d'enregistrement, parce que son contenu est *produit* à la requête, pas *extrait* d'une collection préexistante. Ceci est une propriété du cas `Volatile` tel qu'il existe aujourd'hui dans le repository — pas une contrainte universelle interdisant, plus tard, une Source statique directement adressable sans sélection d'aucune sorte.
-
----
 
 ## 3. `MaterializedSource` — matérialisation d'une origine, résolue une fois par `SourceKey` distinct
 
@@ -138,8 +132,6 @@ Propriétés arrêtées pour `ResolvedRange` (forme Rust non figée — cf. §8)
 
 Le résultat de la résolution runtime en tête de requête est donc double, et non un unique tableau : une structure à capacité fixe de `MaterializedSource` (indexée par `SourceKey` distinct, §3) et un tableau `[ResolvedRange; K]` (indexé par segment, un par entrée de `SegmentDescriptor[]`). Aucun de ces deux tableaux ne porte plus de lifetime explicite au-delà de la durée de la requête — la durée de vie réelle est garantie par la détention de l'`Arc` cloné dans le Request Context, pas par `SegmentDescriptor`, `ResolvedRange` ni `MaterializedSource` eux-mêmes.
 
----
-
 ## 4. `EmissionPlan` — résultat de la résolution, jamais sa source
 
 Point de vocabulaire introduit tardivement dans la discussion, avec une correction de position indispensable : `EmissionPlan` se situe **après** `SegmentDescriptor[]` dans la chaîne, jamais avant. Il nomme la combinaison, pour une requête donnée, du plan AOT fixe et des deux résultats distincts de sa résolution runtime (§3, §3.2) :
@@ -160,16 +152,12 @@ pub struct EmissionPlan<'req> {
 
 Aucune forme Rust définitive n'est figée ici pour `EmissionPlan`, `ResolvedRange` ni la structure portant les `MaterializedSource` — seules les propriétés (cardinalité, propriétaire, `Copy` ou non) sont arrêtées, cf. §3, §3.2, §8.
 
----
-
 ## 5. Ce que cette section n'tranche pas
 
 - Construction exacte de `IoSlice[]` depuis `EmissionPlan` (section suivante).
 - Nature du backend d'émission (`writev`/`sendmsg`/`MSG_ZEROCOPY`/futur `io_uring`) — volontairement indépendante de cette section, cf. ADR-011 §7 (trois invariants distincts) et l'amendement ADR-006.
 - Devenir du trait `Projection` existant (ADR-011 §3) — sans impact sur cette section, qui ne s'appuie que sur `SegmentDescriptor`/`SourceId`, produits en aval de ce trait, quel que soit son nom final.
 - Forme Rust définitive de `ResolvedRange`, de `EmissionPlan`, et de la structure portant les `MaterializedSource` résolus — cf. §3, §3.2, §8.
-
----
 
 ## 6. Principe directeur de la suite du DESIGN — descente monotone, aucune remontée
 
@@ -182,8 +170,6 @@ Chaque étape abaisse le niveau d'abstraction vers le matériel. Aucune étape n
 - `IoSlice` ne réintroduit aucune sémantique métier (pas de notion de Projection, de Segment nommé, de domaine fonctionnel) — uniquement `(ptr, len)`.
 - La construction d'`IoSlice[]` ne fait que traduire `EmissionPlan`, elle ne prend aucune décision nouvelle sur *quoi* émettre — cette décision est déjà entièrement figée par `SegmentDescriptor[]` (Forge) et `MaterializedSource[]` (résolution runtime, §3).
 - Ce garde-fou sert de test pour toute extension future : si une modification de `IoSlice` ou du backend d'émission nécessite de consulter à nouveau une Projection ou un Artefact, c'est un signal que la descente n'est plus monotone, et que la modification est mal placée dans la chaîne.
-
----
 
 ## 7. `IoSlice[]` — traduction finale, représentation POSIX
 
@@ -216,16 +202,12 @@ Aucune allocation : `K` est une constante par route, connue à la compilation (A
 
 Ne jamais affirmer `len = capacity` pour une Source volatile : la capacité AOT est une **borne**, la longueur effective produite est une information distincte, non encore disponible dans le modèle actuel (§12).
 
----
-
 ## 8. Ce que cette section n'tranche pas (complète §5)
 
 - **Forme Rust exacte de `ResolvedRange`** (§3.2, introduite par cet amendement en remplacement du `MaterializedSegment` initialement envisagé pour le seul cas `Volatile`). Correction de portée : le besoin d'une résolution de plage distincte de la résolution de Source n'est **pas spécifique à `Volatile`** — toute Source indexée (le cas majoritaire des routes réelles, `Mmap` compris) en a besoin, puisque `(offset, len)` n'est jamais un fait AOT (§2, §3.1). `ResolvedRange` est donc générale, applicable à toute origine : même type, mêmes étapes, homogène en forme — mais pas nécessairement complète pour `Volatile` (cf. §12, longueur effective non encore disponible). Non tranché ici : le layout Rust précis (`ptr`/`len` bruts, ou une abstraction plus riche), et si `ResolvedRange` doit porter un discriminant de variante ou rester totalement neutre à l'origine de la Source qu'elle résout.
 - Le mécanisme de bornage exact des segments volatils à longueur variable (§7, point de sûreté) — nécessite une décision avant tout composant volatil réel, hors périmètre Phase 1 (ADR-011 §11).
 - Le choix du backend d'émission consommant `IoSlice[]` (`writev` vs `sendmsg` vs futur) — section suivante.
 - La gestion d'erreur si `writev`/`sendmsg` retourne une écriture partielle (short write) — comportement POSIX standard à spécifier au niveau backend, pas au niveau `IoSlice`.
-
----
 
 ## 9. Backend d'émission — sélection, pas bifurcation de l'IR
 
@@ -294,15 +276,11 @@ Rappel de l'invariant déjà posé (ADR-011 §7, amendement ADR-006) : le passag
 
 **Décision retenue pour Phase 1 : `writev` sans `MSG_ZEROCOPY`.** La copie noyau résiduelle sur le chemin composé est acceptée comme coût connu et documenté (pas une régression silencieuse — l'amendement ADR-006 l'a déjà nommée). L'activation de `MSG_ZEROCOPY` reste une optimisation future, à ne considérer qu'après mesure, jamais par anticipation — même discipline que celle déjà appliquée par ADR-007/ADR-008 dans ce projet (ne pas construire avant la preuve du besoin).
 
----
-
 ## 10. Ce que cette section n'tranche pas
 
 - Chiffrage réel du coût `MSG_ZEROCOPY` vs copie noyau simple — nécessite un banc de mesure, hors périmètre de ce DESIGN.
 - Comportement exact en cas d'erreur irrécupérable en cours d'émission partielle (connexion coupée à mi-`writev`) — relève de la gestion de connexion HTTP générale, pas spécifique à cette section.
 - Intégration avec `hyper::upgrade` ou équivalent pour obtenir un accès direct au socket sous Axum — point d'intégration pratique, pas une question de conception du pipeline de segments.
-
----
 
 ## 11. Arène de requête — support mémoire des segments volatils
 
@@ -360,15 +338,11 @@ Le cas de dépassement (`bump` retournant `None`) doit être un échec explicite
 
 **Alignement — hypothèse à expliciter, pas à laisser implicite.** L'esquisse ci-dessus avance octet par octet et présume une matérialisation de segments sous forme de `[u8]` plats, pour lesquels un alignement de 1 est suffisant — c'est le cas visé par cette section (contenu textuel/binaire opaque). Si le runtime devait un jour allouer dans cette arène des structures typées avec des contraintes d'alignement propres, le `bump` devrait intégrer un calcul de padding correspondant ; l'omettre serait un comportement indéfini classique des allocateurs bump en Rust. Non pertinent pour Phase 1, mais à ne pas oublier si l'usage de l'arène s'étend au-delà de segments `[u8]` plats.
 
----
-
 ## 12. Ce que cette section n'tranche pas
 
 - Le traitement du cas de dépassement de capacité (`bump` → `None`, §11.4) : troncature, rejet, autre — décision produit, pas architecture.
 - L'unité d'exécution exacte possédant l'arène (worker de thread, tâche asynchrone, autre) — implémentation de référence seulement, cf. préambule §11.
 - Le mécanisme précis d'agrégation des exigences de capacité entre routes (§11.3) — volontairement laissé ouvert.
-
----
 
 ## 13. `RouteDescriptor` — le contrat explicite Forge → Runtime
 

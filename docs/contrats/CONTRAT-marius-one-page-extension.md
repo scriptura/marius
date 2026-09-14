@@ -6,8 +6,6 @@
 >
 > Il complète ADR-011 et ne constitue pas une nouvelle primitive du Runtime.
 
----
-
 ## 1. Objet
 
 Une page Marius est une représentation AOT complète.
@@ -25,9 +23,7 @@ Le présent contrat établit notamment la distinction entre :
 * **augmentation** ;
 * **Segment** comme primitive mémoire/émission du Runtime.
 
----
-
-# 2. Principe fondamental : la page reste complète
+## 2. Principe fondamental : la page reste complète
 
 Une page Marius reste une représentation complète.
 
@@ -57,13 +53,11 @@ Une projection indépendante peut donc :
 
 La page elle-même reste une représentation AOT complète.
 
----
-
-# 3. Deux phénomènes distincts : contextualisation et augmentation
+## 3. Deux phénomènes distincts : contextualisation et augmentation
 
 Il est essentiel de ne pas confondre deux formes de variation.
 
-## 3.1 Contextualisation AOT
+### 3.1 Contextualisation AOT
 
 Une représentation peut dépendre structurellement de son identité.
 
@@ -81,9 +75,7 @@ Elle doit donc être résolue par la Forge.
 
 Ce n'est pas une augmentation.
 
----
-
-## 3.2 Augmentation
+### 3.2 Augmentation
 
 Une projection constitue une augmentation potentielle lorsqu'elle possède un cycle de production ou de mutation indépendant de celui de la page qu'elle accompagne.
 
@@ -96,9 +88,7 @@ Exemples :
 
 Dans ce cas, la projection peut être factorisée indépendamment de la page.
 
----
-
-# 4. La route n'est pas une dimension combinatoire
+## 4. La route n'est pas une dimension combinatoire
 
 Le contexte de route doit être traité séparément des états indépendants.
 
@@ -128,7 +118,7 @@ Route × choix de contexte → représentation
 
 La Forge peut par conséquent spécialiser une représentation pour chaque route connue sans créer une explosion combinatoire.
 
-### Invariant
+#### Invariant
 
 > **Pour une identité de représentation donnée, le contexte de route produit au plus une représentation canonique AOT.**
 
@@ -136,9 +126,7 @@ Le nombre de représentations résultant du contexte de route est donc borné pa
 
 Il ne constitue pas une dimension combinatoire analogue à l'état utilisateur, au panier, aux notifications ou à une autre donnée volatile.
 
----
-
-# 5. Exemple canonique : l'onglet de navigation courant
+## 5. Exemple canonique : l'onglet de navigation courant
 
 Considérons :
 
@@ -189,9 +177,7 @@ Route /about
     → navigation contextualisée pour /about
 ```
 
----
-
-# 6. Règle générale de contextualisation
+## 6. Règle générale de contextualisation
 
 > **Toute propriété de présentation dont la valeur est une fonction déterministe de l'identité de la représentation demandée et qui est connue au build-time doit être résolue par la Forge dans la représentation AOT correspondante.**
 
@@ -212,9 +198,7 @@ La propriété déterminante est la suivante :
 
 > la variation est nécessairement induite par l'identité de la représentation.
 
----
-
-# 7. Variation locale ≠ composition
+## 7. Variation locale ≠ composition
 
 Le fait qu'un seul élément d'une page varie ne justifie pas la création d'une projection indépendante.
 
@@ -236,9 +220,7 @@ Le principe est :
 
 Il n'existe aucune raison architecturale de transformer chaque variation locale en segment, projection ou mécanisme d'augmentation.
 
----
-
-# 8. Critère fondamental d'augmentation
+## 8. Critère fondamental d'augmentation
 
 Une variation ne devient candidate à l'augmentation que lorsqu'elle n'est pas simplement une conséquence nécessaire de l'identité de la représentation et qu'elle possède une existence propre.
 
@@ -260,9 +242,7 @@ Le contenu de l'article peut rester identique alors que les notifications change
 
 Les deux cycles ne sont pas nécessairement liés.
 
----
-
-# 9. Une page personnalisée n'est pas nécessairement une page augmentée
+## 9. Une page personnalisée n'est pas nécessairement une page augmentée
 
 La personnalisation n'implique pas automatiquement l'augmentation.
 
@@ -290,13 +270,11 @@ session → nombre de notifications
 
 est potentiellement une projection indépendante.
 
----
-
-# 10. Projection, Artefact et Segment ne doivent pas être confondus
+## 10. Projection, Artefact et Segment ne doivent pas être confondus
 
 Ces termes appartiennent à des niveaux différents.
 
-### Projection
+#### Projection
 
 Concept de domaine/Forge.
 
@@ -304,13 +282,13 @@ Elle possède une identité, des sources de données, un cycle d'invalidation et
 
 La Projection est consommée par l'AOT.
 
-### Artefact
+#### Artefact
 
 Produit de la Forge ou du pipeline de projection.
 
 Dans l'implémentation actuelle, le packfile constitue un artefact de lecture.
 
-### Segment
+#### Segment
 
 Primitive du Runtime.
 
@@ -318,13 +296,13 @@ Un Segment désigne une plage mémoire contiguë susceptible de participer à un
 
 Le Runtime ne connaît pas sa provenance sémantique.
 
-### SegmentDescriptor
+#### SegmentDescriptor
 
 Description AOT d'un segment :
 
 ```rust
-#[repr(C)]
-#[derive(Clone, Copy)]
+##[repr(C)]
+##[derive(Clone, Copy)]
 pub struct SegmentDescriptor {
     pub source: SourceId,
     pub offset: u64,
@@ -333,23 +311,21 @@ pub struct SegmentDescriptor {
 }
 ```
 
-### SourceId
+#### SourceId
 
 Identité locale à une route permettant de résoudre un `SegmentDescriptor` vers une source matérialisée.
 
-### SourceKey
+#### SourceKey
 
 Identité globale d'un artefact/source nommé dans le registre.
 
-### DOM Target
+#### DOM Target
 
 Identité côté navigateur d'une cible de mise à jour.
 
 Le DOM Target n'est pas un Segment.
 
----
-
-# 11. Segment ≠ fragment DOM
+## 11. Segment ≠ fragment DOM
 
 Un Segment est une primitive mémoire et d'émission.
 
@@ -375,9 +351,7 @@ Segment → DOM Target
 
 est une préoccupation du contrat navigateur, pas du Runtime de segments.
 
----
-
-# 12. Contrat serveur
+## 12. Contrat serveur
 
 L'augmentation s'appuie sur les primitives existantes du Runtime.
 
@@ -411,9 +385,7 @@ Il ne sait pas si un segment contient :
 
 La sémantique a été consommée en amont par la Forge.
 
----
-
-# 13. Contextualisation AOT et RouteDescriptor
+## 13. Contextualisation AOT et RouteDescriptor
 
 La contextualisation de route doit être effectuée **avant le Runtime**.
 
@@ -445,9 +417,7 @@ SegmentDescriptor[]
 
 Le Runtime ne connaît donc pas `.current`.
 
----
-
-# 14. Une génération AOT par représentation canonique
+## 14. Une génération AOT par représentation canonique
 
 Le principe peut être formulé plus précisément ainsi :
 
@@ -477,9 +447,7 @@ puisque `current_tab` est une fonction de `route`.
 
 Cette propriété doit être conservée comme invariant architectural.
 
----
-
-# 15. Static et volatile : une distinction orthogonale
+## 15. Static et volatile : une distinction orthogonale
 
 Le caractère statique ou volatile d'une source ne doit pas être confondu avec la contextualisation de représentation.
 
@@ -496,9 +464,7 @@ La contextualisation caractérise la détermination d'une représentation.
 
 Ce sont deux dimensions différentes.
 
----
-
-# 16. Production d'une source volatile
+## 16. Production d'une source volatile
 
 Le Runtime définit le chemin mémoire permettant de matérialiser une source volatile :
 
@@ -518,9 +484,7 @@ Cette question constitue un chantier séparé.
 
 Le contrat ne doit donc pas inventer de mécanisme de rendu runtime, de requête SQL ou de composition dynamique pour résoudre cette lacune.
 
----
-
-# 17. Une génération du monde par requête
+## 17. Une génération du monde par requête
 
 Lorsqu'une requête utilise plusieurs sources statiques, le Runtime doit observer une génération cohérente du registre.
 
@@ -537,9 +501,7 @@ La résolution des sources doit donc respecter l'invariant :
 
 La contextualisation AOT ne modifie pas cet invariant.
 
----
-
-# 18. Budget et déterminisme
+## 18. Budget et déterminisme
 
 La Forge connaît les représentations qu'elle produit.
 
@@ -557,9 +519,7 @@ Le contexte de route ne constitue pas une exception à cette règle.
 
 Puisque chaque représentation de route est canonique, son budget peut être calculé individuellement.
 
----
-
-# 19. Atomicité de la réponse
+## 19. Atomicité de la réponse
 
 Une réponse doit rester cohérente avec la représentation qu'elle matérialise.
 
@@ -581,9 +541,7 @@ Une éventuelle synchronisation ultérieure d'une projection indépendante côt�
 
 Elle ne modifie pas la définition de la représentation initiale.
 
----
-
-# 20. Contrat navigateur séparé
+## 20. Contrat navigateur séparé
 
 Le navigateur peut posséder un mécanisme permettant de mettre à jour une projection indépendante.
 
@@ -600,9 +558,7 @@ Il peut s'agir, selon une décision ultérieure :
 
 Aucune de ces technologies ne doit être introduite dans l'ontologie du serveur de segments.
 
----
-
-# 21. Progressive enhancement
+## 21. Progressive enhancement
 
 Une page Marius doit rester fonctionnelle sans JavaScript.
 
@@ -612,9 +568,7 @@ Le serveur doit être capable de fournir une représentation complète sans dép
 
 La présence d'une projection volatile ne doit pas transformer Marius en moteur de rendu dépendant du navigateur.
 
----
-
-# 22. Invalidation serveur et synchronisation navigateur sont distinctes
+## 22. Invalidation serveur et synchronisation navigateur sont distinctes
 
 Deux événements doivent être distingués :
 
@@ -638,9 +592,7 @@ Le second relève du contrat navigateur.
 
 Ils ne doivent pas être fusionnés conceptuellement.
 
----
-
-# 23. Hyper/Axum hors du contrat d'augmentation
+## 23. Hyper/Axum hors du contrat d'augmentation
 
 Hyper et Axum appartiennent à la frontière HTTP.
 
@@ -658,9 +610,7 @@ La question de la propagation effective des `IoSlice`, de `writev`/`sendmsg`, de
 
 Le contrat d'augmentation reste indépendant de cette implémentation.
 
----
-
-# 24. Ce que l'augmentation interdit
+## 24. Ce que l'augmentation interdit
 
 L'augmentation ne doit pas devenir un prétexte pour introduire :
 
@@ -679,13 +629,11 @@ En particulier :
 
 > **Une variation déterminée par la route ne doit pas être transformée artificiellement en augmentation afin d'éviter sa spécialisation AOT.**
 
----
-
-# 25. Test architectural de discernement
+## 25. Test architectural de discernement
 
 Pour toute nouvelle variation de présentation, appliquer les questions dans cet ordre.
 
-### Question 1 — La variation est-elle déterminée par l'identité de la représentation ?
+#### Question 1 — La variation est-elle déterminée par l'identité de la représentation ?
 
 Si oui :
 
@@ -702,9 +650,7 @@ route → classe CSS
 
 La Forge doit la résoudre.
 
----
-
-### Question 2 — Plusieurs états légitimes d'une même représentation peuvent-ils exister indépendamment de cette identité ?
+#### Question 2 — Plusieurs états légitimes d'une même représentation peuvent-ils exister indépendamment de cette identité ?
 
 Si non :
 
@@ -714,9 +660,7 @@ Si oui :
 
 → poursuivre l'analyse.
 
----
-
-### Question 3 — La variation possède-t-elle son propre cycle de production ou de mutation ?
+#### Question 3 — La variation possède-t-elle son propre cycle de production ou de mutation ?
 
 Si non :
 
@@ -726,17 +670,13 @@ Si oui :
 
 → **projection indépendante potentielle**.
 
----
-
-### Question 4 — La factorisation apporte-t-elle un bénéfice architectural réel ?
+#### Question 4 — La factorisation apporte-t-elle un bénéfice architectural réel ?
 
 Une projection indépendante ne doit pas être créée simplement parce qu'une portion de HTML peut être isolée.
 
 Elle doit bénéficier d'un cycle de vie indépendant.
 
----
-
-# 26. Exemples comparatifs
+## 26. Exemples comparatifs
 
 | Cas                                                        | Classification                                     |
 | ---------------------------------------------------------- | -------------------------------------------------- |
@@ -752,9 +692,7 @@ Elle doit bénéficier d'un cycle de vie indépendant.
 | Fragment HTML arbitraire                                   | Pas nécessairement une Projection                  |
 | Segment mémoire                                            | Primitive Runtime, pas Projection                  |
 
----
-
-# 27. Invariants architecturaux
+## 27. Invariants architecturaux
 
 Le contrat impose les invariants suivants.
 
@@ -798,37 +736,33 @@ Le contrat impose les invariants suivants.
 
 20. **Hyper/Axum restent confinés à l'adaptateur HTTP.**
 
----
-
-# 28. Périmètre restant à spécifier
+## 28. Périmètre restant à spécifier
 
 Le présent contrat ne clôt pas les sujets suivants :
 
-### 28.1 Production des `VolatileSlot`
+#### 28.1 Production des `VolatileSlot`
 
 Le chemin mémoire est défini, mais pas encore le producteur concret du contenu.
 
-### 28.2 Contrat navigateur
+#### 28.2 Contrat navigateur
 
 Le mécanisme permettant de cibler et mettre à jour une projection indépendante reste à choisir.
 
-### 28.3 Intégration Hyper/Axum
+#### 28.3 Intégration Hyper/Axum
 
 La propagation de `EmissionPlan` vers le chemin HTTP concret doit être cartographiée.
 
-### 28.4 Destin de l'ancien `Projection`
+#### 28.4 Destin de l'ancien `Projection`
 
 Le trait historique peut encore fusionner des responsabilités qui doivent désormais être distinguées entre Forge, projection et Runtime.
 
-### 28.5 Zero-copy réseau
+#### 28.5 Zero-copy réseau
 
 `writev`/`sendmsg` et l'absence d'allocation ne constituent pas une garantie de zero-copy réseau.
 
 `MSG_ZEROCOPY` reste un sujet expérimental dépendant de mesures réelles.
 
----
-
-# 29. Synthèse
+## 29. Synthèse
 
 Marius doit être compris comme un compilateur de représentations AOT ordonnées.
 
