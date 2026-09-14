@@ -2169,4 +2169,241 @@ mod tests {
             text
         );
     }
+
+    // ── transform_css / calc() — décision AOT : Constant Folding délégué à
+    //    l'AST `lightningcss` (`minify()`), pas de parseur mathématique
+    //    maison dans `MvarProvider`. ──────────────────────────────────────
+    //
+    // Invariant verrouillé ici, par le point d'entrée réel du pipeline
+    // (`transform_css`), pas par une fonction interne isolée :
+    //
+    //   1. `calc()` sur une propriété à dimension fixe typée (`<length>`)
+    //      DOIT être réduit AOT (le nœud `calc()` disparaît, remplacé par
+    //      sa valeur calculée).
+    //   2. `calc()` dans une Custom Property (`--*`) ou sur un scalaire
+    //      sans unité (`<number>`/`<integer>`, ex. `z-index`) DOIT
+    //      survivre intact — bail-out de sécurité sémantique imposé par
+    //      lightningcss (Custom Properties : flux de tokens W3C opaque ;
+    //      scalaires : la résolution ne peut être garantie statiquement
+    //      identique à la résolution runtime dans tous les cas).
+    //
+    // Choix de robustesse des assertions : on vérifie la PRÉSENCE/ABSENCE
+    // structurelle du nœud `calc(` (le fait architectural qui nous
+    // intéresse), plus la valeur numérique effectivement calculée pour les
+    // cas pliés (pour ne pas laisser passer un faux positif où `calc()`
+    // aurait disparu sans que le calcul soit correct). On n'exige PAS une
+    // égalité byte-à-byte sur l'espacement interne à `calc()` dans les cas
+    // préservés (ex. `16px * 2` vs `16px*2`) : cette micro-mise-en-forme
+    // est un détail d'implémentation du printer de `lightningcss`, hors du
+    // contrat que cette décision d'architecture engage — la figer ici
+    // rendrait la suite fragile à un simple changement de version mineure
+    // du crate, sans rapport avec l'invariant réellement en jeu.
+
+    /// Garde RAII pour un fichier CSS temporaire de test : le nettoyage du
+    /// buffer disque est garanti même si l'assertion qui suit panique —
+    /// aucun cas de sortie de `minify_declaration` (succès, `panic!`,
+    /// erreur) ne doit laisser un artefact résiduel dans le répertoire
+    /// temporaire du système.
+    struct TempCssFile {
+        path: PathBuf,
+    }
+
+    impl TempCssFile {
+        /// Nom de fichier rendu unique par PID + horodatage nanoseconde :
+        /// les tests `#[test]` de ce module tournent en parallèle par
+        /// défaut, une collision de chemin entre deux tests ferait
+        /// planter l'un des deux sur une écriture concurrente.
+        fn new(unique_name: &str, css: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            let pid = std::process::id();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("horloge système antérieure à UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!(
+                "marius_styles_calc_test_{unique_name}_{pid}_{nanos}.css"
+            ));
+            fs::write(&path, css).expect("écriture du fichier CSS temporaire de test");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempCssFile {
+        fn drop(&mut self) {
+            // Best-effort : si le fichier a déjà disparu (nettoyage manuel,
+            // run précédent interrompu), ce n'est pas une erreur de test.
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    /// Fait passer une seule déclaration CSS par le point d'entrée réel du
+    /// pipeline (`transform_css`) et retourne la feuille minifiée
+    /// résultante. `asset_url_registry` vide : aucun cas de la matrice
+    /// `calc()` ne référence `url()`, un registre vide est donc un fixture
+    /// fidèle, pas une simplification qui esquiverait un chemin de code.
+    fn minify_declaration(css_body: &str, test_name: &str) -> String {
+        let source = format!(".t {{ {css_body} }}");
+        let temp = TempCssFile::new(test_name, &source);
+        let theme_dir = temp
+            .path
+            .parent()
+            .expect("le fichier temporaire a toujours un répertoire parent")
+            .to_path_buf();
+        let asset_url_registry: AssetUrlRegistry = HashMap::new();
+        transform_css(&theme_dir, &temp.path, &asset_url_registry)
+            .unwrap_or_else(|e| panic!("transform_css a échoué pour le cas {test_name:?} : {e}"))
+    }
+
+    // ── 1. Réduction AOT — cas qui DOIVENT être pliés ───────────────────
+
+    #[test]
+    fn calc_folds_identical_absolute_units() {
+        let out = minify_declaration("width: calc(16px * 2);", "folds_identical_absolute_units");
+        assert!(
+            !out.contains("calc("),
+            "le nœud calc() aurait dû être réduit AOT : {out}"
+        );
+        assert!(
+            out.contains("32px"),
+            "valeur pliée incorrecte, attendu 32px : {out}"
+        );
+    }
+
+    /// Conversion ISO CSS : `1in` == `96px` par définition W3C
+    /// (CSS Values and Units), donc `1in + 96px` == `192px`.
+    #[test]
+    fn calc_folds_heterogeneous_absolute_units_via_iso_conversion() {
+        let out = minify_declaration(
+            "padding: calc(1in + 96px);",
+            "folds_heterogeneous_absolute_units",
+        );
+        assert!(
+            !out.contains("calc("),
+            "le nœud calc() aurait dû être réduit AOT : {out}"
+        );
+        assert!(
+            out.contains("192px"),
+            "valeur pliée incorrecte, attendu 192px : {out}"
+        );
+    }
+
+    #[test]
+    fn calc_folds_homogeneous_relative_units() {
+        let out = minify_declaration(
+            "margin: calc(1.5rem * 2);",
+            "folds_homogeneous_relative_units",
+        );
+        assert!(
+            !out.contains("calc("),
+            "le nœud calc() aurait dû être réduit AOT : {out}"
+        );
+        assert!(
+            out.contains("3rem"),
+            "valeur pliée incorrecte, attendu 3rem : {out}"
+        );
+    }
+
+    #[test]
+    fn calc_folds_native_math_function_with_constant_arguments() {
+        let out = minify_declaration(
+            "min-width: min(100px, 200px);",
+            "folds_native_math_function",
+        );
+        assert!(
+            !out.contains("min("),
+            "min() à arguments constants aurait dû être réduit AOT : {out}"
+        );
+        assert!(
+            out.contains("100px"),
+            "valeur pliée incorrecte, attendu 100px : {out}"
+        );
+    }
+
+    // ── 2. Préservation AOT / bail-out — cas qui DOIVENT rester en calc() ─
+
+    /// Règle W3C : une Custom Property est un flux de tokens opaque — son
+    /// contenu n'est jamais interprété/réduit à l'AOT par le moteur CSS,
+    /// la résolution appartient exclusivement au runtime `var()`.
+    #[test]
+    fn calc_preserved_in_custom_property_token_stream() {
+        let out = minify_declaration(
+            "--test-dim: calc(16px * 2);",
+            "preserved_in_custom_property",
+        );
+        assert!(
+            out.contains("--test-dim"),
+            "la Custom Property doit être préservée : {out}"
+        );
+        assert!(
+            out.contains("calc("),
+            "le flux de tokens d'une Custom Property ne doit jamais être réduit : {out}"
+        );
+        assert!(
+            out.contains("16px") && out.contains('2'),
+            "les tokens d'origine doivent être préservés intacts : {out}"
+        );
+    }
+
+    /// Bail-out de sécurité sémantique : sur un scalaire sans unité
+    /// (`<number>`/`<integer>`), lightningcss ne garantit pas que la
+    /// réduction statique soit fidèle à la résolution runtime dans tous
+    /// les cas — le nœud `calc()` doit donc survivre intact.
+    #[test]
+    fn calc_preserved_on_unitless_scalar_property() {
+        let out = minify_declaration("z-index: calc(2 + 3 * 4);", "preserved_unitless_scalar");
+        assert!(
+            out.contains("z-index"),
+            "la propriété doit rester présente : {out}"
+        );
+        assert!(
+            out.contains("calc("),
+            "un calc() scalaire sans unité ne doit jamais être plié AOT : {out}"
+        );
+    }
+
+    /// Dépendance runtime layout : `vh` ne peut être résolu qu'au moment
+    /// du rendu (viewport réel), donc un mélange unité relative/absolue
+    /// ne peut jamais être plié statiquement.
+    #[test]
+    fn calc_preserved_on_mixed_relative_and_absolute_units() {
+        let out = minify_declaration(
+            "height: calc(100vh - 60px);",
+            "preserved_mixed_relative_absolute",
+        );
+        assert!(
+            out.contains("height"),
+            "la propriété doit rester présente : {out}"
+        );
+        assert!(
+            out.contains("calc("),
+            "un mélange vh/px dépend du runtime, jamais pliable AOT : {out}"
+        );
+        assert!(
+            out.contains("100vh") && out.contains("60px"),
+            "les opérandes d'origine doivent être préservés : {out}"
+        );
+    }
+
+    /// Préservation des variables dynamiques : `var(--base-scale)` n'a pas
+    /// de valeur connue AOT (elle dépend de la cascade au runtime), donc
+    /// tout `calc()` qui la référence doit survivre intact.
+    #[test]
+    fn calc_preserved_when_referencing_a_dynamic_variable() {
+        let out = minify_declaration(
+            "width: calc(20px * var(--base-scale));",
+            "preserved_dynamic_variable",
+        );
+        assert!(
+            out.contains("width"),
+            "la propriété doit rester présente : {out}"
+        );
+        assert!(
+            out.contains("calc("),
+            "un calc() référençant var() ne doit jamais être plié AOT : {out}"
+        );
+        assert!(
+            out.contains("var(--base-scale") && out.contains("20px"),
+            "les opérandes d'origine doivent être préservés : {out}"
+        );
+    }
 }
