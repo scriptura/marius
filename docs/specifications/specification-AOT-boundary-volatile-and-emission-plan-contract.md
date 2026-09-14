@@ -4,8 +4,6 @@
 **Projet :** `scriptura/marius`  
 **Dépendances architecturales :** ADR-011, `DESIGN-runtime-segment-pipeline.md`, `CONTRAT-marius-one-page-extension.md`
 
----
-
 ## 1. Objet
 
 Cette spécification définit la frontière entre :
@@ -20,9 +18,7 @@ Elle ne modifie pas le principe fondamental de Marius :
 
 > PostgreSQL est la source de vérité et le moteur de calcul ; Forge produit les artefacts AOT ; le runtime exécute un plan préétabli et ne reconstruit pas dynamiquement une page.
 
----
-
-# 2. Invariants de la page complète
+## 2. Invariants de la page complète
 
 Toute représentation AOT d'une page doit rester fonctionnellement complète sans JavaScript.
 
@@ -39,9 +35,7 @@ JavaScript peut accélérer ou enrichir l'expérience, mais ne constitue jamais 
 
 Une augmentation éventuelle ne doit donc pas transformer la page AOT en coquille fonctionnellement inutilisable.
 
----
-
-# 3. Définition de la volatilité
+## 3. Définition de la volatilité
 
 Une donnée n'est pas volatile en raison :
 
@@ -57,9 +51,7 @@ Une source est candidate à une matérialisation volatile lorsqu'elle possède u
 
 La volatilité est donc une propriété de la **source et de son cycle de mutation**, et non du composant HTML qui l'affiche.
 
----
-
-# 4. Contextualisation par la route
+## 4. Contextualisation par la route
 
 La variation déterminée par la représentation de la route ne constitue pas une volatilité.
 
@@ -93,9 +85,7 @@ Pour `/users`, Forge produit une autre représentation.
 
 Cette variation appartient au corpus AOT et ne constitue pas une dimension volatile.
 
----
-
-# 5. Volatilité et personnalisation utilisateur
+## 5. Volatilité et personnalisation utilisateur
 
 L'authentification ne constitue pas, à elle seule, une définition de la volatilité.
 
@@ -156,9 +146,7 @@ Une page privée peut rester une représentation complète.
 
 La décision doit être fondée sur l'architecture de production, la cardinalité des contextes, le cycle de mutation et le coût de matérialisation, pas sur la présence d'une authentification.
 
----
-
-# 6. Exemple canonique : identité authentifiée
+## 6. Exemple canonique : identité authentifiée
 
 Un encart tel que :
 
@@ -194,9 +182,7 @@ Cette source possède son propre cycle de mutation :
 
 Elle ne doit donc pas être transformée en dimension combinatoire de l'artefact AOT.
 
----
-
-# 7. Factorisation et explosion combinatoire
+## 7. Factorisation et explosion combinatoire
 
 Le problème architectural n'est pas simplement le nombre de données personnalisées.
 
@@ -229,9 +215,7 @@ plutôt que de transformer chaque combinaison en page AOT distincte.
 
 Cette factorisation ne signifie toutefois pas que toute donnée personnalisée doit devenir volatile.
 
----
-
-# 8. Volatile ≠ fragment DOM
+## 8. Volatile ≠ fragment DOM
 
 Une donnée volatile n'est pas définie comme un « fragment HTML ».
 
@@ -254,9 +238,7 @@ Le serveur ne doit pas connaître :
 - un emplacement dans le document ;
 - ni une mécanique HTMX.
 
----
-
-# 9. `VolatileSlot`
+## 9. `VolatileSlot`
 
 Dans l'IR statique, une source volatile est décrite par :
 
@@ -276,9 +258,7 @@ Il ne constitue pas la longueur effectivement émise.
 
 La longueur effective appartient à l'exécution.
 
----
-
-# 10. Rôle de `EmissionPlan`
+## 10. Rôle de `EmissionPlan`
 
 `EmissionPlan` est un IR d'exécution.
 
@@ -315,9 +295,7 @@ Backend POSIX
 
 Aucune étape inférieure ne remonte vers une abstraction supérieure.
 
----
-
-# 11. Séparation des responsabilités
+## 11. Séparation des responsabilités
 
 ## Forge / Static IR
 
@@ -365,9 +343,7 @@ Il ne connaît ni :
 - `.marius` ;
 - ni les concepts métier.
 
----
-
-# 12. Génération et cohérence
+## 12. Génération et cohérence
 
 Une requête doit observer une génération cohérente pour chaque `SourceKey` utilisé.
 
@@ -391,9 +367,7 @@ La résolution doit alors préserver la cohérence de génération.
 
 La résolution unique par `SourceKey` est une exigence de correction, et non simplement une optimisation.
 
----
-
-# 13. `ResolvedRange`
+## 13. `ResolvedRange`
 
 Après matérialisation d'une source et résolution de sa sélection, le runtime obtient une plage émissible :
 
@@ -416,9 +390,7 @@ Elle représente uniquement une plage mémoire effectivement émissible.
 
 Elle constitue le niveau immédiatement antérieur à l'émission.
 
----
-
-# 14. Contrat provisoire de `EmissionPlan`
+## 14. Contrat provisoire de `EmissionPlan`
 
 Un `EmissionPlan` valide doit garantir :
 
@@ -434,9 +406,7 @@ Un `EmissionPlan` valide doit garantir :
 
 Un plan incomplet ne doit pas être présenté au backend comme émissible.
 
----
-
-# 15. Backend et `IoSlice`
+## 15. Backend et `IoSlice`
 
 La dernière transformation :
 
@@ -466,9 +436,7 @@ Le backend peut alors choisir ultérieurement entre :
 
 Le choix du backend est déterminé en amont par l'`EmissionPlan` / `EmissionBackendKind`, mais le backend lui-même ne doit pas inspecter les sources Marius.
 
----
-
-# 16. Ce que cette spécification ne tranche pas encore
+## 16. Ce que cette spécification ne tranche pas encore
 
 Les points suivants restent explicitement ouverts :
 
@@ -487,9 +455,7 @@ Les points suivants restent explicitement ouverts :
 
 Ces points doivent être résolus sans violer les invariants précédents.
 
----
-
-# 17. Principe directeur
+## 17. Principe directeur
 
 Marius ne doit pas demander :
 
@@ -513,9 +479,7 @@ Une donnée utilisateur peut rester AOT si le choix de matérialisation le justi
 
 La frontière AOT / volatile est donc une frontière de **production et de cycle de vie**, pas une frontière visuelle du document.
 
----
-
-# 18. Statut
+## 18. Statut
 
 Cette spécification est une base de travail destinée à être confrontée aux documents normatifs existants et à l'implémentation des Phases 0.A à 5.
 

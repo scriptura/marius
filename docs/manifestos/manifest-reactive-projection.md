@@ -5,8 +5,6 @@
 > Les détails d'implémentation et les procédures de diagnostic sont décrits
 > dans les guides runtime associés.
 
----
-
 ## 1. Vision stratégique
 
 Le serveur web n'est pas un médiateur interactif qui reconstruit une réponse
@@ -24,8 +22,6 @@ chemin d'écriture / de régénération.
 
 Le chemin HTTP n'exécute ni logique métier, ni requête SQL, ni rendu de
 template : il transporte un artefact déjà matérialisé.
-
----
 
 ## 2. Résolution des problèmes classiques
 
@@ -74,8 +70,6 @@ HTTP.
 Le chemin de lecture se réduit ainsi à la résolution d'un index et à la
 lecture du fragment déjà matérialisé dans le pack HTML.
 
----
-
 ## 3. Invariants structurels
 
 L'architecture repose sur quatre piliers.
@@ -119,8 +113,6 @@ Le `LiveRegistry` publie la génération actuellement servie.
 Une nouvelle génération est construite hors de l'artefact actuellement
 servi, puis publiée atomiquement après validation et finalisation.
 
----
-
 ## 4. Limite physiologique — l'amplification d'écriture
 
 Une mutation massive en base peut produire un grand nombre de notifications.
@@ -131,8 +123,6 @@ introduirait une amplification inutile du travail de projection et des
 
 Le système réduit cette entropie en regroupant les identifiants avant
 régénération.
-
----
 
 ## 5. Modèle Collector / Dispatcher
 
@@ -169,8 +159,6 @@ La concurrence entre artefacts distincts est donc inter-shard.
 La régulation de l'I/O disque est indépendante du fetch PostgreSQL : le
 sémaphore d'I/O est acquis avant le noyau de fusion physique afin de limiter
 la pression simultanée sur le système de fichiers et le cache de pages.
-
----
 
 ## 6. Pipeline mécanique global
 
@@ -304,8 +292,6 @@ HTTP ≠ merge_sweep
 HTTP = lecture d'un artefact déjà projeté
 ```
 
----
-
 ## 7. `store.bin` : projection distincte
 
 `store.bin` appartient à un pipeline distinct de la projection HTML réactive.
@@ -331,8 +317,6 @@ Cette séparation est structurelle : `store.bin` peut être plus ancien que
 l'état PostgreSQL ayant déclenché le `NOTIFY`. L'utiliser comme source de la
 régénération réactive introduirait donc une fenêtre de fraîcheur incompatible
 avec la sémantique du pipeline.
-
----
 
 ## 8. Propriété fondamentale
 
