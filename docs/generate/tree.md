@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-10 23:00:03
+**Généré le:** 2026-09-15 14:41:59
 
 ## Racine du Workspace
 
@@ -34,7 +34,8 @@
 │   │       │   ├── base.marius
 │   │       │   ├── footer.marius
 │   │       │   ├── head.marius
-│   │       │   └── navigation.marius
+│   │       │   ├── navigation.marius
+│   │       │   └── navigationNEW.marius
 │   │       ├── Cargo.toml
 │   │       └── README.md
 │   ├── forge
@@ -110,6 +111,7 @@
 │       │   │   ├── batch_renderer.rs
 │       │   │   ├── dispatcher.rs
 │       │   │   ├── dumper.rs
+│       │   │   ├── emission.rs
 │       │   │   ├── ingest_and_swap.rs
 │       │   │   ├── lib.rs
 │       │   │   ├── merge_store.rs
@@ -199,7 +201,7 @@
 ├── README.md
 └── biome.jsonc
 
-54 directories, 139 files
+54 directories, 141 files
 ```
 
 ## Documentation du projet
@@ -237,7 +239,8 @@
 ├── benchs
 │   ├── benchs-2026.08.03.md
 │   ├── benchs-2026.08.06.md
-│   └── benchs-2026.09.04.md
+│   ├── benchs-2026.09.04.md
+│   └── benchs-2026.09.12.md
 ├── contrats
 │   ├── CONTRAT-implementation-multi-slot-varlena.md
 │   ├── CONTRAT-implementation-projection-segmentee.md
@@ -250,6 +253,7 @@
 │   ├── HANDOFF-commentaires-marius.md
 │   ├── HANDOFF-js-deps-capacites-frontend-v2.md
 │   ├── HANDOFF-mode-page-blocs-imbriques.md
+│   ├── analyse-emission-plan.md
 │   ├── enquete.md
 │   ├── logical-data-model.pgsql
 │   ├── manifest-reactive-projection-OLD.md
@@ -266,10 +270,13 @@
 │   └── terminal-memo-cmd.md
 ├── handoffs
 │   ├── HANDOFF-scripts-architecture-reprise.md
+│   ├── Handoff-introduction of-an-AOT-route-representation-context.md
+│   ├── SPECIFICATION-transport-segmente-t2a.md
 │   ├── SUIVI-js-deps-points-en-attente.md
 │   ├── confrontation-code-sequencement-phase0A-5.md
 │   ├── handoff-cartographie-hyper(ADR-011).md
-│   ├── handoff-checkpoint-segment-resolution+++.md
+│   ├── handoff-checkpoint-segment-resolution.md
+│   ├── handoff-implementation-t2a.md
 │   ├── note-post-phase-5.3-generate-main.md
 │   └── risks.md
 ├── manifestos
@@ -316,8 +323,9 @@
     ├── marius-render-shell-specification.md
     ├── orchestration-main-roadmap.md
     ├── orchestration-main-specification.md
-    └── provisioning-projection-specification.md
+    ├── provisioning-projection-specification.md
+    └── specification-AOT-boundary-volatile-and-emission-plan-contract.md
 
-17 directories, 95 files
+17 directories, 101 files
 ```
 

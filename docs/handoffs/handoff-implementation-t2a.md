@@ -6,8 +6,6 @@
 
 **Statut :** v2 corrective (sémantique segment/source, point d'intégration expérimental, critère de non-copie, portée de `Content-Length`, statut de `Body::from_stream`).
 
----
-
 ## A. Contexte architectural minimal
 
 `[FAIT]` Marius est un moteur de rendu AOT : PostgreSQL est la source de vérité, la Forge (`crates/core/schema/build/`, `crates/forge/db-forge/`) produit des artefacts au moment du build, le runtime exécute un plan préétabli sans reconstruire de page.
@@ -24,8 +22,6 @@
 - `ResolvedRange<'a>` : plage mémoire empruntée `(bytes: &'a [u8])`, obtenue après résolution — dernier niveau de représentation propre à Marius (SPEC §2).
 
 `[DÉCISION]` `EmissionPlan` (type déjà existant dans `emission.rs`, const-generic sur `K`) **n'est pas conservé comme IR**. Il ne doit pas être instancié, ni recréé sous un autre nom. Sa non-nécessité a été établie par analyse préalable, hors périmètre de ce handoff — ne pas la rouvrir sans raison démontrée.
-
----
 
 ## B. État réel actuel du code
 
@@ -61,8 +57,6 @@ HTTP request
 - `Projection::MAX_RENDER_CHUNKS` existe et est généré par route — mais gouverne l'assemblage `Vec<RenderChunk>` du rendu Forge-time (`BatchRenderer`), **sans rapport** avec le budget de segments HTTP `K`. Ne pas confondre les deux.
 - Phase 5 a remplacé `axum::serve` par une boucle `hyper_util::server::conn::auto::Builder` manuelle — mais, par le propre commentaire du fichier, **`Router`/routes/handlers restent inchangés**. Phase 5 donne le contrôle de l'acceptation de connexion, pas de l'émission d'une réponse individuelle.
 
----
-
 ## C. Objectif immédiat
 
 `[DÉCISION]` Le seul objectif de ce handoff :
@@ -81,8 +75,6 @@ HTTP request
 - doit permettre de faire tourner réellement, au moins une fois, la chaîne complète : `SegmentDescriptor[] → Source resolution → Selection resolution → ResolvedRange[] → Bytes → Body → Hyper`.
 
 L'objectif de cet incrément est de **démontrer le pipeline réel**, pas de résoudre son alimentation définitive par la Forge.
-
----
 
 ## D. Adaptation `ResolvedRange → Bytes`
 
@@ -103,8 +95,6 @@ implémentant `AsRef<[u8]>` en résolvant `handle.blob(offset, len)` (ou équiva
 - une vue strictement limitée au `(offset, len)` demandé — jamais le blob entier ;
 - aucune copie du payload à aucune étape de cette conversion.
 
----
-
 ## E. Résolution bornée (ancien chantier « C »)
 
 `[FAIT]` Le stockage temporaire des `ResolvedRange` avant conversion a déjà été délibéré (hors de ce handoff) sous le nom de travail « C ». Conclusion retenue : un tableau de travail `[Option<ResolvedRange<'a>>; MAX_SEGMENTS]` pendant la boucle de résolution, dont on extrait ensuite une vue pleinement initialisée `&[ResolvedRange<'a>]` (sans `Option`) pour alimenter la conversion vers `Bytes`.
@@ -115,8 +105,6 @@ implémentant `AsRef<[u8]>` en résolvant `handle.blob(offset, len)` (ou équiva
 - Pas d'allocation heap inutile pour cette collection de travail (un tableau à capacité fixe convient).
 
 `[OUVERT]` Ne pas concevoir dès cet incrément une architecture finale pour `MAX_SEGMENTS`/`K_AOT` (calcul Forge, stockage global). Si une valeur est nécessaire pour faire compiler ce premier incrément, elle doit être choisie localement et **explicitement documentée comme provisoire** dans le code (commentaire), pas présentée comme un budget normatif.
-
----
 
 ## F. Body / Hyper
 
@@ -130,8 +118,6 @@ implémentant `AsRef<[u8]>` en résolvant `handle.blob(offset, len)` (ou équiva
 - Hyper reste seul responsable de la mise en file, de la vectorisation effective, et des écritures partielles.
 - Marius ne construit **jamais** de `IoSlice` lui-même.
 
----
-
 ## G. Préservation du chemin monolithique
 
 `[INVARIANT]` **Ne pas faire passer toutes les routes existantes artificiellement par T2A.** Le chemin :
@@ -143,8 +129,6 @@ AOT monolithique → mmap → émission directe
 doit rester disponible et fonctionnel, séparément du chemin segmenté introduit par cet incrément.
 
 `[OUVERT]` Si le code actuel (dispatch générique unique, `serve_route`) ne permet pas encore de sélectionner proprement entre les deux chemins par route, **documenter ce blocage explicitement** (où, pourquoi, quelles options existent) plutôt que d'inventer immédiatement le mécanisme Forge définitif de sélection. Ce blocage a déjà été partiellement caractérisé : le dispatch actuel est une fonction unique différenciée par une valeur runtime (`RouteEntry`), pas par un type — toute solution de sélection propre devra en tenir compte, sans que cela soit tranché ici.
-
----
 
 ## H. Tests et validation
 
@@ -172,8 +156,6 @@ transport Hyper (boxing du Body, mise en file interne)
 
 Ne jamais présenter le résultat global comme une certification « zéro allocation HTTP » — ce serait contraire à SPEC §4.
 
----
-
 ## I. Séquencement recommandé
 
 1. Vérifier le point d'insertion exact dans le code actuel (quelle route, quel handler, comment coexister avec `serve_route` existant sans le casser — cf. §G).
@@ -185,8 +167,6 @@ Ne jamais présenter le résultat global comme une certification « zéro alloca
 7. Tester (§H).
 8. Mesurer (§H, trois couches distinctes).
 9. **Seulement ensuite**, si nécessaire, envisager le raccordement Forge/`RouteDescriptor` généré — pas avant.
-
----
 
 ## Rappel final
 

@@ -74,13 +74,14 @@
     background-repeat: no-repeat;
     background-position: 50% 50%;
     background-size: auto 70%;
-    filter: brightness(1.25) contrast(1.25);
+      filter: brightness(0) invert(1);
   }
 
   a&:where(:focus-within, :hover) {
     background-color: var(--color5);
 
     &::after {
+    filter: none;
       animation: anim-logo 0.5s ease-in-out;
     }
   }
