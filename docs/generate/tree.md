@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-15 14:41:59
+**Généré le:** 2026-09-18 20:42:14
 
 ## Racine du Workspace
 
@@ -34,8 +34,7 @@
 │   │       │   ├── base.marius
 │   │       │   ├── footer.marius
 │   │       │   ├── head.marius
-│   │       │   ├── navigation.marius
-│   │       │   └── navigationNEW.marius
+│   │       │   └── navigation.marius
 │   │       ├── Cargo.toml
 │   │       └── README.md
 │   ├── forge
@@ -69,6 +68,7 @@
 │   │   │   │   │   ├── lexer.rs
 │   │   │   │   │   ├── mod.rs
 │   │   │   │   │   ├── parser.rs
+│   │   │   │   │   ├── record_presence.rs
 │   │   │   │   │   ├── resolver.rs
 │   │   │   │   │   ├── script_hoisting.rs
 │   │   │   │   │   ├── static_markers.rs
