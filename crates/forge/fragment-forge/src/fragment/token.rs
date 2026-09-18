@@ -4,6 +4,10 @@
 //! Enum figé, matché de façon exhaustive par le validateur, le resolver et
 //! le générateur AOT ; toute variante additionnelle est un breaking change
 //! interne à documenter explicitement.
+//!
+//! Session IfEq/Else : deux variantes ajoutées (`IfEq`, `Else`), extension
+//! générique du langage conditionnel — voir leur doc respective. `IfBool`
+//! reste inchangé en forme et en sémantique.
 
 /// Token de l'AST d'un template `.marius`.
 ///
@@ -24,6 +28,61 @@ pub enum FlatPageToken<'src> {
 
     /// Bloc conditionnel booléen : `{% if entity.field %}`.
     IfBool { entity: &'src str, field: &'src str },
+
+    /// Bloc conditionnel d'égalité entière : `{% if entity.field == N %}`.
+    ///
+    /// Extension minimale et générique du langage conditionnel — même
+    /// famille structurelle qu'`IfBool` (marqueur de bloc, fermé par
+    /// `EndIf`, éventuellement scindé par `Else`), mais teste une égalité à
+    /// un littéral entier plutôt qu'une simple non-nullité.
+    ///
+    /// `literal` est un `i64` indépendamment du `FieldKind` réel du champ
+    /// (`I16`/`I32`/`I64`) — le code Rust généré compare `record.{field}`
+    /// à un littéral Rust non typé (`record.{field} == {literal}`),
+    /// laissant l'inférence de type résoudre le type exact plutôt que
+    /// d'introduire un cast artificiel (voir `codegen::generate_aot_snippet`).
+    ///
+    /// Ce token ne porte aucune contrainte de type : `resolve_and_measure`
+    /// restreint les `FieldKind` acceptés à `I16`/`I32`/`I64` (rejet
+    /// explicite de `Bool`/`F32`/`F64`) — la validation de type est une
+    /// responsabilité du Resolver, jamais de l'AST lui-même, cohérent avec
+    /// le reste de ce module (`IfBool` ne valide pas non plus son champ ici).
+    IfEq {
+        entity: &'src str,
+        field: &'src str,
+        literal: i64,
+    },
+
+    /// Bloc conditionnel d'inégalité entière : `{% if entity.field != N %}`.
+    ///
+    /// Session `!=` : variante distincte d'`IfEq`, pas une généralisation —
+    /// `IfEq` reste inchangé en forme. Même structure exacte (`entity`,
+    /// `field`, `literal: i64`), seul l'opérateur émis par `codegen`
+    /// diffère (`!=` au lieu de `==`).
+    ///
+    /// Sémantique recordless (audit dédié, distinct de celle d'`IfEq` —
+    /// jamais dérivée par négation logique) : `record.field != N` affirme
+    /// encore une identité de record (« ceci n'est pas N »), tout comme
+    /// `record.field == N` affirme « ceci est N ». En l'absence de tout
+    /// record, aucune des deux affirmations n'a de sujet — `IfNeq` est
+    /// donc éliminé à FAUX en l'absence de record, exactement comme
+    /// `IfEq`, jamais à vrai (cf. `record_presence.rs`, qui traite
+    /// `IfBool | IfEq | IfNeq` de façon strictement identique).
+    IfNeq {
+        entity: &'src str,
+        field: &'src str,
+        literal: i64,
+    },
+
+    /// Bascule de branche : `{% else %}`.
+    ///
+    /// Générique au niveau de la structure `if` — valide aussi bien après
+    /// un `IfBool` qu'après un `IfEq` : ce token ne porte aucune référence
+    /// au bloc qu'il referme/rouvre, c'est la FSM de `validate_ast` qui
+    /// l'associe au bloc conditionnel actuellement ouvert. Optionnel : un
+    /// `if`/`endif` sans `else` reste parfaitement valide — aucune
+    /// régression sur les templates existants n'utilisant jamais ce token.
+    Else,
 
     /// Fermeture de bloc : `{% endif %}`.
     EndIf,
@@ -132,7 +191,7 @@ mod tests_phase_1_1 {
     /// Si `Copy` manquait (champ non-Copy), ce test ne compilerait pas.
     #[test]
     fn all_variants_are_copy() {
-        let tokens: [FlatPageToken<'_>; 6] = [
+        let tokens: [FlatPageToken<'_>; 9] = [
             FlatPageToken::Static("content"),
             FlatPageToken::Field {
                 entity: "user",
@@ -142,6 +201,17 @@ mod tests_phase_1_1 {
                 entity: "user",
                 field: "active",
             },
+            FlatPageToken::IfEq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            },
+            FlatPageToken::IfNeq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            },
+            FlatPageToken::Else,
             FlatPageToken::EndIf,
             FlatPageToken::StaticInclude {
                 original_path: "templates/header.html",
@@ -153,5 +223,20 @@ mod tests_phase_1_1 {
 
         let _a = tokens[0]; // premier move apparent
         let _b = tokens[0]; // second : compile ssi Copy est implémenté
+    }
+
+    /// `IfEq` accepte un littéral négatif — la grammaire ne doit pas
+    /// interdire arbitrairement le signe (cf. contrat de session).
+    #[test]
+    fn if_eq_accepts_negative_literal() {
+        let token = FlatPageToken::IfEq {
+            entity: "record",
+            field: "delta",
+            literal: -1,
+        };
+        match token {
+            FlatPageToken::IfEq { literal, .. } => assert_eq!(literal, -1),
+            _ => unreachable!(),
+        }
     }
 }

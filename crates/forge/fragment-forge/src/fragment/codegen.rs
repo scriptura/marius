@@ -4,6 +4,12 @@
 //! de code Rust. Aucune validation sémantique ici (AST supposé correct,
 //! Phases 1.3+1.4). Contient aussi l'en-tête du fichier généré (fonction
 //! `marius_html_escape` inline, zéro dépendance externe côté runtime).
+//!
+//! Session IfEq/Else : `IfBool` reste inchangé (`if record.{field} != 0 {`).
+//! `IfEq` émet `if record.{field} == {literal} {` — un littéral Rust non
+//! typé, laissant l'inférence de type résoudre le type exact du champ
+//! comparé, sans cast artificiel. `Else` émet `} else {`, au même niveau
+//! d'indentation que le bloc qu'il referme/rouvre.
 
 use crate::fragment::token::FlatPageToken;
 use crate::schema::{EscapePolicy, SchemaIndex};
@@ -74,69 +80,20 @@ pub fn generated_file_header() -> &'static str {
      }\n\n"
 }
 
-// =============================================================================
-// Phase 2.2 — Générateur AOT (Transpileur)
-// =============================================================================
-//
-// Responsabilité unique : transpiler &[FlatPageToken<'src>] → String de code Rust.
-//
-// Frontières strictes :
-//   - Aucune validation sémantique ici. L'AST est supposé correct (Phases 1.3+1.4).
-//   - L'indentation est plate (2 niveaux max) : garanti par l'invariant Phase 1.4.
-//   - Le code généré est autonome : `buf`, les variables d'entité et leurs champs
-//     sont supposés dans le scope de la fonction encapsulante (build.rs).
-//   - `{:?}` sur &str délègue l'échappement au Debug de Rust.
-//     Zéro escaper maison. Résultat : un littéral Rust syntaxiquement valide.
-//
-// Invariant de pré-allocation (DOD) :
-//   La première instruction du snippet est toujours `buf.reserve(N)`.
-//   N = metrics.total_static_bytes (mesuré exactement en Phase 2.1).
-//   Cette instruction garantit que le vecteur sous-jacent au `buf: &mut String`
-//   du runtime ne réalloue jamais pour les octets HTML statiques.
-
-/// Transpile l'AST en un bloc d'instructions Rust natif.
-///
-/// N'émet PAS `buf.reserve()` — c'est la responsabilité de l'orchestrateur
-/// qui référence PAGE_TOTAL_CAP (calculé depuis les métriques).
-///
-/// Délègue le choix d'émission à SchemaIndex :
-///   Field fixe   → write_fmt (pas d'allocation).
-///   Field varlena → html_escape via ref locale as_deref().
-///   IfBool        → `if record.field != 0` (u8 dans StorageRow, pas bool).
-///
-/// # Résolution des assets
-/// `resolve_asset_url` : supposée infaillible à ce stade — toute clé absente
-/// du manifeste a déjà fait échouer la compilation via
-/// `ResolverError::AssetNotFound` dans `resolve_and_measure`, appelé
-/// obligatoirement avant cette fonction (même précédent que `StaticInclude`,
-/// dont l'existence est vérifiée par `get_file_size` avant que
-/// `include_str!` ne soit émis ici). Un panic ici signale une violation de
-/// cet ordonnancement par l'appelant (`build.rs`), jamais une clé
-/// utilisateur invalide.
-///
-/// `'r` distinct de `'src` et de la lifetime (anonyme, par argument) de
-/// `key` dans la closure : sans ce paramètre nommé, `impl Fn(&str) -> &str`
-/// s'élide en `for<'a> Fn(&'a str) -> &'a str` (HRTB — la sortie liée à
-/// l'entrée). Une closure réelle capturant `&HashMap` (build.rs) renvoie un
-/// emprunt sur la durée de vie de la map, jamais sur celle de `key` : elle
-/// ne peut satisfaire cette borne que si la map vit `'static`, ce qui n'est
-/// pas le cas. `'r` découple la sortie de l'entrée et se résout, à l'appel,
-/// sur la durée de vie réelle capturée par la closure.
+/// Génère le corps de `render()` — transpileur pur, aucune validation
+/// (l'AST est supposé déjà validé par `validate_ast`/`resolve_and_measure`).
 pub fn generate_aot_snippet<'src, 'r>(
     tokens: &[FlatPageToken<'src>],
     schema: &SchemaIndex<'_>,
     resolve_asset_url: impl Fn(&str) -> &'r str,
-    // Code Rust déjà assemblé par `build.rs` pour ModulesPlaceholder — une
-    // ligne `if record.js_deps & BIT != 0 { buf.push_str(...); }` par
-    // capacité active, chaîne vide si aucune. Inséré verbatim (ce N'EST PAS
-    // un littéral à échapper comme AssetRef/StaticInclude : c'est déjà du
-    // code source, pas une valeur) — voir doc du variant.
+    // Voir doc du paramètre homonyme de `generate_segmented_snippet` — code
+    // Rust déjà assemblé, inséré verbatim, jamais une valeur à formater.
     modules_snippet: &str,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(25 + tokens.len() * 60);
 
-    // ── Déclarations de références varlena ────────────────────────────────────
+    // ── Déclarations de références varlena — triées, dédupliquées ─────────────
     let mut varlena_seen: Vec<&str> = tokens
         .iter()
         .filter_map(|t| match t {
@@ -212,6 +169,31 @@ pub fn generate_aot_snippet<'src, 'r>(
                 indent = "    ";
             }
 
+            // Session IfEq : littéral Rust non typé — l'inférence de type
+            // résout le type exact du champ comparé (i64/i32/i16), aucun
+            // cast artificiel émis ici (contrat de session).
+            FlatPageToken::IfEq { field, literal, .. } => {
+                writeln!(out, "{}if record.{field} == {literal} {{", indent).unwrap();
+                indent = "    ";
+            }
+
+            // Session `!=` : même contrat qu'IfEq, opérateur différent.
+            FlatPageToken::IfNeq { field, literal, .. } => {
+                writeln!(out, "{}if record.{field} != {literal} {{", indent).unwrap();
+                indent = "    ";
+            }
+
+            // Session IfEq/Else : ferme la branche if/IfEq ouverte, rouvre
+            // une branche else au même niveau d'indentation (`indent` est
+            // déjà "    " depuis IfBool/IfEq, et reste inchangé — le
+            // contenu de la branche else est au même niveau que celui de la
+            // branche if qu'elle referme). La ligne `} else {` elle-même est
+            // émise sans préfixe `indent`, exactement comme la fermeture de
+            // EndIf ci-dessous.
+            FlatPageToken::Else => {
+                out.push_str("} else {\n");
+            }
+
             FlatPageToken::EndIf => {
                 indent = "";
                 out.push_str("}\n");
@@ -283,7 +265,11 @@ pub fn generate_aot_snippet<'src, 'r>(
 /// entier est sauté à l'exécution si la condition est fausse, laissant
 /// `seg_start` intact avec sa valeur d'avant le bloc — le run englobant se
 /// poursuit alors sans discontinuité, exactement comme si le champ segmenté
-/// n'existait pas pour cet enregistrement.
+/// n'existait pas pour cet enregistrement. Le même raisonnement vaut pour
+/// une branche `else` (session IfEq/Else) : `seg_start` n'est jamais réinitialisé
+/// à l'ouverture d'`Else`, seul son indentation change — le run englobant se
+/// poursuit sans discontinuité, que la branche if ou la branche else ait été
+/// exécutée.
 ///
 /// Ce raisonnement a été vérifié à la main sur le cas d'un champ segmenté
 /// unique à l'intérieur d'un `{% if %}` avant d'écrire cette fonction — les
@@ -387,6 +373,31 @@ pub fn generate_segmented_snippet<'src, 'r>(
             FlatPageToken::IfBool { field, .. } => {
                 writeln!(out, "{indent}if record.{field} != 0 {{").unwrap();
                 indent.push_str("    ");
+            }
+
+            // Session IfEq : même contrat que generate_aot_snippet — littéral
+            // Rust non typé, aucun cast.
+            FlatPageToken::IfEq { field, literal, .. } => {
+                writeln!(out, "{indent}if record.{field} == {literal} {{").unwrap();
+                indent.push_str("    ");
+            }
+
+            // Session `!=` : même contrat, opérateur différent.
+            FlatPageToken::IfNeq { field, literal, .. } => {
+                writeln!(out, "{indent}if record.{field} != {literal} {{").unwrap();
+                indent.push_str("    ");
+            }
+
+            // Session IfEq/Else : ferme au niveau externe (indentation
+            // réduite de 4, comme EndIf), rouvre une branche else à ce même
+            // niveau externe — mais `indent` (la variable, pas la ligne
+            // émise) reste À SA VALEUR ACTUELLE : le contenu de la branche
+            // else doit rester au même niveau imbriqué que celui de la
+            // branche if qu'elle referme, contrairement à EndIf qui, lui,
+            // tronque bien `indent` en sortant définitivement du bloc.
+            FlatPageToken::Else => {
+                let outer_len = indent.len().saturating_sub(4);
+                writeln!(out, "{}}} else {{", &indent[..outer_len]).unwrap();
             }
 
             FlatPageToken::EndIf => {
@@ -758,6 +769,244 @@ mod tests_phase_2_2 {
             got.matches("RenderChunk::Buffered").count(),
             1,
             "un seul run Buffered attendu, couvrant tout buf:\n{got}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Session IfEq / Else
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Cible exacte du contrat de session : `if record.document_id == 1 {`,
+    /// sans cast artificiel.
+    #[test]
+    fn if_eq_generates_literal_equality_without_cast() {
+        let fixed = vec![FieldSpec {
+            name: "document_id".to_string(),
+            kind: FieldKind::I32,
+            attnum: 1,
+        }];
+        let schema = make_schema(&fixed, &[]);
+
+        let tokens: &[FlatPageToken<'_>] = &[FlatPageToken::IfEq {
+            entity: "record",
+            field: "document_id",
+            literal: 1,
+        }];
+
+        let got = generate_aot_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
+
+        assert!(
+            got.contains("if record.document_id == 1 {"),
+            "forme exacte attendue sans cast:\n{got}"
+        );
+        assert!(
+            !got.contains("as i64") && !got.contains("as i32") && !got.contains("as i16"),
+            "aucun cast artificiel ne doit être émis:\n{got}"
+        );
+    }
+
+    /// `IfEq` + `Else` : la branche else doit fermer le bloc if et en
+    /// rouvrir un, au même niveau d'indentation que le contenu du if.
+    #[test]
+    fn if_eq_with_else_generates_else_branch() {
+        let fixed = vec![FieldSpec {
+            name: "document_id".to_string(),
+            kind: FieldKind::I32,
+            attnum: 1,
+        }];
+        let schema = make_schema(&fixed, &[]);
+
+        let tokens: &[FlatPageToken<'_>] = &[
+            FlatPageToken::IfEq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            },
+            FlatPageToken::Static("A"),
+            FlatPageToken::Else,
+            FlatPageToken::Static("B"),
+            FlatPageToken::EndIf,
+        ];
+
+        let got = generate_aot_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
+
+        assert!(
+            got.contains("if record.document_id == 1 {"),
+            "ouverture IfEq absente:\n{got}"
+        );
+        assert!(got.contains("} else {"), "bascule else absente:\n{got}");
+        // Contenu des deux branches indenté à 4 espaces.
+        assert!(
+            got.contains("    buf.push('A');") || got.contains("    buf.push_str(\"A\");"),
+            "contenu de la branche if mal indenté:\n{got}"
+        );
+        assert!(
+            got.contains("    buf.push('B');") || got.contains("    buf.push_str(\"B\");"),
+            "contenu de la branche else mal indenté:\n{got}"
+        );
+        // Une seule fermeture finale (EndIf), à la racine.
+        assert!(got.contains("}\n"), "fermeture finale absente:\n{got}");
+    }
+
+    /// `IfBool` + `Else` : `Else` est générique, ne dépend pas d'IfEq.
+    #[test]
+    fn if_bool_with_else_generates_else_branch() {
+        let fixed = vec![FieldSpec {
+            name: "is_readable".to_string(),
+            kind: FieldKind::Bool,
+            attnum: 1,
+        }];
+        let schema = make_schema(&fixed, &[]);
+
+        let tokens: &[FlatPageToken<'_>] = &[
+            FlatPageToken::IfBool {
+                entity: "record",
+                field: "is_readable",
+            },
+            FlatPageToken::Static("A"),
+            FlatPageToken::Else,
+            FlatPageToken::Static("B"),
+            FlatPageToken::EndIf,
+        ];
+
+        let got = generate_aot_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
+
+        assert!(
+            got.contains("if record.is_readable != 0 {"),
+            "ouverture IfBool absente:\n{got}"
+        );
+        assert!(got.contains("} else {"), "bascule else absente:\n{got}");
+    }
+
+    /// Cible exacte du contrat de session `!=` : `if record.document_id != 1 {`,
+    /// sans cast artificiel — miroir de `if_eq_generates_literal_equality_without_cast`.
+    #[test]
+    fn if_neq_generates_literal_inequality_without_cast() {
+        let fixed = vec![FieldSpec {
+            name: "document_id".to_string(),
+            kind: FieldKind::I32,
+            attnum: 1,
+        }];
+        let schema = make_schema(&fixed, &[]);
+
+        let tokens: &[FlatPageToken<'_>] = &[FlatPageToken::IfNeq {
+            entity: "record",
+            field: "document_id",
+            literal: 1,
+        }];
+
+        let got = generate_aot_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
+
+        assert!(
+            got.contains("if record.document_id != 1 {"),
+            "forme exacte attendue sans cast:\n{got}"
+        );
+        assert!(
+            !got.contains("as i64") && !got.contains("as i32") && !got.contains("as i16"),
+            "aucun cast artificiel ne doit être émis:\n{got}"
+        );
+    }
+
+    /// `IfNeq` + `Else` : même forme qu'`IfEq` + `Else`.
+    #[test]
+    fn if_neq_with_else_generates_else_branch() {
+        let fixed = vec![FieldSpec {
+            name: "document_id".to_string(),
+            kind: FieldKind::I32,
+            attnum: 1,
+        }];
+        let schema = make_schema(&fixed, &[]);
+
+        let tokens: &[FlatPageToken<'_>] = &[
+            FlatPageToken::IfNeq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            },
+            FlatPageToken::Static("A"),
+            FlatPageToken::Else,
+            FlatPageToken::Static("B"),
+            FlatPageToken::EndIf,
+        ];
+
+        let got = generate_aot_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
+
+        assert!(
+            got.contains("if record.document_id != 1 {"),
+            "ouverture IfNeq absente:\n{got}"
+        );
+        assert!(got.contains("} else {"), "bascule else absente:\n{got}");
+    }
+
+    /// `generate_segmented_snippet` : IfEq + Else doit produire la même
+    /// forme que `generate_aot_snippet`, avec la même discipline
+    /// d'indentation que la variante IfBool déjà testée plus haut.
+    #[test]
+    fn generate_segmented_snippet_if_eq_with_else() {
+        let fixed = vec![FieldSpec {
+            name: "document_id".to_string(),
+            kind: FieldKind::I32,
+            attnum: 1,
+        }];
+        let varlena = vec![segment_field("content")];
+        let schema = make_schema(&fixed, &varlena);
+
+        let tokens: &[FlatPageToken<'_>] = &[
+            FlatPageToken::IfEq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            },
+            FlatPageToken::Field {
+                entity: "varlena",
+                field: "content",
+            },
+            FlatPageToken::Else,
+            FlatPageToken::Static("B"),
+            FlatPageToken::EndIf,
+        ];
+
+        let got = generate_segmented_snippet(
+            tokens,
+            &schema,
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            "",
+        );
+
+        assert!(
+            got.contains("if record.document_id == 1 {"),
+            "ouverture IfEq absente:\n{got}"
+        );
+        assert!(got.contains("} else {"), "bascule else absente:\n{got}");
+        // Le push segmenté à l'intérieur du if doit être indenté.
+        assert!(
+            got.contains("    segments.push(marius_projection::RenderChunk::Buffered"),
+            "push segmenté mal indenté à l'intérieur du if:\n{got}"
         );
     }
 }

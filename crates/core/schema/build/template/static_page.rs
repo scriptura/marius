@@ -22,8 +22,9 @@ use std::path::{Path, PathBuf};
 use marius_fragment_forge::{
     AssetLookup, FlatPageToken, NamedBlockRange, PageArena, PageLinkError, ParsedPageTemplate,
     SchemaIndex, TemplateId, collect_blocks, collect_static_refs, detect_extends,
-    extract_static_marker_facts, hoist_and_dedupe_scripts, link_chain, lower, parse_page_tokens,
-    relative_path_for_include_str, resolve_and_measure, scan, splice_hoisted_scripts, validate_ast,
+    eliminate_recordless_conditions, extract_static_marker_facts, hoist_and_dedupe_scripts,
+    link_chain, lower, parse_page_tokens, relative_path_for_include_str, resolve_and_measure, scan,
+    splice_hoisted_scripts, validate_ast,
 };
 
 use crate::asset_lookup::resolve_asset_lookup;
@@ -103,7 +104,26 @@ fn emit_static_html<'r>(
                 })?;
                 html.push_str(&content);
             }
-            FlatPageToken::Field { .. } | FlatPageToken::IfBool { .. } | FlatPageToken::EndIf => {
+            // Session IfEq/Else/!= : `IfEq`/`IfNeq` portent une référence
+            // de champ au même titre qu'`IfBool` (`entity`/`field`) — même
+            // garantie amont, même bras. `Else` ne référence aucun champ,
+            // mais ne peut atteindre ce point qu'accompagné d'un
+            // `IfBool`/`IfEq`/`IfNeq` déjà rejeté par `resolve_and_measure`
+            // (SchemaIndex toujours vide ici, point 2 de la doc de
+            // `resolve_static_page`) — donc structurellement aussi
+            // inatteignable que ses voisins. En pratique, aucun des cinq
+            // ne devrait même atteindre `resolve_and_measure` : la passe
+            // `eliminate_recordless_conditions` (session shell/
+            // représentation), appelée juste après `validate_ast`, élimine
+            // déjà `IfBool`/`IfEq`/`IfNeq`/`Else`/`EndIf` avant que ce
+            // point ne soit atteint — ce bras reste un garde-fou défensif,
+            // pas le chemin normal.
+            FlatPageToken::Field { .. }
+            | FlatPageToken::IfBool { .. }
+            | FlatPageToken::IfEq { .. }
+            | FlatPageToken::IfNeq { .. }
+            | FlatPageToken::Else
+            | FlatPageToken::EndIf => {
                 println!(
                     "cargo:error=DB-Forge [{schema}.{table}] : page statique référençant une \
                      donnée dynamique — ne devrait jamais atteindre ce point (SchemaIndex vide, \
@@ -393,6 +413,28 @@ pub(crate) fn resolve_static_page(
         );
     })?;
 
+    // Garde-fou central de cette fonction (point 2 de la doc de tête) :
+    // SchemaIndex toujours vide, jamais un paramètre — construit ici,
+    // avant toute passe en aval, pour que l'élimination AOT des conditions
+    // record.* (session shell/représentation) en dispose immédiatement.
+    let schema_index = SchemaIndex {
+        fixed: &[],
+        varlena: &[],
+    };
+
+    // Élimination AOT des conditions record.* (session shell/représentation) —
+    // aucune page STATIC_PAGES ne possède de record (schema_index toujours
+    // vide ci-dessus) : toute condition record.* (IfBool ou IfEq) rencontrée
+    // dans un fragment importé (ex. navigation.marius, breadcrumb futur) est
+    // donc statiquement fausse. Seule la branche `else`, si elle existe, est
+    // conservée — exécuté juste après validate_ast (structure déjà garantie
+    // valide) et avant toute autre passe, pour qu'aucun champ record.*
+    // n'atteigne jamais resolve_and_measure ici : sans cette élimination,
+    // resolve_and_measure échouerait avec UnknownField sur le premier champ
+    // record.* référencé, empêchant tout partage de base.marius entre pages
+    // avec et sans record.
+    let tokens = eliminate_recordless_conditions(tokens, &schema_index);
+
     let (tokens, hoisted_blocks) = hoist_and_dedupe_scripts(tokens).map_err(|e| {
         println!("cargo:error=DB-Forge [{schema}.{table}] : hoisting des scripts échoué : {e}");
     })?;
@@ -449,12 +491,8 @@ pub(crate) fn resolve_static_page(
     };
 
     // Garde-fou central de cette fonction (point 2 de la doc ci-dessus) :
-    // SchemaIndex toujours vide, jamais un paramètre.
-    let schema_index = SchemaIndex {
-        fixed: &[],
-        varlena: &[],
-    };
-
+    // SchemaIndex toujours vide, jamais un paramètre — déjà construit plus
+    // haut (juste après validate_ast), réutilisé ici tel quel.
     let manifest_dir_owned = manifest_dir.to_string();
     let get_file_size = move |rel_path: &str| -> Result<usize, String> {
         std::fs::metadata(Path::new(&manifest_dir_owned).join(rel_path))

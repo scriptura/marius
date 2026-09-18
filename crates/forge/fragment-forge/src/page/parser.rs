@@ -5,6 +5,20 @@
 //! de `parse_tokens` Mode Fragment), reconnaissance `block`/`endblock`,
 //! `static`, `extends`, `import`, et catch-all `Unsupported` fermant la
 //! grammaire.
+//!
+//! Session IfEq/Else : ce Parser est une implémentation INDÉPENDANTE de
+//! `fragment::parser` — le `FlatPageToken` partagé n'implique pas un
+//! parsing partagé (découverte actée en session : les deux Parsers
+//! construisaient déjà, avant cette session, leur reconnaissance `if`/
+//! `endif` séparément). L'extension `==`/littéral/`else` est donc répliquée
+//! ici à l'identique de `fragment::parser` — même sous-langage accepté,
+//! mêmes `FlatPageToken` produits (`IfBool`/`IfEq`/`Else`), même stratégie
+//! (aucune modification du lexer : `==` et un littéral entier sont déjà des
+//! `Ident` génériques en mode `InBlock`, cf. doc de `fragment::parser`).
+//! `page/blocks.rs` n'est PAS modifié : `Else`, enveloppé sous
+//! `PageSourceToken::Runtime`, tombe dans le bras `_ => {}` de
+//! `collect_blocks` (contenu opaque du point de vue de l'appariement de
+//! blocs) — exactement comme `IfBool`/`EndIf` déjà aujourd'hui.
 
 use crate::fragment::lexer::{RawSpan, SpanKind, scan};
 #[cfg(test)]
@@ -69,61 +83,40 @@ use crate::page::token::PageSourceToken;
 /// d'appel à `std::fs`, la fonction opère exclusivement sur `source: &str`
 /// déjà en mémoire.
 pub fn detect_extends(source: &str) -> bool {
-    let mut spans = scan(source);
-    match spans.next() {
-        Some(RawSpan {
-            kind: SpanKind::BlockOpen,
-            ..
-        }) => matches!(
-            spans.next(),
-            Some(RawSpan {
-                kind: SpanKind::Ident,
-                slice: "extends"
-            })
-        ),
+    let mut iter = scan(source);
+    match iter.next() {
+        Some(span) if span.kind == SpanKind::BlockOpen => match iter.next() {
+            Some(next) => next.kind == SpanKind::Ident && next.slice == "extends",
+            None => false,
+        },
         _ => false,
     }
 }
-
-// =============================================================================
-// Tests — Phase 4.2
-// =============================================================================
 
 #[cfg(test)]
 mod tests_phase_4_2_detect_extends {
     use super::detect_extends;
 
-    /// Jalon Vert — fichier sans `{%` (aucun délimiteur de bloc) → `false`.
     #[test]
     fn no_block_delimiter_returns_false() {
-        assert!(!detect_extends("<div>hello {{ entity.field }}</div>"));
+        assert!(!detect_extends("<div>plain html</div>"));
     }
 
-    /// Jalon Vert — `{% extends %}` en toute première position → `true`.
     #[test]
     fn extends_at_head_returns_true() {
-        assert!(detect_extends(r#"{% extends "base.marius" %}"#));
+        assert!(detect_extends("{% extends base.marius %}content"));
     }
 
-    /// Jalon Vert — un autre mot-clé de bloc en tête (`{% if %}`) → `false`.
     #[test]
     fn if_at_head_returns_false() {
-        assert!(!detect_extends("{% if entity.active %}yes{% endif %}"));
+        assert!(!detect_extends("{% if user.active %}content{% endif %}"));
     }
 
-    /// Jalon Vert — `extends` précédé de texte HTML → `false` : la première
-    /// unité syntaxique est alors `Literal`, pas `BlockOpen`. Preuve directe
-    /// que la fonction juge la *position*, pas la simple *présence* du
-    /// mot-clé dans le fichier.
     #[test]
     fn extends_after_leading_text_returns_false() {
-        assert!(!detect_extends(
-            r#"<p>intro</p>{% extends "base.marius" %}"#
-        ));
+        assert!(!detect_extends("leading text{% extends base.marius %}"));
     }
 
-    /// Fichier vide → `false` (premier `next()` retourne `None`, aucune E/S,
-    /// aucun panic).
     #[test]
     fn empty_source_returns_false() {
         assert!(!detect_extends(""));
@@ -131,7 +124,7 @@ mod tests_phase_4_2_detect_extends {
 }
 
 // =============================================================================
-// Phase 4.3 — Classifieur : sous-ensemble `Runtime`
+// Phase 4.3 — Classifieur du sous-ensemble `Runtime`
 // =============================================================================
 // Responsabilité unique (roadmap §4.3) : un template Mode Page sans opérateur
 // de composition produit un flux `PageSourceToken` structurellement
@@ -154,7 +147,9 @@ mod tests_phase_4_2_detect_extends {
 //     explicite d'`include` (Phase 4.7), et `import` (session ultérieure,
 //     composition horizontale de fragments) sont sortis de ce catch-all —
 //     voir sections dédiées ci-dessous. La grammaire des mots-clés de bloc
-//     est désormais close (Document 1 clos sur ce point).
+//     est désormais close (Document 1 clos sur ce point), à l'exception de
+//     l'extension `==`/littéral/`else` (session IfEq/Else, voir doc de
+//     `parse_page_block`).
 //   - `{% block %}` / `{% endblock %}` (Phase 4.4), `{% static %}` (Phase
 //     4.5), `{% extends %}` (Phase 4.6), le catch-all `Unsupported` /
 //     `{% include %}` (Phase 4.7), et `{% import %}` : voir sections
@@ -228,9 +223,9 @@ mod tests_phase_4_2_detect_extends {
 /// raison que l'imbrication de blocs n'est pas jugée ici (cf. doc de
 /// `parse_page_block`).
 ///
-/// ─── Grammaire close (Phase 4.7 + `import`) ────────────────────────────────
+/// ─── Grammaire close (Phase 4.7 + `import` + session IfEq/Else) ───────────
 ///
-/// Reconnaît désormais tout mot-clé de bloc : `if`/`endif`/`block`/
+/// Reconnaît désormais tout mot-clé de bloc : `if`/`else`/`endif`/`block`/
 /// `endblock`/`static`/`extends`/`import` chacun sous sa forme dédiée,
 /// `include` explicitement exclu (`PageComposeParseError::InvalidBlockSequence`),
 /// et tout le reste sous `PageSourceToken::Unsupported` (catch-all, voir doc
@@ -268,12 +263,12 @@ pub fn parse_page_tokens<'src>(
                 tokens.push(PageSourceToken::Runtime(parse_page_expr(&mut iter)?));
             }
 
-            // `{% keyword … %}` → IfBool | EndIf | BlockOpen | BlockEnd |
-            // Static(..) | Import(..) | Extends(path). `parse_page_block`
-            // décide de la forme (`PageBlockOutcome`) ; seule cette fonction
-            // sait si le span de tête `{%` consommé était le tout premier du
-            // fichier, donc seule elle peut juger la position d'un `Extends`
-            // (Phase 4.6 : voir doc ci-dessus).
+            // `{% keyword … %}` → IfBool | IfEq | Else | EndIf | BlockOpen |
+            // BlockEnd | Static(..) | Import(..) | Extends(path).
+            // `parse_page_block` décide de la forme (`PageBlockOutcome`) ;
+            // seule cette fonction sait si le span de tête `{%` consommé
+            // était le tout premier du fichier, donc seule elle peut juger
+            // la position d'un `Extends` (Phase 4.6 : voir doc ci-dessus).
             SpanKind::BlockOpen => match parse_page_block(&mut iter)? {
                 PageBlockOutcome::Extends(path) => {
                     if !head {
@@ -335,7 +330,10 @@ pub fn parse_page_tokens<'src>(
 // pattern de consommation, domaine d'erreur `PageComposeParseError` au lieu
 // de `PageParseError` — duplication délibérée plutôt que généricité sur le
 // type d'erreur, pour ne pas coupler le classifieur Mode Page au type
-// d'erreur gelé du Parser Mode Fragment (Document 1 §0).
+// d'erreur gelé du Parser Mode Fragment (Document 1 §0). La même duplication
+// délibérée vaut pour l'extension `==`/littéral (session IfEq/Else,
+// `parse_int_literal_page` ci-dessous, symétrique de
+// `fragment::parser::parse_int_literal`).
 
 /// Consomme `Ident(entity) Punct(.) Ident(field) ExprClose` et produit
 /// `FlatPageToken::Field`. Précondition : `ExprOpen` vient d'être consommé
@@ -372,8 +370,8 @@ where
 /// elle se juge sur l'AST complet, après coup (`collect_top_level_imports`),
 /// donc `import` transite normalement par `Token`, comme `static`.
 enum PageBlockOutcome<'src> {
-    /// Token de contenu ordinaire — `if`/`endif`/`block`/`endblock`/`static`/
-    /// `import`.
+    /// Token de contenu ordinaire — `if`/`else`/`endif`/`block`/`endblock`/
+    /// `static`/`import`.
     Token(PageSourceToken<'src>),
     /// Chemin brut d'une déclaration `{% extends path %}`, syntaxiquement
     /// bien formée. La légalité de sa position est jugée par l'appelant.
@@ -384,26 +382,45 @@ enum PageBlockOutcome<'src> {
 /// correspondant. Précondition : `BlockOpen` vient d'être consommé par
 /// `parse_page_tokens`.
 ///
-/// Reconnaît tout mot-clé de bloc : `if`/`endif` (Phase 4.3, logique
-/// inchangée), `block`/`endblock` (Phase 4.4, logique inchangée), `static`
-/// (Phase 4.5, logique inchangée), `extends` (Phase 4.6, logique inchangée),
-/// `include` (exclusion explicite, Phase 4.7), `import` (session ultérieure,
+/// Reconnaît tout mot-clé de bloc : `if`/`endif` (Phase 4.3, étendu session
+/// IfEq/Else — voir ci-dessous), `else` (session IfEq/Else), `block`/
+/// `endblock` (Phase 4.4, logique inchangée), `static` (Phase 4.5, logique
+/// inchangée), `extends` (Phase 4.6, logique inchangée), `include`
+/// (exclusion explicite, Phase 4.7), `import` (session ultérieure,
 /// composition horizontale de fragments) et le catch-all `Unsupported`
 /// (Phase 4.7) pour tout le reste. Cette fonction est désormais totale sur
 /// la grammaire lexicale des mots-clés de bloc : aucun `Ident` de tête ne
 /// peut plus atteindre un chemin d'erreur générique non informatif.
 ///
+/// ─── `if` : `==`/littéral (session IfEq/Else) ──────────────────────────────
+///
+/// Après `entity.field`, deux formes sont acceptées — `BlockClose` (forme
+/// originelle, inchangée, zéro régression → `IfBool`) ou
+/// `Ident("==") Ident(literal) BlockClose` → `IfEq`. Réplique exactement la
+/// même logique que `fragment::parser::parse_block` (implémentation
+/// indépendante, cf. doc de tête de ce fichier) : le lexer ne distingue pas
+/// `==` d'un identifiant ordinaire en mode `InBlock`, la reconnaissance se
+/// fait ici par comparaison de `span.slice`.
+///
+/// ─── `else` (session IfEq/Else) ────────────────────────────────────────────
+///
+/// Forme fermée, symétrique à `endif` — aucun opérande, juste `BlockClose`.
+/// Produit `PageSourceToken::Runtime(FlatPageToken::Else)` — enveloppé
+/// `Runtime` comme `if`/`endif`, donc traité comme contenu opaque par
+/// `collect_blocks` (`page/blocks.rs`, non modifié : `Else` tombe dans son
+/// bras `_ => {}`, au même titre qu'`IfBool`/`EndIf` déjà aujourd'hui).
+///
 /// ─── Pourquoi le type de retour change : `PageBlockOutcome`, plus
 ///     `PageSourceToken` directement ─────────────────────────────────────────
 ///
-/// `if`/`endif`/`block`/`endblock`/`static`/`import` restent enveloppés
-/// exactement comme en Phase 4.5 (`PageSourceToken`, lui-même sous `Runtime`
-/// ou `Block`/`Static`/`Import` selon le cas). `extends` seul n'a pas
-/// d'enveloppe `PageSourceToken` : ce n'est pas un token de contenu, c'est
-/// un champ de `ParsedPageTemplate` (cf. doc du type) — `PageBlockOutcome::
-/// Extends` le fait remonter à l'appelant sans le faire transiter par
-/// `PageSourceToken`, ce qui rendrait par construction impossible de le
-/// pousser par erreur dans `tokens`.
+/// `if`/`else`/`endif`/`block`/`endblock`/`static`/`import` restent
+/// enveloppés exactement comme en Phase 4.5 (`PageSourceToken`, lui-même
+/// sous `Runtime` ou `Block`/`Static`/`Import` selon le cas). `extends` seul
+/// n'a pas d'enveloppe `PageSourceToken` : ce n'est pas un token de contenu,
+/// c'est un champ de `ParsedPageTemplate` (cf. doc du type) —
+/// `PageBlockOutcome::Extends` le fait remonter à l'appelant sans le faire
+/// transiter par `PageSourceToken`, ce qui rendrait par construction
+/// impossible de le pousser par erreur dans `tokens`.
 ///
 /// ─── `import` : même invariant zéro E/S que `static`/`extends` ────────────
 ///
@@ -419,17 +436,55 @@ where
 {
     let keyword = expect_ident_page(
         iter,
-        "keyword (if | endif | block | endblock | static | extends | import | asset | script \
-         | endscript)",
+        "keyword (if | else | endif | block | endblock | static | extends | import | asset \
+         | script | endscript)",
     )?;
 
     match keyword {
         "if" => {
             let raw = expect_ident_page(iter, "Ident(entity.field)")?;
             let (entity, field) = split_dotted_page(raw)?;
+            match iter.next() {
+                Some(span) if span.kind == SpanKind::BlockClose => Ok(PageBlockOutcome::Token(
+                    PageSourceToken::Runtime(FlatPageToken::IfBool { entity, field }),
+                )),
+                Some(span) if span.kind == SpanKind::Ident && span.slice == "==" => {
+                    let literal_raw = expect_ident_page(iter, "Ident(integer literal)")?;
+                    let literal = parse_int_literal_page(literal_raw)?;
+                    expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+                    Ok(PageBlockOutcome::Token(PageSourceToken::Runtime(
+                        FlatPageToken::IfEq {
+                            entity,
+                            field,
+                            literal,
+                        },
+                    )))
+                }
+                // Session `!=` : même reconnaissance que `==`, miroir exact
+                // de `fragment::parser` (cf. doc de tête de ce fichier).
+                Some(span) if span.kind == SpanKind::Ident && span.slice == "!=" => {
+                    let literal_raw = expect_ident_page(iter, "Ident(integer literal)")?;
+                    let literal = parse_int_literal_page(literal_raw)?;
+                    expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+                    Ok(PageBlockOutcome::Token(PageSourceToken::Runtime(
+                        FlatPageToken::IfNeq {
+                            entity,
+                            field,
+                            literal,
+                        },
+                    )))
+                }
+                Some(span) => Err(PageComposeParseError::UnexpectedToken {
+                    expected: "BlockClose('%}') | Ident(\"==\") | Ident(\"!=\")",
+                    got: span.kind,
+                }),
+                None => Err(PageComposeParseError::UnexpectedEof),
+            }
+        }
+        "else" => {
             expect_kind_page(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
             Ok(PageBlockOutcome::Token(PageSourceToken::Runtime(
-                FlatPageToken::IfBool { entity, field },
+                FlatPageToken::Else,
             )))
         }
         "endif" => {
@@ -648,6 +703,17 @@ fn split_dotted_page(raw: &str) -> Result<(&str, &str), PageComposeParseError> {
     raw.find('.')
         .map(|i| (&raw[..i], &raw[i + 1..]))
         .ok_or(PageComposeParseError::InvalidBlockSequence)
+}
+
+/// Parse un littéral entier signé en `i64`. Symétrique de
+/// `fragment::parser::parse_int_literal` (session IfEq/Else) — même
+/// comportement, même domaine d'erreur `PageComposeParseError` par
+/// cohérence avec le reste de ce fichier (cf. doc de tête sur la
+/// duplication délibérée du domaine d'erreur).
+#[inline]
+fn parse_int_literal_page(raw: &str) -> Result<i64, PageComposeParseError> {
+    raw.parse::<i64>()
+        .map_err(|_| PageComposeParseError::InvalidBlockSequence)
 }
 
 // =============================================================================
@@ -889,6 +955,11 @@ mod tests_phase_4_7_unsupported_catch_all {
     /// `filter`, `group`, et un mot-clé arbitraire inconnu : chacun produit
     /// `Unsupported { keyword, .. }` avec le bon `keyword`, jamais un rejet
     /// générique (`InvalidBlockSequence`) ni un rejet silencieux.
+    ///
+    /// `else` n'apparaît plus dans cette liste depuis la session IfEq/Else :
+    /// il a désormais sa propre forme dédiée (cf.
+    /// `tests_if_eq_else_session::else_alone_is_valid_token`), il n'est
+    /// donc plus un exemple de mot-clé « non supporté ».
     #[test]
     fn unsupported_catch_all_captures_arbitrary_keywords() {
         let keywords = ["for", "join", "where", "filter", "group", "frobnicate"];
@@ -958,5 +1029,177 @@ mod tests_import_keyword {
             .expect("le Parser ne juge pas la position d'un import, seulement sa forme");
 
         assert_eq!(actual.tokens.len(), 3);
+    }
+}
+
+// =============================================================================
+// Tests — Session IfEq / Else
+// =============================================================================
+//
+// Objectif explicite de cette session : prouver que le Mode Page accepte
+// réellement la même extension que le Mode Fragment — pas seulement que
+// fragment::parser fonctionne (déjà couvert par ses propres tests). Chaque
+// test ci-dessous exerce `parse_page_tokens`, jamais `parse_tokens`.
+
+#[cfg(test)]
+mod tests_if_eq_else_session {
+    use super::{FlatPageToken, PageSourceToken, parse_page_tokens, scan};
+
+    /// `{% if record.is_readable %}` sans `==`, en Mode Page : IfBool,
+    /// zéro régression — réplique `if_bool_unchanged` de fragment::parser,
+    /// mais via parse_page_tokens.
+    #[test]
+    fn if_bool_unchanged_in_page_mode() {
+        let src = "{% if record.is_readable %}A{% endif %}";
+        let actual = parse_page_tokens(scan(src)).expect("parsing doit réussir en Mode Page");
+        assert_eq!(
+            actual.tokens,
+            vec![
+                PageSourceToken::Runtime(FlatPageToken::IfBool {
+                    entity: "record",
+                    field: "is_readable"
+                }),
+                PageSourceToken::Runtime(FlatPageToken::Static("A")),
+                PageSourceToken::Runtime(FlatPageToken::EndIf),
+            ]
+        );
+    }
+
+    /// `{% if record.is_readable %}A{% else %}B{% endif %}` en Mode Page —
+    /// IfBool + Else, le cas exact demandé par le contrat de session pour
+    /// la forme sans égalité.
+    #[test]
+    fn if_bool_with_else_in_page_mode() {
+        let src = "{% if record.is_readable %}A{% else %}B{% endif %}";
+        let actual = parse_page_tokens(scan(src)).expect("parsing doit réussir en Mode Page");
+        assert_eq!(
+            actual.tokens,
+            vec![
+                PageSourceToken::Runtime(FlatPageToken::IfBool {
+                    entity: "record",
+                    field: "is_readable"
+                }),
+                PageSourceToken::Runtime(FlatPageToken::Static("A")),
+                PageSourceToken::Runtime(FlatPageToken::Else),
+                PageSourceToken::Runtime(FlatPageToken::Static("B")),
+                PageSourceToken::Runtime(FlatPageToken::EndIf),
+            ]
+        );
+    }
+
+    /// `{% if record.document_id == 1 %}A{% else %}B{% endif %}` en Mode
+    /// Page — le cas concret de `navigation.marius` (§14 du contrat de
+    /// session), IfEq + Else.
+    #[test]
+    fn if_eq_with_else_in_page_mode() {
+        let src = "{% if record.document_id == 1 %}A{% else %}B{% endif %}";
+        let actual = parse_page_tokens(scan(src)).expect("parsing doit réussir en Mode Page");
+        assert_eq!(
+            actual.tokens,
+            vec![
+                PageSourceToken::Runtime(FlatPageToken::IfEq {
+                    entity: "record",
+                    field: "document_id",
+                    literal: 1,
+                }),
+                PageSourceToken::Runtime(FlatPageToken::Static("A")),
+                PageSourceToken::Runtime(FlatPageToken::Else),
+                PageSourceToken::Runtime(FlatPageToken::Static("B")),
+                PageSourceToken::Runtime(FlatPageToken::EndIf),
+            ]
+        );
+    }
+
+    /// `{% if record.document_id != 1 %}A{% else %}B{% endif %}` en Mode
+    /// Page — session `!=`, miroir du test précédent.
+    #[test]
+    fn if_neq_with_else_in_page_mode() {
+        let src = "{% if record.document_id != 1 %}A{% else %}B{% endif %}";
+        let actual = parse_page_tokens(scan(src)).expect("parsing doit réussir en Mode Page");
+        assert_eq!(
+            actual.tokens,
+            vec![
+                PageSourceToken::Runtime(FlatPageToken::IfNeq {
+                    entity: "record",
+                    field: "document_id",
+                    literal: 1,
+                }),
+                PageSourceToken::Runtime(FlatPageToken::Static("A")),
+                PageSourceToken::Runtime(FlatPageToken::Else),
+                PageSourceToken::Runtime(FlatPageToken::Static("B")),
+                PageSourceToken::Runtime(FlatPageToken::EndIf),
+            ]
+        );
+    }
+
+    /// `{% else %}` seul — forme fermée, comme en Mode Fragment.
+    #[test]
+    fn else_alone_is_valid_token() {
+        let src = "{% else %}";
+        let actual = parse_page_tokens(scan(src)).expect("parsing doit réussir en Mode Page");
+        assert_eq!(
+            actual.tokens,
+            vec![PageSourceToken::Runtime(FlatPageToken::Else)]
+        );
+    }
+
+    /// Littéral négatif accepté en Mode Page, comme en Mode Fragment.
+    #[test]
+    fn if_eq_negative_literal_in_page_mode() {
+        let src = "{% if record.delta == -1 %}A{% endif %}";
+        let actual = parse_page_tokens(scan(src)).expect("parsing doit réussir en Mode Page");
+        assert_eq!(
+            actual.tokens[0],
+            PageSourceToken::Runtime(FlatPageToken::IfEq {
+                entity: "record",
+                field: "delta",
+                literal: -1,
+            })
+        );
+    }
+
+    /// Fixture exacte du fichier `navigation.marius` cible (un seul `<li>`,
+    /// simplifié) : preuve bout-en-bout que le Parser Mode Page seul —
+    /// avant linker/lowering, hors périmètre de cette session — accepte
+    /// déjà la construction requise.
+    #[test]
+    fn navigation_li_fixture_parses_in_page_mode() {
+        let src = "<li>{% if record.document_id == 1 %}\
+                    <a href=\"/content/1\">Content 1</a>\
+                    {% else %}\
+                    <div class=\"current\">Content 1</div>\
+                    {% endif %}</li>";
+
+        let actual = parse_page_tokens(scan(src))
+            .expect("le fragment de navigation cible doit parser en Mode Page");
+
+        // Vérifie uniquement la structure de contrôle (IfEq/Else/EndIf) —
+        // le contenu HTML exact des deux branches est hors du périmètre de
+        // cette session (§0 du handoff : ne pas tergiverser sur le markup).
+        let control_tokens: Vec<&PageSourceToken<'_>> = actual
+            .tokens
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t,
+                    PageSourceToken::Runtime(
+                        FlatPageToken::IfEq { .. } | FlatPageToken::Else | FlatPageToken::EndIf
+                    )
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            control_tokens,
+            vec![
+                &PageSourceToken::Runtime(FlatPageToken::IfEq {
+                    entity: "record",
+                    field: "document_id",
+                    literal: 1,
+                }),
+                &PageSourceToken::Runtime(FlatPageToken::Else),
+                &PageSourceToken::Runtime(FlatPageToken::EndIf),
+            ]
+        );
     }
 }

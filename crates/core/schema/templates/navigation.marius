@@ -18,41 +18,185 @@
         </svg>
     </button>
     <ul class="sub-nav" id="sub-nav" aria-labelledby="cmd-nav" popover>
-        <li><a href="/content/1"><svg class="icon-inline" aria-hidden="true">
+        <li>
+            {% if record.document_id == 1 %}
+            <div class="current">
+                <svg class="icon-inline" aria-hidden="true">
                     <use href="{% asset sprites/utils.svg %}#ampersand"></use>
-                </svg>Content 1</a></li>
-        <li><a href="/content/2"><svg class="icon-inline" aria-hidden="true">
+                </svg>
+                Content 1
+            </div>
+            {% else %}
+            <a href="/content/1">
+                <svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#ampersand"></use>
+                </svg>
+                Content 1
+            </a>
+            {% endif %}
+        </li>
+        <li>
+            {% if record.document_id == 2 %}
+            <div class="current">
+                <svg class="icon-inline" aria-hidden="true">
                     <use href="{% asset sprites/utils.svg %}#border-none"></use>
-                </svg>Content 2</a></li>
-        <li><a href="/content/3"><svg class="icon-inline" aria-hidden="true">
+                </svg>
+                Content 2
+            </div>
+            {% else %}
+            <a href="/content/2">
+                <svg class="icon-inline" aria-hidden="true">
                     <use href="{% asset sprites/utils.svg %}#border-none"></use>
-                </svg>Content 3</a></li>
-        <li><a href="/content/4"><svg class="icon-inline" aria-hidden="true">
+                </svg>
+                Content 2
+            </a>
+            {% endif %}
+        </li>
+        <li>
+            {% if record.document_id == 3 %}
+            <div class="current">
+                <svg class="icon-inline" aria-hidden="true">
                     <use href="{% asset sprites/utils.svg %}#border-none"></use>
-                </svg>Content 4</a></li>
-        <li><a href="/content/5"><svg class="icon-inline" aria-hidden="true">
+                </svg>
+                Content 3
+            </div>
+            {% else %}
+            <a href="/content/3">
+                <svg class="icon-inline" aria-hidden="true">
                     <use href="{% asset sprites/utils.svg %}#border-none"></use>
-                </svg>Content 5</a></li>
-        <li><a href="/content/6"><svg class="icon-inline" aria-hidden="true">
+                </svg>
+                Content 3
+            </a>
+            {% endif %}
+        </li>
+        <li>
+            {% if record.document_id == 4 %}
+            <div class="current">
+                <svg class="icon-inline" aria-hidden="true">
                     <use href="{% asset sprites/utils.svg %}#border-none"></use>
-                </svg>Content 6</a></li>
-        <li><a href="/content/10"><svg class="icon-inline" aria-hidden="true">
+                </svg>
+                Content 4
+            </div>
+            {% else %}
+            <a href="/content/4">
+                <svg class="icon-inline" aria-hidden="true">
                     <use href="{% asset sprites/utils.svg %}#border-none"></use>
-                </svg>Content 10</a></li>
-        <li><a href="/content/14"><svg class="icon-inline" aria-hidden="true">
+                </svg>
+                Content 4
+            </a>
+            {% endif %}
+        </li>
+        <li>
+            {% if record.document_id == 5 %}
+            <div class="current">
+                <svg class="icon-inline" aria-hidden="true">
                     <use href="{% asset sprites/utils.svg %}#border-none"></use>
-                </svg>Content 14</a></li>
-        <li><a href="/content/16"><svg class="icon-inline" aria-hidden="true">
+                </svg>
+                Content 5
+            </div>
+            {% else %}
+            <a href="/content/5">
+                <svg class="icon-inline" aria-hidden="true">
                     <use href="{% asset sprites/utils.svg %}#border-none"></use>
-                </svg>Content 16</a></li>
-        <li><a href="//github.com/scriptura/marius"><svg class="icon-inline" aria-hidden="true">
+                </svg>
+                Content 5
+            </a>
+            {% endif %}
+        </li>
+        <li>
+            {% if record.document_id == 6 %}
+            <div class="current">
+                <svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>
+                Content 6
+            </div>
+            {% else %}
+            <a href="/content/6">
+                <svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>
+                Content 6
+            </a>
+            {% endif %}
+        </li>
+        <li>
+            {% if record.document_id == 10 %}
+            <div class="current">
+                <svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>
+                Content 10
+            </div>
+            {% else %}
+            <a href="/content/10">
+                <svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>
+                Content 10
+            </a>
+            {% endif %}
+        </li>
+        <li>
+            {% if record.document_id == 14 %}
+            <div class="current">
+                <svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>
+                Content 14
+            </div>
+            {% else %}
+            <a href="/content/14">
+                <svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>
+                Content 14
+            </a>
+            {% endif %}
+        </li>
+        <li>
+            {% if record.document_id == 16 %}
+            <div class="current">
+                <svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>
+                Content 16
+            </div>
+            {% else %}
+            <a href="/content/16">
+                <svg class="icon-inline" aria-hidden="true">
+                    <use href="{% asset sprites/utils.svg %}#border-none"></use>
+                </svg>
+                Content 16
+            </a>
+            {% endif %}
+        </li>
+        <li>
+            <a href="//github.com/scriptura/marius">
+                <svg class="icon-inline" aria-hidden="true">
                     <use href="{% asset sprites/utils.svg %}#github"></use>
-                </svg>Repository</a></li>
+                </svg>
+                Repository
+            </a>
+        </li>
     </ul>
     <ol class="breadcrumb" aria-label="Breadcrumb">
+        {#
         <li>
             <div>Marius <span>.&nbsp;Home page</span></div>
         </li>
+        #}
+        {% if record.document_id != 0 %}
+        <li>
+            <a href="/">Home</a>
+        </li>
+        <li>
+            <a href="/articles">Articles</a>
+        </li>
+        <li>
+            <div>{% block breadcrumb_current_item %}{% endblock %}</div>
+        </li>
+        {% endif %}
     </ol>
 </nav>
 {% endblock %}

@@ -4,6 +4,16 @@
 //! Syntaxe uniquement — pas de lookup de schéma (Phase 1.4), pas
 //! d'équilibrage IfBool/EndIf (Phase 1.4), fail-fast sur la première
 //! erreur syntaxique.
+//!
+//! Session IfEq/Else : le lexer (Phase 1.2) n'est PAS modifié — en mode
+//! `InBlock`, tout token délimité par des espaces (ou `%}`) est déjà émis
+//! comme un `Ident` générique, qu'il s'agisse d'`entity.field`, de `==` ou
+//! d'un littéral entier (`1`, `-1`) : c'est un fait du scanner existant
+//! (`Mode::InBlock` scanne octet par octet jusqu'à un espace ou `%}`, sans
+//! distinguer keyword/ident/ponctuation — cf. doc de `Mode::InBlock`,
+//! lexer.rs). La reconnaissance de `==` et du littéral qui suit est donc
+//! entièrement une affaire de ce Parser (Phase 1.3), pas du Scanner —
+//! cohérent avec la frontière déjà actée entre les deux phases.
 
 #[cfg(test)]
 use crate::fragment::lexer::scan;
@@ -37,7 +47,8 @@ pub enum PageParseError {
     /// Itérateur épuisé alors qu'un token était requis pour compléter un pattern.
     UnexpectedEof,
     /// Séquence de bloc non reconnue :
-    ///   keyword inconnu, ou `if entity.field` sans `.` dans l'ident bloc.
+    ///   keyword inconnu, `if entity.field` sans `.` dans l'ident bloc,
+    ///   ou (session IfEq) un littéral non parsable après `==`.
     InvalidBlockSequence,
 }
 
@@ -66,7 +77,7 @@ pub fn parse_tokens<'src>(
             // `{{ entity.field }}` → Field.
             SpanKind::ExprOpen => parse_expr(&mut iter)?,
 
-            // `{% keyword … %}` → IfBool | EndIf | StaticInclude.
+            // `{% keyword … %}` → IfBool | IfEq | Else | EndIf | StaticInclude | ...
             SpanKind::BlockOpen => parse_block(&mut iter)?,
 
             // Tout autre span en position initiale est une erreur structurelle.
@@ -108,6 +119,20 @@ where
 /// car le scanner InBlock le produit comme un seul Ident (contrairement
 /// à InExpr qui émet `Ident Punct Ident`). Voir décision Phase 1.2.
 ///
+/// Pattern `if` (session IfEq) : après `entity.field`, deux formes sont
+/// acceptées —
+///   `BlockClose`                              → `IfBool` (forme originelle,
+///                                                 inchangée, zéro régression)
+///   `Ident("==") Ident(literal) BlockClose`    → `IfEq`
+/// Le lexer ne distingue pas `==` d'un identifiant ordinaire (cf. doc de
+/// tête) : la reconnaissance se fait ici, par comparaison de `span.slice`.
+///
+/// Pattern `else` (session IfEq) : forme fermée, symétrique à `endif` —
+/// aucun opérande, juste `BlockClose`. `Else` est générique au niveau de la
+/// structure `if` (Phase 1.4 l'associe au bloc conditionnel ouvert, qu'il
+/// s'agisse d'un `IfBool` ou d'un `IfEq`) : ce Parser ne fait aucune
+/// distinction entre les deux cas à l'émission.
+///
 /// Pattern `include` : `len = 0` et `rel_from_manifest = original_path`
 /// sont des valeurs provisoires. L'orchestrateur (build.rs) injectera
 /// la longueur réelle via `std::fs::metadata` après le parsing.
@@ -117,15 +142,50 @@ where
 {
     let keyword = expect_ident(
         iter,
-        "keyword (if | endif | include | asset | script | endscript)",
+        "keyword (if | else | endif | include | asset | script | endscript)",
     )?;
 
     match keyword {
         "if" => {
             let raw = expect_ident(iter, "Ident(entity.field)")?;
             let (entity, field) = split_dotted(raw)?;
+            match iter.next() {
+                Some(span) if span.kind == SpanKind::BlockClose => {
+                    Ok(FlatPageToken::IfBool { entity, field })
+                }
+                Some(span) if span.kind == SpanKind::Ident && span.slice == "==" => {
+                    let literal_raw = expect_ident(iter, "Ident(integer literal)")?;
+                    let literal = parse_int_literal(literal_raw)?;
+                    expect_kind(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+                    Ok(FlatPageToken::IfEq {
+                        entity,
+                        field,
+                        literal,
+                    })
+                }
+                // Session `!=` : même reconnaissance que `==` (le lexer ne
+                // distingue pas les deux, chacun est un `Ident` générique
+                // en mode `InBlock` — cf. doc de tête de ce fichier).
+                Some(span) if span.kind == SpanKind::Ident && span.slice == "!=" => {
+                    let literal_raw = expect_ident(iter, "Ident(integer literal)")?;
+                    let literal = parse_int_literal(literal_raw)?;
+                    expect_kind(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
+                    Ok(FlatPageToken::IfNeq {
+                        entity,
+                        field,
+                        literal,
+                    })
+                }
+                Some(span) => Err(PageParseError::UnexpectedToken {
+                    expected: "BlockClose('%}') | Ident(\"==\") | Ident(\"!=\")",
+                    got: span.kind,
+                }),
+                None => Err(PageParseError::UnexpectedEof),
+            }
+        }
+        "else" => {
             expect_kind(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
-            Ok(FlatPageToken::IfBool { entity, field })
+            Ok(FlatPageToken::Else)
         }
         "endif" => {
             expect_kind(iter, SpanKind::BlockClose, "BlockClose('%}')")?;
@@ -217,6 +277,20 @@ fn split_dotted(raw: &str) -> Result<(&str, &str), PageParseError> {
     raw.find('.')
         .map(|i| (&raw[..i], &raw[i + 1..]))
         .ok_or(PageParseError::InvalidBlockSequence)
+}
+
+/// Parse un littéral entier signé (`"1"`, `"-1"`, `"0"`, ...) en `i64`.
+///
+/// Aucune coercion : `str::parse::<i64>()` échoue nativement sur tout ce qui
+/// n'est pas un entier `i64`-représentable (signe mal placé, dépassement,
+/// caractères non numériques) — dégradé vers `InvalidBlockSequence`, même
+/// famille d'erreur que `split_dotted` pour une séquence `if` malformée.
+/// Pas de restriction arbitraire sur le signe : un littéral négatif est
+/// accepté exactement comme un littéral positif.
+#[inline]
+fn parse_int_literal(raw: &str) -> Result<i64, PageParseError> {
+    raw.parse::<i64>()
+        .map_err(|_| PageParseError::InvalidBlockSequence)
 }
 
 // =============================================================================
@@ -314,9 +388,207 @@ mod tests_phase_1_3 {
         assert_eq!(
             err,
             PageParseError::UnexpectedToken {
-                expected: "keyword (if | endif | include | asset | script | endscript)",
+                expected: "keyword (if | else | endif | include | asset | script | endscript)",
                 got: SpanKind::BlockClose,
             }
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Session IfEq / Else
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `{% if record.is_readable %}` sans `==` : forme originelle, IfBool,
+    /// zéro régression.
+    #[test]
+    fn if_bool_unchanged() {
+        let src = "{% if record.is_readable %}A{% endif %}";
+        let got = parse_tokens(scan(src)).expect("parsing doit réussir");
+        assert_eq!(
+            got,
+            vec![
+                FlatPageToken::IfBool {
+                    entity: "record",
+                    field: "is_readable"
+                },
+                FlatPageToken::Static("A"),
+                FlatPageToken::EndIf,
+            ]
+        );
+    }
+
+    /// `{% if record.is_readable %}A{% else %}B{% endif %}` — IfBool + Else.
+    #[test]
+    fn if_bool_with_else() {
+        let src = "{% if record.is_readable %}A{% else %}B{% endif %}";
+        let got = parse_tokens(scan(src)).expect("parsing doit réussir");
+        assert_eq!(
+            got,
+            vec![
+                FlatPageToken::IfBool {
+                    entity: "record",
+                    field: "is_readable"
+                },
+                FlatPageToken::Static("A"),
+                FlatPageToken::Else,
+                FlatPageToken::Static("B"),
+                FlatPageToken::EndIf,
+            ]
+        );
+    }
+
+    /// `{% if record.document_id == 1 %}A{% endif %}` — IfEq, littéral positif.
+    #[test]
+    fn if_eq_positive_literal() {
+        let src = "{% if record.document_id == 1 %}A{% endif %}";
+        let got = parse_tokens(scan(src)).expect("parsing doit réussir");
+        assert_eq!(
+            got,
+            vec![
+                FlatPageToken::IfEq {
+                    entity: "record",
+                    field: "document_id",
+                    literal: 1,
+                },
+                FlatPageToken::Static("A"),
+                FlatPageToken::EndIf,
+            ]
+        );
+    }
+
+    /// `{% if record.document_id == 1 %}A{% else %}B{% endif %}` — IfEq + Else.
+    #[test]
+    fn if_eq_with_else() {
+        let src = "{% if record.document_id == 1 %}A{% else %}B{% endif %}";
+        let got = parse_tokens(scan(src)).expect("parsing doit réussir");
+        assert_eq!(
+            got,
+            vec![
+                FlatPageToken::IfEq {
+                    entity: "record",
+                    field: "document_id",
+                    literal: 1,
+                },
+                FlatPageToken::Static("A"),
+                FlatPageToken::Else,
+                FlatPageToken::Static("B"),
+                FlatPageToken::EndIf,
+            ]
+        );
+    }
+
+    /// Littéral `0` — cas limite explicitement demandé par le contrat.
+    #[test]
+    fn if_eq_zero_literal() {
+        let src = "{% if record.flag == 0 %}A{% endif %}";
+        let got = parse_tokens(scan(src)).expect("parsing doit réussir");
+        assert_eq!(
+            got[0],
+            FlatPageToken::IfEq {
+                entity: "record",
+                field: "flag",
+                literal: 0,
+            }
+        );
+    }
+
+    /// Littéral négatif — le signe n'est pas interdit arbitrairement.
+    #[test]
+    fn if_eq_negative_literal() {
+        let src = "{% if record.delta == -1 %}A{% endif %}";
+        let got = parse_tokens(scan(src)).expect("parsing doit réussir");
+        assert_eq!(
+            got[0],
+            FlatPageToken::IfEq {
+                entity: "record",
+                field: "delta",
+                literal: -1,
+            }
+        );
+    }
+
+    /// Littéral non parsable (`abc`) après `==` → InvalidBlockSequence,
+    /// jamais une valeur devinée ou une coercion silencieuse.
+    #[test]
+    fn if_eq_invalid_literal_is_rejected() {
+        let src = "{% if record.document_id == abc %}A{% endif %}";
+        let err = parse_tokens(scan(src)).unwrap_err();
+        assert_eq!(err, PageParseError::InvalidBlockSequence);
+    }
+
+    /// `{% else %}` seul (sans littéral, sans opérande) — forme fermée.
+    #[test]
+    fn else_alone_is_valid_token() {
+        let src = "{% else %}";
+        let got = parse_tokens(scan(src)).expect("parsing doit réussir");
+        assert_eq!(got, vec![FlatPageToken::Else]);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Session `!=`
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `{% if record.document_id != 1 %}A{% endif %}` — IfNeq, littéral positif.
+    #[test]
+    fn if_neq_positive_literal() {
+        let src = "{% if record.document_id != 1 %}A{% endif %}";
+        let got = parse_tokens(scan(src)).expect("parsing doit réussir");
+        assert_eq!(
+            got,
+            vec![
+                FlatPageToken::IfNeq {
+                    entity: "record",
+                    field: "document_id",
+                    literal: 1,
+                },
+                FlatPageToken::Static("A"),
+                FlatPageToken::EndIf,
+            ]
+        );
+    }
+
+    /// `{% if record.document_id != 1 %}A{% else %}B{% endif %}` — IfNeq + Else.
+    #[test]
+    fn if_neq_with_else() {
+        let src = "{% if record.document_id != 1 %}A{% else %}B{% endif %}";
+        let got = parse_tokens(scan(src)).expect("parsing doit réussir");
+        assert_eq!(
+            got,
+            vec![
+                FlatPageToken::IfNeq {
+                    entity: "record",
+                    field: "document_id",
+                    literal: 1,
+                },
+                FlatPageToken::Static("A"),
+                FlatPageToken::Else,
+                FlatPageToken::Static("B"),
+                FlatPageToken::EndIf,
+            ]
+        );
+    }
+
+    /// Littéral négatif accepté pour `IfNeq`, comme pour `IfEq`.
+    #[test]
+    fn if_neq_negative_literal() {
+        let src = "{% if record.delta != -1 %}A{% endif %}";
+        let got = parse_tokens(scan(src)).expect("parsing doit réussir");
+        assert_eq!(
+            got[0],
+            FlatPageToken::IfNeq {
+                entity: "record",
+                field: "delta",
+                literal: -1,
+            }
+        );
+    }
+
+    /// Littéral non parsable après `!=` → InvalidBlockSequence, même
+    /// traitement que pour `==`.
+    #[test]
+    fn if_neq_invalid_literal_is_rejected() {
+        let src = "{% if record.document_id != abc %}A{% endif %}";
+        let err = parse_tokens(scan(src)).unwrap_err();
+        assert_eq!(err, PageParseError::InvalidBlockSequence);
     }
 }

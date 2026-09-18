@@ -8,6 +8,7 @@
 pub mod codegen;
 pub mod lexer;
 pub mod parser;
+pub mod record_presence;
 pub mod resolver;
 pub mod script_hoisting;
 pub mod static_markers;
@@ -17,6 +18,7 @@ pub mod validator;
 pub use codegen::{generate_aot_snippet, generate_segmented_snippet, generated_file_header};
 pub use lexer::{RawSpan, SpanKind, scan};
 pub use parser::{PageParseError, parse_tokens};
+pub use record_presence::eliminate_recordless_conditions;
 pub use resolver::{AssetLookup, ResolverError, TemplateMetrics, resolve_and_measure};
 pub use script_hoisting::{HoistError, hoist_and_dedupe_scripts, splice_hoisted_scripts};
 pub use static_markers::{

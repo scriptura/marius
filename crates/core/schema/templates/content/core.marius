@@ -2,6 +2,7 @@
 
 {% block head_description %}{{ record.description }}{% endblock %}
 {% block head_title %}{{ record.description }}{% endblock %}
+{% block breadcrumb_current_item %}{{ record.headline }}{% endblock %}
 
 {% block main_content %}
 <main id="main" role="main">

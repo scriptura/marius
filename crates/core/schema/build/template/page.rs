@@ -25,9 +25,9 @@ use marius_fragment_forge::{
     AssetLookup, FlatPageToken, ImportRef, NamedBlockRange, PageArena, PageImportError,
     PageLinkError, PageSourceToken, ParsedPageTemplate, SchemaIndex, TemplateId, TemplateMetrics,
     VarlenField, collect_blocks, collect_static_refs, collect_top_level_imports,
-    extract_static_marker_facts, generate_aot_snippet, generate_segmented_snippet,
-    hoist_and_dedupe_scripts, link_chain, lower, parse_page_tokens, relative_path_for_include_str,
-    resolve_and_measure, scan, splice_hoisted_scripts, validate_ast,
+    eliminate_recordless_conditions, extract_static_marker_facts, generate_aot_snippet,
+    generate_segmented_snippet, hoist_and_dedupe_scripts, link_chain, lower, parse_page_tokens,
+    relative_path_for_include_str, resolve_and_measure, scan, splice_hoisted_scripts, validate_ast,
 };
 
 use crate::asset_lookup::resolve_asset_lookup;
@@ -584,6 +584,30 @@ pub(crate) fn resolve_page_template<'src>(
         );
     })?;
 
+    // `schema_index` construit ici, juste après validate_ast — plus haut
+    // que son usage historique (juste avant resolve_and_measure), pour que
+    // l'élimination AOT des conditions record.* ci-dessous en dispose
+    // immédiatement. `fixed`/`varlena` restent les paramètres du composant
+    // appelant (Voie B, `dynamic.rs`) : pour un composant avec record réel,
+    // ce SchemaIndex n'est pas vide, l'élimination est un no-op strict.
+    let schema_index = SchemaIndex { fixed, varlena };
+
+    // Élimination AOT des conditions record.* (session shell/représentation) —
+    // `resolve_page_template` est le point de composition commun à
+    // `base.marius`, partagé aussi bien par des composants avec record
+    // (Voie B) que, via les fragments qu'il importe (ex. navigation.marius,
+    // breadcrumb futur), par des pages STATIC_PAGES sans aucun record
+    // (celles-ci passent par `resolve_static_page`, pas par cette fonction
+    // — mais le Root et les fragments importés sont ÉCRITS UNE SEULE FOIS,
+    // partagés par les deux chemins). Pour CE composant précis (qui a un
+    // `schema_index` non vide, sans quoi il ne serait pas passé par
+    // `dynamic.rs`), cette passe est un no-op strict : `record.*` continue
+    // d'être résolu normalement par `resolve_and_measure` ci-dessous,
+    // exactement comme avant cette session. Exécutée juste après
+    // validate_ast (structure déjà garantie valide) et avant toute autre
+    // passe.
+    let tokens = eliminate_recordless_conditions(tokens, &schema_index);
+
     // Hoisting + déduplication des <script> (session dédiée, révisée :
     // capture de bloc {% script %}/{% endscript %}, plus une simple clé
     // AssetRef) — exécuté APRÈS validate_ast : la passe de hoisting
@@ -645,8 +669,8 @@ pub(crate) fn resolve_page_template<'src>(
         }
     };
 
-    let schema_index = SchemaIndex { fixed, varlena };
-
+    // `schema_index` déjà construit plus haut (juste après validate_ast),
+    // réutilisé ici tel quel.
     let manifest_dir_owned = manifest_dir.to_string();
     let get_file_size = move |rel_path: &str| -> Result<usize, String> {
         std::fs::metadata(Path::new(&manifest_dir_owned).join(rel_path))

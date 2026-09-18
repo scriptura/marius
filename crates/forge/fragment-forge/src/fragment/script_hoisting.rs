@@ -4,6 +4,15 @@
 //! Passe de compilation unique (`build.rs`), jamais exécutée par requête ;
 //! propriété de la CIBLE de compilation (Page vs Fragment isolé), jamais
 //! de l'AST lui-même — voir doc de tête ci-dessous.
+//!
+//! Session IfEq/Else : `if_depth` se déclenche sur `IfBool` ET `IfEq`
+//! indifféremment — un `{% script %}` à l'intérieur d'un
+//! `{% if entity.field == N %}` dépend d'une donnée RUNTIME exactement au
+//! même titre qu'à l'intérieur d'un `{% if entity.field %}` (voir doc de
+//! `HoistError::ConditionalScript`). `Else` reste neutre pour `if_depth` :
+//! le bloc conditionnel reste ouvert de part et d'autre d'un `else`, seul
+//! `EndIf` referme la profondeur, qu'elle ait été ouverte par `IfBool` ou
+//! par `IfEq`.
 
 use crate::fragment::token::FlatPageToken;
 
@@ -47,14 +56,16 @@ use crate::fragment::token::FlatPageToken;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoistError {
     /// Un bloc `{% script %}...{% endscript %}` trouvé À L'INTÉRIEUR d'un
-    /// bloc `{% if %}...{% endif %}` ouvert — non supporté par cette passe
+    /// bloc conditionnel ouvert — `{% if entity.field %}...{% endif %}`
+    /// (`IfBool`) ou `{% if entity.field == N %}...{% endif %}` (`IfEq`,
+    /// session IfEq/Else) indifféremment — non supporté par cette passe
     /// (restriction explicitement validée en session : "l'arbre des
     /// dépendances doit rester prévisible à la compilation"). Son
     /// inclusion dépendrait d'une donnée RUNTIME (la ligne effectivement
-    /// rendue), alors que cette passe s'exécute UNE FOIS pour tout le
-    /// template, indépendamment des données — le hisser quand même le
-    /// rendrait inconditionnel, un vrai bug de correction, pas une
-    /// simplification acceptable.
+    /// rendue, ou l'égalité effectivement vérifiée), alors que cette passe
+    /// s'exécute UNE FOIS pour tout le template, indépendamment des
+    /// données — le hisser quand même le rendrait inconditionnel, un vrai
+    /// bug de correction, pas une simplification acceptable.
     ConditionalScript,
     /// `{% endscript %}` sans `{% script %}` ouvert correspondant, ou fin
     /// de flux avec un bloc encore ouvert. Ne devrait structurellement
@@ -121,7 +132,9 @@ pub fn hoist_and_dedupe_scripts<'src>(
     let mut iter = tokens.into_iter();
     while let Some(token) = iter.next() {
         match token {
-            FlatPageToken::IfBool { .. } => {
+            FlatPageToken::IfBool { .. }
+            | FlatPageToken::IfEq { .. }
+            | FlatPageToken::IfNeq { .. } => {
                 if_depth += 1;
                 output.push(token);
             }
@@ -448,5 +461,263 @@ mod tests_hoist_scripts {
                 FlatPageToken::Static("</body>"),
             ]
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Session IfEq / Else — if_depth doit traiter IfEq comme IfBool.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Cœur du correctif : un `{% script %}` à l'intérieur d'un `IfEq`
+    /// doit être rejeté par `ConditionalScript`, exactement comme à
+    /// l'intérieur d'un `IfBool` (`hoist_conditional_script_is_a_hard_error`
+    /// ci-dessus). Avant ce correctif, `IfEq` tombait dans le bras
+    /// générique et ne faisait jamais avancer `if_depth` — ce test aurait
+    /// échoué (le script aurait été hissé sans erreur).
+    #[test]
+    fn hoist_conditional_script_inside_if_eq_is_a_hard_error() {
+        let tokens = vec![
+            FlatPageToken::IfEq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            },
+            FlatPageToken::ScriptStart,
+            FlatPageToken::AssetRef("extra.js"),
+            FlatPageToken::ScriptEnd,
+            FlatPageToken::EndIf,
+        ];
+
+        assert_eq!(
+            hoist_and_dedupe_scripts(tokens),
+            Err(HoistError::ConditionalScript)
+        );
+    }
+
+    /// Les deux formes doivent être strictement équivalentes du point de
+    /// vue de cette passe — même erreur, quelle que soit la nature de la
+    /// condition ouvrante.
+    #[test]
+    fn if_bool_and_if_eq_are_equivalent_for_conditional_script_detection() {
+        let if_bool_tokens = vec![
+            FlatPageToken::IfBool {
+                entity: "record",
+                field: "is_published",
+            },
+            FlatPageToken::ScriptStart,
+            FlatPageToken::AssetRef("x.js"),
+            FlatPageToken::ScriptEnd,
+            FlatPageToken::EndIf,
+        ];
+        let if_eq_tokens = vec![
+            FlatPageToken::IfEq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            },
+            FlatPageToken::ScriptStart,
+            FlatPageToken::AssetRef("x.js"),
+            FlatPageToken::ScriptEnd,
+            FlatPageToken::EndIf,
+        ];
+
+        assert_eq!(
+            hoist_and_dedupe_scripts(if_bool_tokens),
+            hoist_and_dedupe_scripts(if_eq_tokens),
+            "IfBool et IfEq doivent produire exactement le même résultat \
+             (ici, la même erreur) pour un script conditionnel"
+        );
+    }
+
+    /// Même équivalence pour `IfNeq` — session `!=` : un script à
+    /// l'intérieur d'un `{% if record.x != N %}` doit être rejeté
+    /// exactement comme pour `IfBool`/`IfEq`.
+    #[test]
+    fn hoist_conditional_script_inside_if_neq_is_a_hard_error() {
+        let tokens = vec![
+            FlatPageToken::IfNeq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            },
+            FlatPageToken::ScriptStart,
+            FlatPageToken::AssetRef("extra.js"),
+            FlatPageToken::ScriptEnd,
+            FlatPageToken::EndIf,
+        ];
+
+        assert_eq!(
+            hoist_and_dedupe_scripts(tokens),
+            Err(HoistError::ConditionalScript)
+        );
+    }
+
+    /// Un `{% script %}` situé après un `IfEq` déjà refermé (`EndIf`
+    /// rencontré) reste hissable normalement — `if_depth` doit bien
+    /// retomber à 0.
+    #[test]
+    fn if_eq_without_script_leaves_depth_unaffected() {
+        let tokens = vec![
+            FlatPageToken::IfEq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            },
+            FlatPageToken::Static("<p>A</p>"),
+            FlatPageToken::EndIf,
+            FlatPageToken::ScriptStart,
+            FlatPageToken::AssetRef("after.js"),
+            FlatPageToken::ScriptEnd,
+        ];
+
+        let (output, blocks) = hoist_and_dedupe_scripts(tokens).unwrap();
+
+        assert_eq!(blocks, vec![vec![FlatPageToken::AssetRef("after.js")]]);
+        assert_eq!(
+            output,
+            vec![
+                FlatPageToken::IfEq {
+                    entity: "record",
+                    field: "document_id",
+                    literal: 1,
+                },
+                FlatPageToken::Static("<p>A</p>"),
+                FlatPageToken::EndIf,
+            ]
+        );
+    }
+
+    /// Un `IfBool` existant, sans script, reste inchangé — zéro
+    /// régression du chemin déjà couvert par
+    /// `hoist_unconditional_script_outside_any_if_is_captured` ci-dessus,
+    /// revérifié explicitement dans le contexte de ce correctif.
+    #[test]
+    fn if_bool_without_script_is_unaffected_by_this_fix() {
+        let tokens = vec![
+            FlatPageToken::IfBool {
+                entity: "record",
+                field: "is_published",
+            },
+            FlatPageToken::Static("<p>x</p>"),
+            FlatPageToken::EndIf,
+        ];
+
+        let (output, blocks) = hoist_and_dedupe_scripts(tokens).unwrap();
+
+        assert!(blocks.is_empty());
+        assert_eq!(
+            output,
+            vec![
+                FlatPageToken::IfBool {
+                    entity: "record",
+                    field: "is_published"
+                },
+                FlatPageToken::Static("<p>x</p>"),
+                FlatPageToken::EndIf,
+            ]
+        );
+    }
+
+    /// Deux blocs `IfEq` séquentiels (jamais réellement imbriqués — rappel
+    /// : l'imbrication est interdite par `validate_ast`, hors périmètre de
+    /// cette passe) conservent correctement `if_depth` : chaque `IfEq`/
+    /// `EndIf` s'équilibre indépendamment, un script après le second bloc
+    /// reste hissable.
+    #[test]
+    fn sequential_if_eq_blocks_each_close_depth_independently() {
+        let tokens = vec![
+            FlatPageToken::IfEq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            },
+            FlatPageToken::Static("A"),
+            FlatPageToken::EndIf,
+            FlatPageToken::IfEq {
+                entity: "record",
+                field: "document_id",
+                literal: 2,
+            },
+            FlatPageToken::Static("B"),
+            FlatPageToken::EndIf,
+            FlatPageToken::ScriptStart,
+            FlatPageToken::AssetRef("seq.js"),
+            FlatPageToken::ScriptEnd,
+        ];
+
+        let (_, blocks) = hoist_and_dedupe_scripts(tokens).unwrap();
+        assert_eq!(blocks, vec![vec![FlatPageToken::AssetRef("seq.js")]]);
+    }
+
+    /// `Else` est neutre pour `if_depth` : un script à l'intérieur de la
+    /// branche `else` d'un `IfEq` doit être rejeté exactement comme à
+    /// l'intérieur de la branche `if` — la profondeur reste ouverte de
+    /// part et d'autre du `else`, seul `EndIf` la referme.
+    #[test]
+    fn script_inside_else_branch_of_if_eq_is_also_rejected() {
+        let tokens = vec![
+            FlatPageToken::IfEq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            },
+            FlatPageToken::Static("A"),
+            FlatPageToken::Else,
+            FlatPageToken::ScriptStart,
+            FlatPageToken::AssetRef("in-else.js"),
+            FlatPageToken::ScriptEnd,
+            FlatPageToken::EndIf,
+        ];
+
+        assert_eq!(
+            hoist_and_dedupe_scripts(tokens),
+            Err(HoistError::ConditionalScript)
+        );
+    }
+
+    /// Même chose pour la branche `else` d'un `IfBool` — comportement
+    /// symétrique, `Else` ne dépend jamais de la nature de la condition
+    /// qu'il referme/rouvre.
+    #[test]
+    fn script_inside_else_branch_of_if_bool_is_also_rejected() {
+        let tokens = vec![
+            FlatPageToken::IfBool {
+                entity: "record",
+                field: "is_published",
+            },
+            FlatPageToken::Static("A"),
+            FlatPageToken::Else,
+            FlatPageToken::ScriptStart,
+            FlatPageToken::AssetRef("in-else.js"),
+            FlatPageToken::ScriptEnd,
+            FlatPageToken::EndIf,
+        ];
+
+        assert_eq!(
+            hoist_and_dedupe_scripts(tokens),
+            Err(HoistError::ConditionalScript)
+        );
+    }
+
+    /// `Else` seul, sans script, ne perturbe pas la comptabilité de
+    /// `if_depth` — un script placé APRÈS le `EndIf` qui referme un bloc
+    /// `if`/`else` complet reste hissable normalement.
+    #[test]
+    fn else_branch_without_script_leaves_depth_correctly_closed() {
+        let tokens = vec![
+            FlatPageToken::IfBool {
+                entity: "record",
+                field: "is_published",
+            },
+            FlatPageToken::Static("A"),
+            FlatPageToken::Else,
+            FlatPageToken::Static("B"),
+            FlatPageToken::EndIf,
+            FlatPageToken::ScriptStart,
+            FlatPageToken::AssetRef("after.js"),
+            FlatPageToken::ScriptEnd,
+        ];
+
+        let (_, blocks) = hoist_and_dedupe_scripts(tokens).unwrap();
+        assert_eq!(blocks, vec![vec![FlatPageToken::AssetRef("after.js")]]);
     }
 }

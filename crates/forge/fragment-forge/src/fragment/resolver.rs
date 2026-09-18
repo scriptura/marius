@@ -3,8 +3,16 @@
 //! Phase 2.1 — AOT Capacity Planner & I/O Resolver : résolution des
 //! inclusions externes, mesure exacte de `STATIC_CAP`/`DYNAMIC_CAP`. Seule
 //! phase du pipeline Fragment autorisée à faire de l'E/S disque.
+//!
+//! Session IfEq/Else : `IfEq` suit exactement le même contrôle d'existence
+//! que `IfBool` (`find_fixed`), plus une restriction de type — seuls les
+//! `FieldKind` entiers (`I16`/`I32`/`I64`) sont acceptés, `Bool`/`F32`/`F64`
+//! sont rejetés explicitement (`NonIntegerEqField`). `Else` ne contribue à
+//! aucune métrique — marqueur pur, symétrique à `EndIf`.
 
 use crate::fragment::token::FlatPageToken;
+#[cfg(not(test))]
+use crate::schema::FieldKind;
 use crate::schema::SchemaIndex;
 #[cfg(test)]
 use crate::schema::{EscapePolicy, FieldKind, FieldSpec, VarlenField};
@@ -20,8 +28,8 @@ use crate::schema::{EscapePolicy, FieldKind, FieldSpec, VarlenField};
 //   - Mutation en place de &mut [FlatPageToken<'src>] : zéro nouvel arbre.
 //   - Fail-slow : toutes les erreurs I/O sont accumulées avant de retourner Err.
 //   - `get_file_size` est injecté : la phase est testable sans I/O réel.
-//   - Field / IfBool / EndIf ne contribuent pas à PAGE_STATIC_CAP :
-//     leur coût mémoire est runtime-dépendant (Phase 2.2).
+//   - Field / IfBool / IfEq / EndIf / Else ne contribuent pas à
+//     PAGE_STATIC_CAP : leur coût mémoire est runtime-dépendant (Phase 2.2).
 
 /// Métriques calculées lors de la résolution AOT de l'AST.
 ///
@@ -74,7 +82,7 @@ pub enum AssetLookup {
 pub enum ResolverError<'src> {
     /// Fichier inclus introuvable ou illisible.
     IoError { path: &'src str, details: String },
-    /// Token Field ou IfBool référençant un champ absent du schéma.
+    /// Token Field, IfBool ou IfEq référençant un champ absent du schéma.
     /// Erreur AOT fatale : cargo:error dans build.rs.
     UnknownField { entity: &'src str, field: &'src str },
     /// Champ varlena référencé par le template mais sans borne connue
@@ -99,6 +107,18 @@ pub enum ResolverError<'src> {
         key: &'src str,
         suggestion: Option<String>,
     },
+    /// `{% if entity.field == N %}` ou `{% if entity.field != N %}`
+    /// référençant un champ dont le `FieldKind` n'est pas entier
+    /// (`Bool`/`F32`/`F64`) — session `IfEq`/`!=`. Rejet explicite plutôt
+    /// que coercion silencieuse : une comparaison d'égalité ou d'inégalité
+    /// contre un littéral entier n'a pas de sens univoque sur un booléen
+    /// (déjà couvert, en mieux, par `IfBool`) ni sur un flottant (égalité/
+    /// inégalité flottante non fiable). Distinct de `UnknownField` : le
+    /// champ existe bien dans le schéma, seul son type est incompatible.
+    /// Un seul nom de variante pour les deux opérateurs : le rejet porte
+    /// sur la nature de la comparaison (contre un littéral entier), pas
+    /// sur l'opérateur précis.
+    NonIntegerEqField { entity: &'src str, field: &'src str },
 }
 
 /// Résout les inclusions, mute l'AST en place, calcule les métriques statiques.
@@ -126,6 +146,14 @@ pub enum ResolverError<'src> {
 /// — la suggestion diagnostique éventuelle est transportée telle quelle,
 /// `fragment-forge` ne la recalcule jamais (il n'a pas les clés
 /// candidates pour le faire, seul `build.rs` les possède).
+///
+/// # `IfEq` (session IfEq/Else)
+/// Même contrôle d'existence que `IfBool` (`find_fixed`), plus une
+/// restriction de type : seuls `FieldKind::{I64, I32, I16}` sont acceptés.
+/// `Bool`/`F32`/`F64` produisent `ResolverError::NonIntegerEqField`. Pas de
+/// résolution spéciale pour un champ PK particulier — `document_id` n'est
+/// pas un cas particulier, il suit la même règle que tout autre champ
+/// entier.
 pub fn resolve_and_measure<'src>(
     tokens: &mut [FlatPageToken<'src>],
     schema: &SchemaIndex<'_>,
@@ -172,47 +200,80 @@ pub fn resolve_and_measure<'src>(
                 }
             }
 
-            // Champ dynamique : disjoncteur Hot / Cold / Erreur (ADR-007).
-            //
-            // Table de vérité (un champ varlena est visité ici uniquement s'il
-            // est référencé par l'AST — un champ jamais référencé n'entre jamais
-            // dans cette branche, il reste Cold par construction, sans code dédié) :
-            //
-            //   référencé + fixed-length            → Hot, max_display_width()
-            //   référencé + varlena, max_len=Some(n) → Hot, max_escaped_len()
-            //   référencé + varlena, max_len=None    → Erreur, UnboundedField
-            //   absent du schéma (ni fixed ni varlena) → Erreur, UnknownField
-            FlatPageToken::Field { entity, field } => {
-                if let Some(f) = schema.find_fixed(field) {
-                    metrics.total_dynamic_bytes += f.kind.max_display_width();
-                } else if let Some(v) = schema.find_varlena(field) {
-                    match v.max_escaped_len() {
-                        Some(n) => metrics.total_dynamic_bytes += n,
-                        None => errors.push(ResolverError::UnboundedField { entity, field }),
-                    }
-                } else {
-                    errors.push(ResolverError::UnknownField { entity, field });
+            // Champ interpolé : contribution à total_dynamic_bytes selon
+            // qu'il est fixed-length ou varlena.
+            FlatPageToken::Field { entity, field } => match schema.find_fixed(field) {
+                Some(spec) => {
+                    metrics.total_dynamic_bytes += spec.kind.max_display_width();
                 }
-            }
+                None => match schema.find_varlena(field) {
+                    Some(v) => match v.max_escaped_len() {
+                        Some(len) => metrics.total_dynamic_bytes += len,
+                        None => {
+                            errors.push(ResolverError::UnboundedField { entity, field });
+                        }
+                    },
+                    None => {
+                        errors.push(ResolverError::UnknownField { entity, field });
+                    }
+                },
+            },
 
-            // Bloc conditionnel : validation schéma uniquement.
-            // Le champ sert de condition booléenne, il n'est pas affiché —
-            // pas de contribution à total_dynamic_bytes.
+            // Condition booléenne : seule l'existence du champ fixed-length
+            // est vérifiée ici — aucune contrainte de type (comportement
+            // inchangé depuis avant la session IfEq/Else).
             FlatPageToken::IfBool { entity, field } => {
                 if schema.find_fixed(field).is_none() {
                     errors.push(ResolverError::UnknownField { entity, field });
                 }
             }
 
-            // EndIf : aucun effet sur les métriques.
+            // Condition d'égalité entière (session IfEq) : même contrôle
+            // d'existence qu'IfBool, plus une restriction de type — seuls
+            // les FieldKind entiers sont acceptés. `literal` n'a besoin
+            // d'aucune validation supplémentaire ici : tout i64 syntaxiquement
+            // valide (Phase 1.3) est un littéral Rust valide, le compilateur
+            // Rust généré tranchera lui-même toute incohérence de plage
+            // (ex. littéral hors bornes d'un i16) à la compilation du code
+            // généré — Forge n'a pas à dupliquer cette vérification.
+            FlatPageToken::IfEq { entity, field, .. } => match schema.find_fixed(field) {
+                Some(spec) => {
+                    if !matches!(spec.kind, FieldKind::I64 | FieldKind::I32 | FieldKind::I16) {
+                        errors.push(ResolverError::NonIntegerEqField { entity, field });
+                    }
+                }
+                None => {
+                    errors.push(ResolverError::UnknownField { entity, field });
+                }
+            },
+
+            // Session `!=` : même contrôle exactement qu'IfEq — même
+            // erreur `NonIntegerEqField` en cas de type incompatible (le
+            // rejet porte sur « comparaison d'égalité/inégalité contre un
+            // littéral entier », pas sur l'opérateur précis ; pas de
+            // nouvelle variante d'erreur pour un coût nul de discrimination
+            // supplémentaire).
+            FlatPageToken::IfNeq { entity, field, .. } => match schema.find_fixed(field) {
+                Some(spec) => {
+                    if !matches!(spec.kind, FieldKind::I64 | FieldKind::I32 | FieldKind::I16) {
+                        errors.push(ResolverError::NonIntegerEqField { entity, field });
+                    }
+                }
+                None => {
+                    errors.push(ResolverError::UnknownField { entity, field });
+                }
+            },
+
+            // Else : marqueur pur, aucune contribution aux métriques, aucune
+            // vérification de schéma — symétrique à EndIf.
+            FlatPageToken::Else => {}
+
             FlatPageToken::EndIf => {}
 
-            // ScriptStart/ScriptEnd : marqueurs purs, aucune contribution
-            // propre — comme EndIf. Le contenu CAPTURÉ entre les deux (ses
-            // propres tokens Static/AssetRef) est mesuré normalement par
-            // ses propres tokens, que la capture ait lieu ou non en aval
-            // (hoisting Page vs passthrough Fragment isolé, décidé par
-            // build.rs) — cette fonction n'a pas à le savoir.
+            // ScriptStart/ScriptEnd : jamais de contribution — le contenu
+            // capturé entre les deux continue d'être mesuré normalement par
+            // ses propres tokens (Static/Field/...), qu'il soit hissé ou non
+            // (build.rs) — cette fonction n'a pas à le savoir.
             FlatPageToken::ScriptStart | FlatPageToken::ScriptEnd => {}
 
             // Asset : longueur de l'URL résolue, jamais celle du fichier
@@ -365,6 +426,9 @@ mod tests_phase_2_1 {
             }
             ResolverError::AssetNotFound { key, .. } => {
                 panic!("AssetNotFound inattendu dans ce test : {key}");
+            }
+            ResolverError::NonIntegerEqField { entity, field } => {
+                panic!("NonIntegerEqField inattendu dans ce test : {entity}.{field}");
             }
         }
 
@@ -681,5 +745,262 @@ mod tests_phase_2_1 {
             }
             other => panic!("AssetNotFound attendu, obtenu : {other:?}"),
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Session IfEq / Else
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn int_field(name: &str, kind: FieldKind) -> FieldSpec {
+        FieldSpec {
+            name: name.to_string(),
+            kind,
+            attnum: 1,
+        }
+    }
+
+    /// `IfEq` sur un champ I64/I32/I16 : accepté, zéro contribution aux
+    /// métriques (comme IfBool).
+    #[test]
+    fn if_eq_accepts_integer_kinds() {
+        for kind in [FieldKind::I64, FieldKind::I32, FieldKind::I16] {
+            let mut tokens = vec![FlatPageToken::IfEq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            }];
+            let fixed = vec![int_field("document_id", kind)];
+            let schema = SchemaIndex {
+                fixed: &fixed,
+                varlena: &[],
+            };
+
+            let result = resolve_and_measure(
+                &mut tokens,
+                &schema,
+                |_| unreachable!("aucun StaticInclude dans ce test"),
+                |_| unreachable!("aucun AssetRef dans ce test"),
+                0,
+            );
+
+            assert_eq!(
+                result,
+                Ok(TemplateMetrics {
+                    total_static_bytes: 0,
+                    total_dynamic_bytes: 0,
+                    include_count: 0,
+                }),
+                "IfEq doit être accepté pour {kind:?}"
+            );
+        }
+    }
+
+    /// `IfEq` sur Bool/F32/F64 : rejeté explicitement, jamais une coercion
+    /// silencieuse.
+    #[test]
+    fn if_eq_rejects_non_integer_kinds() {
+        for kind in [FieldKind::Bool, FieldKind::F32, FieldKind::F64] {
+            let mut tokens = vec![FlatPageToken::IfEq {
+                entity: "record",
+                field: "score",
+                literal: 1,
+            }];
+            let fixed = vec![int_field("score", kind)];
+            let schema = SchemaIndex {
+                fixed: &fixed,
+                varlena: &[],
+            };
+
+            let result = resolve_and_measure(
+                &mut tokens,
+                &schema,
+                |_| unreachable!("aucun StaticInclude dans ce test"),
+                |_| unreachable!("aucun AssetRef dans ce test"),
+                0,
+            );
+
+            assert_eq!(
+                result,
+                Err(vec![ResolverError::NonIntegerEqField {
+                    entity: "record",
+                    field: "score",
+                }]),
+                "IfEq doit être rejeté pour {kind:?}"
+            );
+        }
+    }
+
+    /// `IfEq` sur un champ absent du schéma : `UnknownField`, même chemin
+    /// que `IfBool` et `Field` — pas de résolution spéciale pour IfEq.
+    #[test]
+    fn if_eq_unknown_field_is_rejected() {
+        let mut tokens = vec![FlatPageToken::IfEq {
+            entity: "record",
+            field: "missing",
+            literal: 1,
+        }];
+        let schema = SchemaIndex {
+            fixed: &[],
+            varlena: &[],
+        };
+
+        let result = resolve_and_measure(
+            &mut tokens,
+            &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            0,
+        );
+
+        assert_eq!(
+            result,
+            Err(vec![ResolverError::UnknownField {
+                entity: "record",
+                field: "missing",
+            }])
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Session `!=`
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `IfNeq` sur un champ I64/I32/I16 : accepté, zéro contribution aux
+    /// métriques (comme IfEq/IfBool) — même liste de types que IfEq.
+    #[test]
+    fn if_neq_accepts_integer_kinds() {
+        for kind in [FieldKind::I64, FieldKind::I32, FieldKind::I16] {
+            let mut tokens = vec![FlatPageToken::IfNeq {
+                entity: "record",
+                field: "document_id",
+                literal: 1,
+            }];
+            let fixed = vec![int_field("document_id", kind)];
+            let schema = SchemaIndex {
+                fixed: &fixed,
+                varlena: &[],
+            };
+
+            let result = resolve_and_measure(
+                &mut tokens,
+                &schema,
+                |_| unreachable!("aucun StaticInclude dans ce test"),
+                |_| unreachable!("aucun AssetRef dans ce test"),
+                0,
+            );
+
+            assert_eq!(
+                result,
+                Ok(TemplateMetrics {
+                    total_static_bytes: 0,
+                    total_dynamic_bytes: 0,
+                    include_count: 0,
+                }),
+                "IfNeq doit être accepté pour {kind:?}"
+            );
+        }
+    }
+
+    /// `IfNeq` sur Bool/F32/F64 : rejeté explicitement, même erreur
+    /// qu'IfEq (`NonIntegerEqField`, nom conservé pour les deux opérateurs).
+    #[test]
+    fn if_neq_rejects_non_integer_kinds() {
+        for kind in [FieldKind::Bool, FieldKind::F32, FieldKind::F64] {
+            let mut tokens = vec![FlatPageToken::IfNeq {
+                entity: "record",
+                field: "score",
+                literal: 1,
+            }];
+            let fixed = vec![int_field("score", kind)];
+            let schema = SchemaIndex {
+                fixed: &fixed,
+                varlena: &[],
+            };
+
+            let result = resolve_and_measure(
+                &mut tokens,
+                &schema,
+                |_| unreachable!("aucun StaticInclude dans ce test"),
+                |_| unreachable!("aucun AssetRef dans ce test"),
+                0,
+            );
+
+            assert_eq!(
+                result,
+                Err(vec![ResolverError::NonIntegerEqField {
+                    entity: "record",
+                    field: "score",
+                }]),
+                "IfNeq doit être rejeté pour {kind:?}"
+            );
+        }
+    }
+
+    /// `IfNeq` sur un champ absent du schéma : `UnknownField`, même
+    /// chemin qu'`IfEq`.
+    #[test]
+    fn if_neq_unknown_field_is_rejected() {
+        let mut tokens = vec![FlatPageToken::IfNeq {
+            entity: "record",
+            field: "missing",
+            literal: 1,
+        }];
+        let schema = SchemaIndex {
+            fixed: &[],
+            varlena: &[],
+        };
+
+        let result = resolve_and_measure(
+            &mut tokens,
+            &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            0,
+        );
+
+        assert_eq!(
+            result,
+            Err(vec![ResolverError::UnknownField {
+                entity: "record",
+                field: "missing",
+            }])
+        );
+    }
+
+    /// `Else` : marqueur pur, aucune contribution, aucune erreur.
+    #[test]
+    fn else_contributes_nothing() {
+        let mut tokens = vec![
+            FlatPageToken::IfBool {
+                entity: "record",
+                field: "is_readable",
+            },
+            FlatPageToken::Static("A"),
+            FlatPageToken::Else,
+            FlatPageToken::Static("BC"),
+            FlatPageToken::EndIf,
+        ];
+        let fixed = vec![int_field("is_readable", FieldKind::I32)];
+        let schema = SchemaIndex {
+            fixed: &fixed,
+            varlena: &[],
+        };
+
+        let result = resolve_and_measure(
+            &mut tokens,
+            &schema,
+            |_| unreachable!("aucun StaticInclude dans ce test"),
+            |_| unreachable!("aucun AssetRef dans ce test"),
+            0,
+        );
+
+        assert_eq!(
+            result,
+            Ok(TemplateMetrics {
+                total_static_bytes: 3, // "A" (1) + "BC" (2)
+                total_dynamic_bytes: 0,
+                include_count: 0,
+            })
+        );
     }
 }

@@ -41,11 +41,12 @@ pub mod schema;
 
 pub use fragment::{
     AssetLookup, FlatPageToken, HoistError, PageParseError, RawSpan, ResolverError, SemanticError,
-    SpanKind, StaticMarkerFacts, TemplateMetrics, extract_static_class_tokens,
-    extract_static_data_attribute_tokens, extract_static_element_tokens, extract_static_id_tokens,
-    extract_static_marker_facts, generate_aot_snippet, generate_segmented_snippet,
-    generated_file_header, hoist_and_dedupe_scripts, parse_tokens, resolve_and_measure, scan,
-    splice_hoisted_scripts, validate_ast,
+    SpanKind, StaticMarkerFacts, TemplateMetrics, eliminate_recordless_conditions,
+    extract_static_class_tokens, extract_static_data_attribute_tokens,
+    extract_static_element_tokens, extract_static_id_tokens, extract_static_marker_facts,
+    generate_aot_snippet, generate_segmented_snippet, generated_file_header,
+    hoist_and_dedupe_scripts, parse_tokens, resolve_and_measure, scan, splice_hoisted_scripts,
+    validate_ast,
 };
 pub use naming::{relative_path_for_include_str, static_capacity, static_const_ident};
 pub use page::{

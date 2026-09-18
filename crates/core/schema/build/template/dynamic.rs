@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use marius_fragment_forge::{
-    AssetLookup, SchemaIndex, TemplateMetrics, VarlenField, detect_extends, generate_aot_snippet,
-    generate_segmented_snippet, parse_page_tokens, parse_tokens, resolve_and_measure, scan,
-    validate_ast,
+    AssetLookup, SchemaIndex, TemplateMetrics, VarlenField, detect_extends,
+    eliminate_recordless_conditions, generate_aot_snippet, generate_segmented_snippet,
+    parse_page_tokens, parse_tokens, resolve_and_measure, scan, validate_ast,
 };
 
 use crate::asset_lookup::resolve_asset_lookup;
@@ -122,7 +122,7 @@ pub(crate) fn resolve_template(
     }
 
     let spans = scan(&src);
-    let mut tokens = parse_tokens(spans).map_err(|e| {
+    let tokens = parse_tokens(spans).map_err(|e| {
         println!("cargo:error=DB-Forge [{schema}.{table}] : erreur de parsing template : {e:?}");
     })?;
 
@@ -133,6 +133,17 @@ pub(crate) fn resolve_template(
     })?;
 
     let schema_index = SchemaIndex { fixed, varlena };
+
+    // Élimination AOT des conditions record.* (session shell/représentation) —
+    // no-op strict ici dans l'immense majorité des cas : un composant piloté
+    // par `fetch_component_list` a, par construction, des colonnes réelles
+    // (`fixed`/`varlena` non vides), donc `record.*` continue d'être résolu
+    // normalement par `resolve_and_measure` ci-dessous. Appliquée par
+    // cohérence avec `resolve_page_template`/`resolve_static_page` (même
+    // règle partout, cf. session shell/représentation) plutôt que réservée
+    // à un chemin particulier — sans effet observable sur le chemin Voie B
+    // actuel.
+    let mut tokens = eliminate_recordless_conditions(tokens, &schema_index);
 
     // Résout les inclusions {% include path %} relativement au manifeste.
     // Aucun {% include %} dans les templates actuels — closure prête pour usage futur.
