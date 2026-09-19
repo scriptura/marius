@@ -12,7 +12,7 @@
 | **Partie 1** | Mode fragment : `{{ }}`, `{% if %}`, `{% include %}` | Implémenté — pipeline câblé dans `crates/core/schema/build/template/dynamic.rs` |
 | **Partie 2** | Mode page : `{% extends %}` (chaîne N-aire), `{% block %}`, `{% import %}`, `{% static %}`, `{% asset %}`, `{% script %}` | Implémenté — pipeline câblé dans `crates/core/schema/build/template/page.rs` et `static_page.rs` |
 
-**Hors périmètre de ce document** : ce guide couvre la compilation `.marius` → `render()`/HTML statique. Il ne couvre pas ce qui se passe *après* — comment `render()` est invoqué, à quelle fréquence, ni ce qui invalide le HTML déjà servi. Un `.marius` correct est une condition nécessaire, jamais suffisante, pour qu'un changement atteigne le navigateur (voir `guide-cycle-de-vie-runtime.md`).
+**Hors périmètre de ce document** : ce guide couvre la compilation `.marius` → `render()`/HTML statique. Il ne couvre pas ce qui se passe *après* — comment `render()` est invoqué, à quelle fréquence, ni ce qui invalide le HTML déjà servi. Un `.marius` correct est une condition nécessaire, jamais suffisante, pour qu'un changement atteigne le navigateur (voir `runtime-lifecycle-guide.md`).
 
 ---
 
@@ -53,12 +53,15 @@ Le modèle actuel fait dicter la structure par PostgreSQL. Le template ne fait q
 | Construction | Effet | Génère |
 | --- | --- | --- |
 | `{{ entity.field }}` | Interpolation d'un champ | `write_fmt` (fixed-length) ou `marius_html_escape` (varlena) |
-| `{% if entity.field %} … {% endif %}` | Inclusion conditionnelle | `if record.{field} != 0 { … }` |
+| `{% if entity.field %} … {% endif %}` | Inclusion conditionnelle par troncature (non-nullité) | `if record.{field} != 0 { … }` |
+| `{% if entity.field == N %} … {% endif %}` | Inclusion conditionnelle par égalité à un littéral entier | `if record.{field} == N { … }` |
+| `{% if entity.field != N %} … {% endif %}` | Inclusion conditionnelle par inégalité à un littéral entier | `if record.{field} != N { … }` |
+| `{% else %}` | Branche alternative, optionnelle, pour l'une des trois formes ci-dessus | `} else { … }` |
 | `{% include chemin %}` | Inclusion d'un fragment statique résolu au build | `buf.push_str(include_str!(...))` |
 | texte brut | HTML verbatim | `buf.push_str("...")` |
 | `{# … #}` | Commentaire — avalé par le scanner | rien : zéro span, zéro code généré (§4.5ter) |
 
-Trois constructions qui produisent effectivement quelque chose au build, plus un quatrième mécanisme — le commentaire — qui par définition n'en produit aucun. Tout le reste est une erreur de compilation. `{# … #}` n'est pas spécifique au mode fragment : la même syntaxe fonctionne à l'identique en mode page (Partie 2), le scanner qui la reconnaît étant partagé par construction entre les deux modes.
+Sept constructions qui produisent effectivement quelque chose au build, plus un huitième mécanisme — le commentaire — qui par définition n'en produit aucun. Tout le reste est une erreur de compilation. `{# … #}` n'est pas spécifique au mode fragment : la même syntaxe fonctionne à l'identique en mode page (Partie 2), le scanner qui la reconnaît étant partagé par construction entre les deux modes.
 
 **Piège de syntaxe, vérifié contre le scanner** : un chemin (`include`, et en Partie 2 `extends`/`static`/`import`) s'écrit **sans guillemets** — `{% include templates/partials/nav.html %}`, jamais `{% include "templates/partials/nav.html" %}`. Le scanner ne connaît aucun token de littéral de chaîne : il découpe tout contenu de bloc en séquences contiguës non-blanc. Des guillemets écrits par réflexe Jinja ne provoquent **pas** une erreur de syntaxe immédiate — ils sont capturés tels quels comme partie du chemin, et l'échec n'apparaît qu'en aval, au moment de la résolution du fichier, avec un chemin visiblement corrompu par les guillemets dans le message — un symptôme trompeur si vous ne savez pas d'où il vient.
 
@@ -75,12 +78,42 @@ Concrètement : `{{ record.description }}` et `{{ nimporte_quoi.description }}` 
 | Interdit | Raison structurelle |
 | --- | --- |
 | `{% for … %}` | Sortie de longueur non bornée → rend `{NAME}_TOTAL_CAP` incalculable au build-time |
-| `{% else %}` | Réflexe Jinja le plus probable après un `{% if %}` — aucune grammaire dédiée : tombe dans le mot-clé inconnu, `InvalidBlockSequence` |
-| Imbrication `{% if %}` dans `{% if %}` | La FSM de validation (`validate_ast`) est un automate à un seul niveau d'état (`current_open_if: Option<(entity, field)>`) — une imbrication ouvre une erreur `NestedIfNotSupported` |
+| Imbrication `{% if %}` dans `{% if %}` | La FSM de validation (`validate_ast`) interdit l'ouverture d'un bloc conditionnel — `IfBool`, `IfEq` ou `IfNeq` — alors qu'un autre est déjà ouvert (branche `if` ou branche `else`) — une imbrication ouvre une erreur `NestedIfNotSupported` |
 | Mots-clés relationnels (`join`, `where`, `filter`, `group`) | Appartiennent au Write Path PostgreSQL, jamais au Read Path |
-| `{% if %}` sur un champ non booléen | Romprait la largeur de struct statiquement connue (`StorageRow #[repr(C)]`) |
 
-Toute séquence de bloc non reconnue (mot-clé inconnu après `{%`) échoue avec `PageParseError::InvalidBlockSequence` en mode fragment.
+Toute séquence de bloc non reconnue (mot-clé inconnu après `{%`) échoue avec `PageParseError::InvalidBlockSequence` en mode fragment. `{% else %}` **n'est plus** dans cette liste — voir §2.3bis, ancien piège Jinja aujourd'hui une construction supportée.
+
+### 2.3bis `{% else %}`, `== N`, `!= N` — extension du langage conditionnel
+
+Trois formes s'ajoutent à `{% if entity.field %}` (troncature, inchangée) :
+
+```jinja
+{% if entity.field == 1 %}
+  ...
+{% else %}
+  ...
+{% endif %}
+```
+
+**`{% else %}` est générique**, valide après n'importe laquelle des trois formes de `{% if %}` (troncature, `==`, `!=`), toujours optionnel — un `{% if %}`/`{% endif %}` sans `{% else %}` reste parfaitement valide, comme avant cette extension.
+
+**`== N`/`!= N` comparent contre un littéral entier signé** (`-1`, `0`, `1`, … — le signe n'est pas interdit). Aucun changement du scanner : en mode `InBlock`, `==`/`!=` et le littéral qui suit sont déjà des `Ident` génériques délimités par espaces, exactement comme `entity.field` lui-même — la reconnaissance de l'opérateur est entièrement une affaire du parseur (Phase 1.3/4.x), jamais du scanner (Phase 1.2). Conséquence pratique : `record.document_id==1` (sans espaces) est un piège de syntaxe symétrique à celui du §2.1 sur les guillemets — le scanner produit un seul `Ident` monolithique, jamais reconnu comme une comparaison.
+
+**Restriction de type, propre à `== N`/`!= N`, distincte de la troncature.** `{% if entity.field %}` (troncature) n'impose en réalité **aucune** restriction de `FieldKind` — `resolve_and_measure` vérifie uniquement que `field` existe dans le schéma (`find_fixed`), jamais son type ; l'émission `!= 0` est valable, et compile, pour n'importe quel `FieldKind` fixed-length (`I64`/`I32`/`I16`/`Bool`/`F32`/`F64`). *Correction par rapport à une version antérieure de ce guide, qui présentait cette absence de contrôle comme une restriction structurelle — ce n'en est pas une, seulement une convention d'usage (champs réellement booléens, stockés en `u8`).* `== N`/`!= N` sont, eux, réellement restreints aux `FieldKind` entiers — `I64`, `I32`, `I16` — et rejetés explicitement, avec `ResolverError::NonIntegerEqField`, pour `Bool`/`F32`/`F64` : une égalité ou une inégalité contre un littéral entier n'a pas de sens univoque sur un booléen (déjà couvert, en mieux, par la troncature) ni sur un flottant (comparaison flottante non fiable).
+
+**Code généré, aucun cast artificiel** :
+
+```rust
+if record.document_id == 1 {
+    // …
+} else {
+    // …
+}
+```
+
+Le littéral est émis tel quel, comme un entier Rust non typé — c'est l'inférence de type qui résout le type exact du champ comparé (`i64`/`i32`/`i16`), jamais `fragment-forge` qui décide d'un cast.
+
+**Sémantique en l'absence de tout `Record`** : voir §4.8ter. Une condition `record.*` (troncature, `== N` ou `!= N`, indifféremment) référencée par un fragment partagé (typiquement importé dans le Root) est statiquement **fausse** pour toute unité de compilation qui ne possède structurellement aucun `Record` — ce n'est jamais une erreur `UnknownField` dans ce cas précis.
 
 ### 2.4 Champs varlena — disjoncteur Hot / Cold / Erreur (ADR-007)
 
@@ -162,11 +195,14 @@ Notez `{{ record.description }}` référencé deux fois : chaque occurrence est 
 | Source | Erreur | Déclencheur |
 | --- | --- | --- |
 | `parse_tokens` | `UnexpectedToken { expected, got }` | Token syntaxiquement hors séquence |
-| `parse_tokens` | `InvalidBlockSequence` | Mot-clé de bloc inconnu (`for`, `extends`, `block`…) |
-| `validate_ast` | `NestedIfNotSupported` | `{% if %}` ouvert dans un `{% if %}` déjà ouvert |
+| `parse_tokens` | `InvalidBlockSequence` | Mot-clé de bloc inconnu (`for`, `extends`, `block`…), ou littéral non parsable après `==`/`!=` |
+| `validate_ast` | `NestedIfNotSupported` | `{% if %}` (troncature, `==` ou `!=`) ouvert dans un bloc conditionnel déjà ouvert — branche `if` ou branche `else` |
 | `validate_ast` | `UnexpectedEndIf` | `{% endif %}` sans `{% if %}` correspondant |
-| `validate_ast` | `UnclosedIf` | Fin de fichier avec un `{% if %}` resté ouvert |
-| `resolve_and_measure` | `UnknownField` | `field` absent du schéma (ni fixed, ni varlena) |
+| `validate_ast` | `UnclosedIf` | Fin de fichier avec un `{% if %}` resté ouvert — branche `if` ou branche `else` |
+| `validate_ast` | `UnexpectedElse` | `{% else %}` sans `{% if %}` ouvert — jamais ouvert, ou déjà refermé par un `{% endif %}` précédent (même erreur dans les deux cas) |
+| `validate_ast` | `DuplicateElse` | Second `{% else %}` pour le même bloc conditionnel |
+| `resolve_and_measure` | `UnknownField` | `field` absent du schéma (ni fixed, ni varlena) — **uniquement pour une unité qui possède un `Record`** ; voir §4.8ter pour une unité qui n'en possède aucun |
+| `resolve_and_measure` | `NonIntegerEqField` | `{% if entity.field == N %}`/`!= N` référençant un champ dont le `FieldKind` n'est pas `I64`/`I32`/`I16` |
 | `resolve_and_measure` | `UnboundedField` | Varlena référencé sans `max_len` connu |
 | `resolve_and_measure` | `IoError` | `{% include %}` pointant vers un fichier introuvable |
 
@@ -185,7 +221,10 @@ Toutes les erreurs de `resolve_and_measure` sont accumulées en une seule passe 
 ```
 scan(src)              → Iterator<RawSpan>        (tokenisation lexicale, zéro alloc heap)
 parse_tokens(spans)     → Vec<FlatPageToken>        (syntaxe, fail-fast)
-validate_ast(&tokens)   → Result<(), Vec<SemanticError>>   (équilibre if/endif, FSM 1 niveau)
+validate_ast(&tokens)   → Result<(), Vec<SemanticError>>   (équilibre if/else/endif, FSM 3 états)
+eliminate_recordless_conditions(tokens, schema) → Vec<FlatPageToken>
+                          (élimination AOT des conditions record.* — no-op si `schema` porte au
+                          moins un champ ; sinon ne conserve que la branche `else`, ou rien — §4.8ter)
 resolve_and_measure(…)  → Result<TemplateMetrics, Vec<ResolverError>>
                           (résolution I/O des include + calcul de capacité, en une seule passe)
 generate_aot_snippet(…) → String                    (transpilation vers Rust natif)
@@ -404,10 +443,17 @@ Le scanner ne connaît pas la syntaxe `<!-- -->` — il cherche `{{`/`{%`/`{#` n
    redéfinir un parent efface ses sous-blocs par défaut (§4.4, Option A)
 6. Fusionner (lower) : projection plate Vec<FlatPageToken> à partir du seul Root
 7. Résoudre chaque {% static %} : taille réelle, chemin relatif, cargo:rerun-if-changed
-8. Validation sémantique : entité, champs, type bool des conditions, absence de
-   {% for %}, absence de mot-clé relationnel, absence d'imbrication
-→ Vec<FlatPageToken> : Static | Field | IfBool | EndIf | StaticInclude | AssetRef | ScriptStart | ScriptEnd
-  (ScriptStart/ScriptEnd retirés du flux par hoist_and_dedupe_scripts avant l'étape 8 ci-dessus)
+8. Validation sémantique (validate_ast) : équilibre if/else/endif (FSM 3 états),
+   absence de {% for %}, absence de mot-clé relationnel, absence d'imbrication
+9. Élimination AOT des conditions record.* pour une unité sans Record
+   (eliminate_recordless_conditions, §4.8ter) — no-op si le composant a un
+   Record réel
+10. Résolution de schéma (resolve_and_measure) : entité/champs, type entier
+    des conditions == N / != N, mesure de capacité
+→ Vec<FlatPageToken> : Static | Field | IfBool | IfEq | IfNeq | Else | EndIf |
+  StaticInclude | AssetRef | ScriptStart | ScriptEnd
+  (ScriptStart/ScriptEnd retirés du flux par hoist_and_dedupe_scripts avant l'étape 9 ci-dessus ;
+  IfBool/IfEq/IfNeq/Else/EndIf retirés du flux par l'étape 9 elle-même, pour une unité sans Record)
 ```
 
 Le résultat de la fusion est un AST **plat**, du même type `FlatPageToken` que le mode fragment. Conséquence directe : tout ce que vous avez appris en Partie 1 sur les contraintes de `{{ }}`/`{% if %}` s'applique identiquement après fusion — la composition de page ne compose que des fragments qui doivent chacun déjà s'y conformer.
@@ -430,7 +476,7 @@ Le résultat de la fusion est un AST **plat**, du même type `FlatPageToken` que
 | `StaticFileNotFound` | Chemin de `{% static %}` introuvable |
 | `OrphanBlock` | Bloc déclaré à un niveau non-Root sans correspondant dans le Root |
 | `NestedIfNotSupported` | `{% if %}` imbriqué dans un autre `{% if %}` (mode fragment ou AST fusionné) — contrainte distincte de l'imbrication `{% block %}` (§4.4, admise), imposée par `STATIC_CAP`/`DYNAMIC_CAP` sur le chemin HTTP chaud |
-| `UnknownField` | Champ absent du schéma (point de convergence, identique au mode fragment) |
+| `UnknownField` | Champ absent du schéma (point de convergence, identique au mode fragment) — uniquement pour une unité qui possède un `Record` ; voir §4.8ter sinon |
 | `NonBoolIfCondition` | `{% if %}` sur un champ non `bool` |
 | `ForLoopDetected` | `{% for %}` détecté |
 | `RelationalKeyword` | `join`/`where`/`filter`/`group` détecté — également tout mot-clé de bloc inconnu, y compris une faute de frappe sur `asset`/`script` |
@@ -453,7 +499,9 @@ Toutes les erreurs listées comme accumulables (`collect_blocks`, `link_chain`, 
 
 ### 4.8 `STATIC_PAGES` — pages sans donnée dynamique
 
-Certaines pages `.marius` (aujourd'hui : `offline`/`offline`, une page de routage sans donnée dynamique) ne suivent pas le chemin `fetch_component_list`. `build/template/static_page.rs` les détecte via une liste explicite (`STATIC_PAGES`, `(schema, table)`), **avant** même l'ouverture du pool Postgres, et les fait passer par le **même** pipeline de composition que les pages pilotées par une table (chaîne `extends` N-aire, `{% import %}`, `link_chain`, `lower` — briques partagées avec `build/template/page.rs`, pas une copie séparée), mais avec un `SchemaIndex` **toujours vide** (`fixed: &[], varlena: &[]`) — garde-fou structurel : la moindre référence `{{ record.* }}`/`{% if %}` échoue avec `UnknownField` avant qu'un seul octet ne soit produit.
+Certaines pages `.marius` (aujourd'hui : `offline`/`offline`, une page de routage sans donnée dynamique) ne suivent pas le chemin `fetch_component_list`. `build/template/static_page.rs` les détecte via une liste explicite (`STATIC_PAGES`, `(schema, table)`), **avant** même l'ouverture du pool Postgres, et les fait passer par le **même** pipeline de composition que les pages pilotées par une table (chaîne `extends` N-aire, `{% import %}`, `link_chain`, `lower` — briques partagées avec `build/template/page.rs`, pas une copie séparée), mais avec un `SchemaIndex` **toujours vide** (`fixed: &[], varlena: &[]`).
+
+*Correction par rapport à une version antérieure de ce guide : ce `SchemaIndex` vide n'est plus systématiquement un garde-fou d'erreur.* Une référence `{{ record.* }}` (interpolation) échoue toujours avec `UnknownField` avant qu'un seul octet ne soit produit — l'interpolation n'a aucune sémantique possible sans valeur à afficher. En revanche, une condition `{% if record.* %}` (troncature, `== N` ou `!= N`) référencée par un fragment partagé avec des pages qui ont un `Record` (typiquement `navigation.marius`, importé aussi bien par `base.marius` d'une page dynamique que par celui d'une page `STATIC_PAGES`) est désormais statiquement **éliminée à faux** par `eliminate_recordless_conditions`, **avant** même d'atteindre `resolve_and_measure` — voir §4.8ter. C'est précisément ce qui permet à un Root commun (`base.marius`) de porter une navigation ou un futur fil d'Ariane sans dupliquer le layout entre pages avec et sans `Record`.
 
 Le flux de tokens résolu est ensuite matérialisé **directement en HTML** (`emit_static_html`) et écrit une fois sur disque (`build/{theme}/{table}.html`) — aucune fonction `render()` n'est jamais générée ni compilée pour ces pages. Conséquence pour le cycle de vie runtime : ces pages ne participent à aucun des artefacts habituels, ne sont jamais invalidées par `NOTIFY`, et leur seul déclencheur de régénération est un `cargo build` du crate `core/schema`.
 
@@ -480,6 +528,31 @@ fn render_segments<'seg>(record: &Self::Record, varlena: &'seg {Name}VarlenOwned
 
 **Conséquence pratique si vous ajoutez `marius:large_content` à un champ existant** : tout code appelant `P::render()` directement pour ce composant se met à paniquer — vérifiez tout appelant direct, pas seulement `BatchRenderer`.
 
+### 4.8ter Conditions `record.*` dans un layout partagé — `eliminate_recordless_conditions`
+
+Un même Root (`base.marius`), et les fragments qu'il importe (`navigation.marius`, un futur fil d'Ariane), sont naturellement partagés entre des pages qui ont un `Record` réel (Voie B, `fetch_component_list`) et des pages qui n'en ont structurellement aucun (`STATIC_PAGES`, §4.8). Sans mécanisme dédié, la moindre condition `{% if record.field == N %}` dans un tel fragment ferait échouer la compilation de toute page sans `Record` avec `UnknownField` — obligeant soit un faux `Record` pour les pages statiques, soit un second layout dupliqué. Aucune des deux n'est retenue.
+
+**Principe retenu** : deux axes de contextualisation, jamais mélangés.
+
+- `record.*` reste une donnée de record, résolue au dump, une fois par enregistrement (`render_chunks(record)`) — inchangé, pour toute unité de compilation qui possède effectivement un `Record`.
+- La présence ou l'absence d'un `Record` pour l'unité de compilation courante est, elle, une propriété connue de Forge **avant même le parsing** du `.marius` — c'est très exactement `SchemaIndex { fixed, varlena }`, déjà construit par l'appelant (`fixed`/`varlena` non vides pour un composant réel ; toujours vide pour `STATIC_PAGES`, §4.8). Aucune nouvelle identité de représentation n'est introduite : ce mécanisme réutilise un fait déjà produit par le pipeline existant.
+
+**Règle** : pour une unité de compilation qui ne possède **aucun** `Record`, toute condition `record.*` — troncature, `== N` ou `!= N`, sans distinction — est statiquement **fausse**. `eliminate_recordless_conditions(tokens, schema)` élimine alors la branche `if` correspondante et ne conserve que la branche `else`, si elle existe ; sans `else`, rien n'est conservé. Cette décision n'est **jamais** dérivée par négation logique d'un opérateur à l'autre (`!(x == N)` ne donnerait pas la bonne réponse pour `!=`) — elle procède d'un principe de domaine, distinct de toute logique de valeur : en l'absence de `Record`, toute affirmation sur l'identité d'un record précis — qu'elle soit formulée positivement (`== N`) ou négativement (`!= N`) — est sans objet, exactement comme une comparaison contre `NULL` en logique ternaire SQL n'est jamais vraie, quel que soit l'opérateur (`=` ou `<>`).
+
+**Point d'insertion dans le pipeline** (voir aussi §3.2 et §4.6) : immédiatement après `validate_ast`, avant toute autre passe — la structure `if`/`else`/`endif` est déjà garantie équilibrée à ce stade, indépendamment de la présence d'un `Record`, donc une erreur de structure dans une page sans `Record` est rapportée exactement comme dans n'importe quelle autre page, jamais silencieusement avalée par cette élimination. Pour une unité qui possède un `Record`, cette passe est un no-op strict : le flux atteint `resolve_and_measure` rigoureusement inchangé.
+
+```jinja
+{# navigation.marius, importé aussi bien par une page dynamique que par offline.marius #}
+{% if record.document_id == 1 %}
+  <div class="current">Content 1</div>
+{% else %}
+  <a href="/content/1">Content 1</a>
+{% endif %}
+```
+
+- Page dynamique (`content.core`, `document_id = 1`) : `IfEq` résolu normalement au dump → `<div class="current">Content 1</div>`.
+- `offline.offline` (`STATIC_PAGES`, aucun `Record`) : condition statiquement fausse, éliminée avant `resolve_and_measure` → `<a href="/content/1">Content 1</a>` uniquement, aucune trace de `record` dans le Rust généré.
+
 ### 4.9 Ce qui ne change pas en passant au mode page
 
 - L'AOT absolu : la vue reste résolue au build-time, jamais interprétée au runtime.
@@ -496,7 +569,9 @@ Commun aux deux modes :
 
 Mode fragment :
   {{ entity.field }}
-  {% if entity.bool_field %} … {% endif %}
+  {% if entity.bool_field %} … [{% else %} …] {% endif %}   ← troncature (!= 0)
+  {% if entity.field == N %} … [{% else %} …] {% endif %}   ← égalité entière (I64/I32/I16)
+  {% if entity.field != N %} … [{% else %} …] {% endif %}   ← inégalité entière (I64/I32/I16)
   {% include chemin %}
 
 Mode page :
@@ -509,15 +584,17 @@ Mode page :
 
 Interdit, dans les deux modes :
   {% for … %}
-  {% else %}
-  {% if %} sur un champ non bool
   Imbrication if/if (mode fragment et AST fusionné), et {# #} imbriqué
   join / where / filter / group
   <!-- --> comme commentaire .marius — reste actif, pas neutralisé (§4.5ter) ; utiliser {# #}
+
+Conditions record.* dans une unité sans Record (STATIC_PAGES, §4.8ter) :
+  toujours statiquement fausses (troncature, ==, != indifféremment) — jamais UnknownField
+  pour cette seule raison ; branche else conservée si présente, sinon rien.
 ```
 
 Toute violation est une erreur de compilation (`cargo build` échoue), jamais un comportement silencieux au runtime.
 
 ---
 
-_Document mis à jour le 8 septembre 2026_
+_Document mis à jour le 18 septembre 2026 — extension `{% else %}`/`== N`/`!= N`, mécanisme `eliminate_recordless_conditions` (§4.8ter)._
