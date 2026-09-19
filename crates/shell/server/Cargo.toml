@@ -45,6 +45,13 @@ path = "src/main.rs"
 marius-render = { workspace = true }
 marius-collector = { workspace = true }
 marius-schema = { workspace = true }
+# Requis par crates/shell/server/src/experimental_t2a.rs (T2A, I1, PROVISOIRE) :
+# RouteDescriptor/SegmentDescriptor/SourceSpec/SourceKey/SourceId/
+# SegmentSelection/SegmentFlags/EmissionBackendKind vivent dans ce crate et ne
+# sont jamais réexportés par la façade marius-render (lib.rs) — déjà épinglé
+# en workspace.dependencies (racine), cette ligne ne fait que raccorder une
+# arête déjà définie, pas une nouvelle dépendance externe.
+marius-projection = { workspace = true }
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "net",

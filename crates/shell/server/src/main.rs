@@ -29,7 +29,8 @@
 //! - Le routage HTTP (`ROUTE_TABLE`, `ASSET_ROUTES`) n'alloue aucune ressource structurelle au *runtime* :
 //!   les tables sont précalculées (AOT) et résident physiquement dans le segment `.rodata`.
 
-mod handlers;
+mod experimental_t2a;
+mod handlers; // PROVISOIRE — EXPÉRIMENTAL, voir en-tête du module.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -345,8 +346,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[marius-server] PgListener démarré — backoff 500ms→30s");
 
     // ── Read Path (spec §7, inchangé) ───────────────────────────────────────
-    // Dernier usage de `registry` : déplacé, pas cloné.
-    let app = build_router(ROUTE_TABLE, registry);
+    // registry cloné (pas déplacé directement) : le clone alimente le
+    // montage T2A expérimental ci-dessous, le binding d'origine reste le
+    // dernier usage réel dans build_router().
+    let app = build_router(ROUTE_TABLE, registry.clone());
+
+    // ── T2A expérimental (I1, PROVISOIRE) ───────────────────────────────────
+    // Route isolée, mergée après coup — jamais à l'intérieur de
+    // build_router(). Voir experimental_t2a.rs pour le détail et les
+    // avertissements de portée (SPEC-transport-segmente-t2a.md v2).
+    let app = app.merge(experimental_t2a::mount_experimental(registry));
 
     let bind_addr = std::env::var("MARIUS_BIND").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
@@ -713,5 +722,78 @@ mod tests {
                 .expect("une requête a paniqué pendant le swap concurrent");
         }
         writer.await.expect("la tâche d'écriture a paniqué");
+    }
+
+    // =========================================================================
+    // Tests — T2A expérimental (I1, PROVISOIRE)
+    //
+    // Ne réutilise pas spawn_test_server (celui-ci ne merge pas
+    // experimental_t2a::mount_experimental) — dupliqué localement plutôt que
+    // d'étendre l'infrastructure partagée des tests Jalon 3, pour ne pas
+    // toucher un helper utilisé par des tests sans rapport avec T2A.
+    // =========================================================================
+
+    /// Clé littérale "content_core" : le stub de catalogue expérimental
+    /// (experimental_t2a.rs) la capture en dur — pas de unique_test_key ici,
+    /// contrainte inhérente au caractère PROVISOIRE du stub. Un seul test
+    /// l'exerce : aucune collision de parallélisme cargo test.
+    #[tokio::test]
+    async fn t2a_experimental_i1_single_segment_serves_real_mmap_payload() {
+        const FRAGMENT: &[u8] = b"<p>t2a-experimental-i1</p>";
+        write_fixture_packfile("content_core", &[(1, FRAGMENT)]);
+
+        // route_table minimal : seule la présence de la clé "content_core"
+        // importe ici (pour que cold_start() la mmap) — pattern/id_source de
+        // cette RouteEntry ne sont jamais exercés (route T2A hors ROUTE_TABLE).
+        let route_table: &'static [RouteEntry] = Box::leak(
+            vec![RouteEntry {
+                pattern: "/content/{id}",
+                packfile_key: "content_core",
+                id_source: IdSource::PathParam("id"),
+                content_type: "text/html; charset=utf-8",
+            }]
+            .into_boxed_slice(),
+        );
+
+        let registry =
+            Arc::new(LiveRegistry::cold_start(route_table).expect("cold_start doit réussir"));
+        let app = build_router(route_table, registry.clone())
+            .merge(experimental_t2a::mount_experimental(registry));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind port éphémère");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            let conn_builder = HyperConnectionBuilder::new(TokioExecutor::new());
+            let graceful = GracefulShutdown::new();
+            loop {
+                let (stream, _peer_addr) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(e) => panic!("serveur de test — accept() échoué: {e}"),
+                };
+                let io = TokioIo::new(stream);
+                let hyper_service = TowerToHyperService::new(app.clone());
+                let conn = conn_builder.serve_connection(io, hyper_service);
+                let conn = graceful.watch(conn.into_owned());
+                tokio::spawn(async move {
+                    let _ = conn.await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/__experimental/t2a"))
+            .send()
+            .await
+            .expect("requête T2A expérimentale");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let content_length = resp.content_length().expect("Content-Length présent");
+        let body = resp.bytes().await.expect("corps");
+        assert_eq!(content_length, body.len() as u64);
+        assert_eq!(&body[..], FRAGMENT);
     }
 }

@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-18 20:42:14
+**Généré le:** 2026-09-19 02:39:46
 
 ## Racine du Workspace
 
@@ -126,6 +126,7 @@
 │       │   └── README.md
 │       └── server
 │           ├── src
+│           │   ├── experimental_t2a.rs
 │           │   ├── handlers.rs
 │           │   └── main.rs
 │           ├── tests
@@ -201,7 +202,7 @@
 ├── README.md
 └── biome.jsonc
 
-54 directories, 141 files
+54 directories, 142 files
 ```
 
 ## Documentation du projet

@@ -1490,6 +1490,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "marius-collector",
+ "marius-projection",
  "marius-render",
  "marius-schema",
  "phf 0.14.0",
