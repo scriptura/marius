@@ -52,6 +52,9 @@ marius-schema = { workspace = true }
 # en workspace.dependencies (racine), cette ligne ne fait que raccorder une
 # arête déjà définie, pas une nouvelle dépendance externe.
 marius-projection = { workspace = true }
+# Requis par experimental_t2a.rs (I3, PROVISOIRE) — futures-core, pas
+# futures-util (voir justification dans le Cargo.toml racine).
+futures-core = { workspace = true }
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "net",

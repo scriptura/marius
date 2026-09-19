@@ -71,6 +71,20 @@ reqwest = { version = "0.13", default-features = false }
 # jamais le trait `tower_service::Service` directement (délégué entièrement
 # à `TowerToHyperService`) — à revoir si l'implémentation révèle un besoin
 # réel (cf. rapport de session).
+# Requis par crates/shell/server/src/experimental_t2a.rs (T2A, I3,
+# PROVISOIRE) : Body::from_stream() attend un type S: TryStream — ce trait,
+# avec son impl générique pour tout Stream<Item = Result<T,E>>, est défini
+# directement dans futures-core (pas futures-util : vérifié sur la
+# documentation de futures-core, et confirmé par Cargo.lock — axum-core
+# lui-même ne dépend que de futures-core pour ce même besoin, jamais de
+# futures-util, qui n'apparaît que dans les dépendances du axum de plus
+# haut niveau). futures-core seul (traits purs, sans combinators/sink/io/
+# macros) est donc la dépendance directe minimale ici — pas futures-util.
+# Déjà présent dans le graphe résolu, en version 0.3.32, comme dépendance
+# transitive d'axum-core — cette entrée le rend nommable directement par
+# marius-server, épinglé à la version déjà verrouillée pour éviter toute
+# re-résolution.
+futures-core = "0.3.32"
 hyper = { version = "1", features = ["http1"] }
 hyper-util = { version = "0.1", features = [
     "tokio",

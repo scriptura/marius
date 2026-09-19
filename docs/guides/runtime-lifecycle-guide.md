@@ -1,6 +1,6 @@
 # Guide runtime — du `render()` compilé à la requête HTTP servie
 
-> Complémentaire de `guide-fragment-forge.md` (compilation `.marius` → `render()`).
+> Complémentaire de `fragment-forge-guide.md` (compilation `.marius` → `render()`).
 > Ce document couvre la couche suivante : comment `render()` est effectivement
 > invoqué, sur quel déclencheur, et ce qui invalide un artefact déjà écrit.
 > Périmètre disjoint par construction — voir le renvoi en tête du guide
@@ -226,8 +226,11 @@ Aucun `NOTIFY`, `PgListener`, `Collector`, `Dispatcher` ou
 Cette séparation est structurelle : une page sans donnée SQL dynamique n'a
 pas de raison de traverser le pipeline réactif.
 
-Voir `guide-fragment-forge.md` §4.8 pour le garde-fou empêchant une page
-statique de référencer silencieusement une donnée dynamique.
+Voir `fragment-forge-guide.md` §4.8 et §4.8ter pour la distinction entre
+`{{ record.* }}` (interpolation, échoue toujours avec `UnknownField` sur une
+page statique) et `{% if record.* %}` (conditions, désormais éliminées
+statiquement à faux plutôt que de faire échouer la compilation — voir
+`eliminate_recordless_conditions`).
 
 ## 2. Piège Cargo — `rerun-if-changed` conditionnel
 
@@ -955,7 +958,133 @@ store.bin
 Les deux chemins peuvent être produits par le même outillage de dump, mais
 ils ne constituent pas une chaîne de dépendances de lecture.
 
+## 11. Chemin T2A expérimental (I1→I6) — segment ordonnancé, statut PROVISOIRE
+
+> **Ce qui suit situe un prototype expérimental
+> (`crates/shell/server/src/experimental_t2a.rs`) par rapport au reste de ce
+> guide — ce n'est pas une spécification.** Pour la décision architecturale
+> normative, voir `ADR-011-projections-ordonnancees.md` et
+> `SPECIFICATION-transport-segmente-t2a.md` (v2). Pour l'état
+> d'implémentation détaillé et les écarts restants, voir
+> `handoff-t2a-experimental-integration-i1-i6.md`.
+
+### 11.1 Une frontière distincte, pas un remplacement
+
+Le chemin décrit par les sections 1 à 10 de ce guide (Forge → `render()` →
+`regenerate_and_swap` → `LiveRegistry` → HTTP → `pread()`) reste
+intégralement la doctrine **AOT monolithique** — une page = une source mmap
+contiguë, servie par `read_at`/`spawn_blocking` (`handlers.rs::deliver`).
+Ce chemin n'a pas été modifié par le prototype T2A et reste la référence
+pour toute page qui n'a pas explicitement de besoin de segmentation.
+
+Le prototype ajoute, à titre expérimental, une **seconde famille
+d'émission**, pour des réponses composées de plusieurs segments
+(éventuellement multi-sources) : `SourceKey`/`SourceId`/`SourceSpec`/
+`SegmentDescriptor`/`RouteDescriptor` (`crates/core/projection/src/lib.rs`),
+et `MaterializedSource`/`ResolvedRange`/`resolve_generation`/`resolve_range`
+(`crates/shell/render/src/emission.rs`, non modifié par le prototype). Ces
+deux chemins coexistent ; le second n'a aujourd'hui **aucune route de
+production réelle** — voir §11.7.
+
+### 11.2 Contextualisation de route : résolue en amont, jamais au runtime
+
+Le garde-fou déjà documenté en §1bis (`if`/`else`, `==`/`!=`,
+`eliminate_recordless_conditions` — voir `fragment-forge-guide.md` §2.3bis
+et §4.8ter pour le détail) s'applique ici directement : la
+contextualisation d'une page (menu courant, fil d'Ariane, toute condition
+`record.*`) est intégralement résolue à la compilation, avant même que
+`RouteDescriptor`/`SegmentDescriptor` n'existent. Le runtime T2A ne
+manipule que des `Segment`s déjà tranchés (ADR-011 §3 : « le runtime ne
+connaît que le niveau 3 et 4 »). Il n'interprète jamais `.marius`, ni
+`route.*`, ni `record.*`, ni les nœuds `IfEq`/`IfNeq`/`Else` de l'AST —
+ces derniers n'existent plus une fois `render()` compilé.
+
+### 11.3 `MaterializedSource`, `ResolvedRange` et conservation de génération
+
+`resolve_generation` transforme un `SourceSpec` en `MaterializedSource`
+(aujourd'hui : `MaterializedSource::Mmap { handle: Arc<PackHtmlIndex> }`),
+par injection d'une fonction `fetch` — jamais par appel direct à
+`LiveRegistry` depuis `emission.rs`, qui reste ainsi agnostique du
+transport et du mécanisme de résolution (voir §11.5).
+
+`resolve_range` produit un `ResolvedRange<'a>` — une tranche empruntée
+(`&'a [u8]`), liée à la durée de vie du `MaterializedSource` qui l'a
+produite. Elle n'expose que `ptr()`/`len()`, jamais l'offset d'origine.
+
+La cohérence de génération reste une propriété du `SourceKey`, jamais du
+`SourceId` : plusieurs segments peuvent référencer le même `SourceKey` sans
+provoquer plusieurs résolutions — c'est le rôle de
+`SourceResolutionContext<N>`, qui résout chaque `SourceKey` distinct une
+seule fois par requête.
+
+### 11.4 Rotation `ArcSwap` — la génération vit tant qu'une requête la détient
+
+`LiveRegistry::store()` (§5 de ce guide) ne mute jamais l'instance déjà
+chargée : il republie uniquement le pointeur que verront les *prochaines*
+résolutions (`load()`). Un `Arc<PackHtmlIndex>` déjà cloné par une requête
+en cours reste valide indépendamment de toute rotation survenue après ce
+clonage — propriété standard du comptage de références, pas un mécanisme
+propre à T2A, mais dont le prototype dépend directement pour garantir
+qu'une requête T2A en vol ne peut jamais observer une génération
+partiellement remplacée. Démontré expérimentalement (I4) par un scénario
+où une requête déjà en vol continue de produire l'ancienne génération
+après une rotation, tandis qu'une requête ultérieure observe la nouvelle —
+voir le handoff pour le détail exact du test.
+
+### 11.5 La frontière expérimentale : `marius-render` s'arrête à `ResolvedRange`
+
+`marius-render` (et donc `emission.rs`) ne dépend d'aucun de `axum`/
+`hyper`/`bytes` — vérifié sur son `Cargo.toml`, pas seulement énoncé comme
+discipline. La construction `Bytes`/`Body` n'existe donc pas dans
+`marius-render` : elle est entièrement portée par le module expérimental
+`experimental_t2a.rs`, dans `marius-server`, qui adapte chaque
+`ResolvedRange` en un petit type local (`MmapOwner` : un `Arc` cloné +
+offset/len, jamais une nouvelle primitive Marius) consommé par
+`Bytes::from_owner`, puis assemblé en `Body` avant d'être remis à Hyper.
+
+```text
+ResolvedRange[]                     (dernier IR Marius — emission.rs, marius-render)
+    │
+    ▼  (marius-server uniquement, à partir d'ici)
+MmapOwner (Arc cloné + offset/len)
+    │
+    ▼
+Bytes::from_owner
+    │
+    ▼
+Body (Hyper, boucle Phase 5 — inchangée)
+    │
+    ▼
+HTTP
+```
+
+### 11.6 Ce que Marius garantit, ce qui reste hors de son contrat
+
+**Démontré, à la frontière `marius-render`/`marius-server` :** aucune
+copie du payload mmap n'est introduite par Marius ou par l'adaptateur T2A
+entre `ResolvedRange` et `Bytes` — vérifié par égalité de *pointeur*
+(`owner.as_ref().as_ptr() == range.ptr()`), pas seulement de contenu.
+
+**Hors du contrat Marius, jamais mesuré ici :** les éventuelles copies
+internes que Hyper, Tokio ou le noyau pourraient effectuer en aval (mise
+en file, buffers d'écriture, vectorisation) ; le comportement interne
+exact de `Bytes::from_owner` (allocation de bookkeeping propre à la crate
+`bytes`) ; toute allocation propre à Hyper. Ces couches ne sont ni bornées
+ni auditées par ce prototype — voir SPEC v2 §4/§6.
+
+### 11.7 Statut
+
+`experimental_t2a.rs` est un module **PROVISOIRE**, sans route de
+production réelle, non intégré à `ROUTE_TABLE`/Forge. Son existence ne
+doit pas être lue comme une décision de routage ou de catalogue — 
+seulement comme la démonstration que la frontière transport T2A
+fonctionne réellement, de bout en bout, sur au moins une route réelle
+(`content_core`). Voir le handoff pour la liste des écarts restants avant
+toute intégration Forge réelle.
+
 ---
 
 _Créé le 7 juillet 2026._
 _Mis à jour le 25 août 2026_
+_Mis à jour le 18 septembre 2026 — corrections de nommage (renvois croisés vers `fragment-forge-guide.md`) et précision sur le garde-fou §4.8/§4.8ter (conditions `record.*` désormais éliminées, pas seulement rejetées)._
+_Mis à jour le 19 septembre 2026 — ajout §11 (chemin T2A expérimental I1→I6, statut PROVISOIRE) ; sections 1→10 inchangées, chemin AOT monolithique non affecté._

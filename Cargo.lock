@@ -1487,6 +1487,7 @@ name = "marius-server"
 version = "0.6.0"
 dependencies = [
  "axum",
+ "futures-core",
  "hyper",
  "hyper-util",
  "marius-collector",

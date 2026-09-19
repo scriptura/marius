@@ -725,7 +725,16 @@ mod tests {
     }
 
     // =========================================================================
-    // Tests — T2A expérimental (I1, PROVISOIRE)
+    // Tests — T2A expérimental (K=1 régression I1 + K=3 I3 — PROVISOIRE)
+    //
+    // Un seul test, une seule écriture de fixture ("content_core", ids
+    // 1/2/3), deux requêtes séquentielles vers les deux routes montées par
+    // mount_experimental (/__experimental/t2a/single pour K=1,
+    // /__experimental/t2a pour K=3) — pas deux tests séparés : ils
+    // écriraient tous les deux au même chemin physique (packfile_key
+    // littéral "content_core", capturé en dur dans le module), donc les
+    // faire coexister comme deux #[tokio::test] introduirait une collision
+    // de parallélisme cargo test. Combinés ici, aucune collision possible.
     //
     // Ne réutilise pas spawn_test_server (celui-ci ne merge pas
     // experimental_t2a::mount_experimental) — dupliqué localement plutôt que
@@ -738,13 +747,15 @@ mod tests {
     /// contrainte inhérente au caractère PROVISOIRE du stub. Un seul test
     /// l'exerce : aucune collision de parallélisme cargo test.
     #[tokio::test]
-    async fn t2a_experimental_i1_single_segment_serves_real_mmap_payload() {
-        const FRAGMENT: &[u8] = b"<p>t2a-experimental-i1</p>";
-        write_fixture_packfile("content_core", &[(1, FRAGMENT)]);
+    async fn t2a_experimental_regression_suite() {
+        const FRAG_A: &[u8] = b"<p>t2a-i3-a</p>";
+        const FRAG_B: &[u8] = b"<p>t2a-i3-b</p>";
+        const FRAG_C: &[u8] = b"<p>t2a-i3-c</p>";
+        write_fixture_packfile("content_core", &[(1, FRAG_A), (2, FRAG_B), (3, FRAG_C)]);
 
         // route_table minimal : seule la présence de la clé "content_core"
         // importe ici (pour que cold_start() la mmap) — pattern/id_source de
-        // cette RouteEntry ne sont jamais exercés (route T2A hors ROUTE_TABLE).
+        // cette RouteEntry ne sont jamais exercés (routes T2A hors ROUTE_TABLE).
         let route_table: &'static [RouteEntry] = Box::leak(
             vec![RouteEntry {
                 pattern: "/content/{id}",
@@ -757,6 +768,9 @@ mod tests {
 
         let registry =
             Arc::new(LiveRegistry::cold_start(route_table).expect("cold_start doit réussir"));
+        // Clone conservé pour I4 (rotation) — registry lui-même est déplacé
+        // dans mount_experimental() juste après.
+        let registry_for_rotation = Arc::clone(&registry);
         let app = build_router(route_table, registry.clone())
             .merge(experimental_t2a::mount_experimental(registry));
 
@@ -784,16 +798,128 @@ mod tests {
         });
 
         let client = reqwest::Client::new();
-        let resp = client
+
+        // ── T6 — chemin monolithique inchangé (régression, clôture I6) ───
+        // Le même `app` merge désormais le routage historique (ROUTE_TABLE
+        // → serve_route → deliver, handlers.rs — non modifié par I1→I5) et
+        // les routes T2A expérimentales. Preuve que ce merge ne dégrade pas
+        // le chemin historique : une requête sur la route ROUTE_TABLE
+        // réelle ("/content/{id}", packfile_key "content_core") doit
+        // encore renvoyer exactement le fragment attendu, via le chemin
+        // read_at/spawn_blocking de deliver() — jamais via T2A.
+        let resp_monolithic = client
+            .get(format!("http://{addr}/content/1"))
+            .send()
+            .await
+            .expect("requête chemin monolithique (régression T6)");
+        assert_eq!(resp_monolithic.status(), reqwest::StatusCode::OK);
+        let monolithic_content_length = resp_monolithic
+            .content_length()
+            .expect("Content-Length présent (monolithique)");
+        let monolithic_body = resp_monolithic.bytes().await.expect("corps (monolithique)");
+        assert_eq!(monolithic_content_length, FRAG_A.len() as u64);
+        assert_eq!(&monolithic_body[..], FRAG_A);
+
+        // ── K=1 — régression explicite du comportement d'I1 ─────────────
+        let resp_single = client
+            .get(format!("http://{addr}/__experimental/t2a/single"))
+            .send()
+            .await
+            .expect("requête T2A expérimentale (single)");
+
+        assert_eq!(resp_single.status(), reqwest::StatusCode::OK);
+        let single_content_length = resp_single
+            .content_length()
+            .expect("Content-Length présent (single)");
+        let single_body = resp_single.bytes().await.expect("corps (single)");
+        assert_eq!(single_content_length, FRAG_A.len() as u64);
+        assert_eq!(&single_body[..], FRAG_A);
+
+        // ── K=3 — I3 : ordre (T2) + Content-Length (T4) ─────────────────
+        let resp_multi = client
             .get(format!("http://{addr}/__experimental/t2a"))
             .send()
             .await
-            .expect("requête T2A expérimentale");
+            .expect("requête T2A expérimentale (multi)");
 
-        assert_eq!(resp.status(), reqwest::StatusCode::OK);
-        let content_length = resp.content_length().expect("Content-Length présent");
-        let body = resp.bytes().await.expect("corps");
-        assert_eq!(content_length, body.len() as u64);
-        assert_eq!(&body[..], FRAGMENT);
+        assert_eq!(resp_multi.status(), reqwest::StatusCode::OK);
+        let multi_content_length = resp_multi
+            .content_length()
+            .expect("Content-Length présent (multi)");
+        let multi_body = resp_multi.bytes().await.expect("corps (multi)");
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(FRAG_A);
+        expected.extend_from_slice(FRAG_B);
+        expected.extend_from_slice(FRAG_C);
+
+        assert_eq!(multi_content_length, expected.len() as u64);
+        assert_eq!(&multi_body[..], &expected[..]);
+
+        // ── I4 — rotation ArcSwap ────────────────────────────────────────
+        //
+        // Invariant démontré : une requête déjà en vol conserve la
+        // génération (Arc<PackHtmlIndex>) qu'elle a résolue, même après
+        // que le registre en publie une nouvelle ; une requête ultérieure
+        // voit, elle, la nouvelle génération.
+        //
+        // `send()` (reqwest) ne résout qu'une fois le statut et les
+        // en-têtes reçus — jamais le corps. Or resolve_route_to_response()
+        // (experimental_t2a.rs) est entièrement synchrone : Content-Length
+        // n'est calculé qu'après que tous les Bytes::from_owner(MmapOwner)
+        // de la route ont été construits, chacun détenant déjà son propre
+        // Arc::clone(handle). Donc : au moment où `send()` retourne
+        // ci-dessous, le serveur a nécessairement déjà cloné son
+        // Arc<PackHtmlIndex> de la génération courante — avant toute
+        // rotation ultérieure. Aucun hook interne, aucune primitive de
+        // synchronisation ajoutée : cet ordre découle de la sémantique
+        // HTTP normale (en-têtes avant corps) combinée à l'absence de
+        // point de suspension dans le handler.
+        let resp_in_flight = client
+            .get(format!("http://{addr}/__experimental/t2a/single"))
+            .send()
+            .await
+            .expect("requête T2A (rotation) — en-têtes reçus, corps pas encore lu");
+        assert_eq!(resp_in_flight.status(), reqwest::StatusCode::OK);
+
+        // Rotation : nouveau fichier sur disque pour la même clé
+        // "content_core", nouvelle génération PackHtmlIndex ouverte dessus,
+        // publiée via registry.store(). Ne touche jamais l'Arc déjà cloné
+        // par la requête ci-dessus (MaterializedSource::Mmap/MmapOwner,
+        // internes à experimental_t2a.rs) : ArcSwap::store() ne fait que
+        // remplacer le pointeur que *verront* les *prochaines* résolutions
+        // — il ne mute jamais l'instance déjà chargée.
+        const FRAG_ROTATED: &[u8] = b"<p>t2a-i4-rotated</p>";
+        write_fixture_packfile("content_core", &[(1, FRAG_ROTATED)]);
+        let rotated_index = Arc::new(
+            marius_render::PackHtmlIndex::open(&marius_render::packfile_path_for("content_core"))
+                .expect("ouverture de la génération v2 (rotation)"),
+        );
+        registry_for_rotation.store("content_core", rotated_index);
+
+        // Le corps de la requête en vol — lu APRÈS la rotation — reste
+        // celui de la génération résolue avant celle-ci (FRAG_A, jamais
+        // FRAG_ROTATED) : le mmap de la génération précédente reste valide
+        // tant que le MmapOwner qui le détient (via son Arc cloné) n'est
+        // pas droppé, indépendamment de ce que republie le registre entre
+        // temps.
+        let in_flight_body = resp_in_flight
+            .bytes()
+            .await
+            .expect("corps de la requête en vol, après rotation");
+        assert_eq!(&in_flight_body[..], FRAG_A);
+
+        // Une requête ultérieure, elle, voit bien la nouvelle génération.
+        let resp_after_rotation = client
+            .get(format!("http://{addr}/__experimental/t2a/single"))
+            .send()
+            .await
+            .expect("requête T2A après rotation");
+        assert_eq!(resp_after_rotation.status(), reqwest::StatusCode::OK);
+        let after_rotation_body = resp_after_rotation
+            .bytes()
+            .await
+            .expect("corps après rotation");
+        assert_eq!(&after_rotation_body[..], FRAG_ROTATED);
     }
 }
