@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-20 04:46:42
+**Généré le:** 2026-09-20 06:20:47
 
 ## Racine du Workspace
 
@@ -237,19 +237,7 @@
 │   │   └── runtime-data-flow-invariants.md
 │   ├── monorepo.md
 │   └── pipeline-mode-page-architecture.md
-├── benchs
-│   ├── benchs-2026.08.03.md
-│   ├── benchs-2026.08.06.md
-│   ├── benchs-2026.09.04.md
-│   └── benchs-2026.09.12.md
-├── contrats
-│   ├── CONTRAT-implementation-multi-slot-varlena.md
-│   ├── CONTRAT-implementation-projection-segmentee.md
-│   ├── CONTRAT-implementation-varlena-raw.md
-│   └── CONTRAT-marius-one-page-extension.md
-├── generate
-│   └── tree.md
-├── graveyard
+├── archived
 │   ├── ADDENDUM-modules-placeholder-static-pages.md
 │   ├── HANDOFF-commentaires-marius.md
 │   ├── HANDOFF-js-deps-capacites-frontend-v2.md
@@ -267,6 +255,18 @@
 │   ├── manifest-reactive-projection-OLD.md
 │   ├── static-usage-driven-selection-pipeline-v0_2_1.md
 │   └── static-usage-driven-selection-pipeline-v3.md
+├── benchs
+│   ├── benchs-2026.08.03.md
+│   ├── benchs-2026.08.06.md
+│   ├── benchs-2026.09.04.md
+│   └── benchs-2026.09.12.md
+├── contrats
+│   ├── CONTRAT-implementation-multi-slot-varlena.md
+│   ├── CONTRAT-implementation-projection-segmentee.md
+│   ├── CONTRAT-implementation-varlena-raw.md
+│   └── CONTRAT-marius-one-page-extension.md
+├── generate
+│   └── tree.md
 ├── guides
 │   ├── fragment-forge-guide.md
 │   ├── meta-tooling-guide.md
