@@ -12,7 +12,7 @@
 | **Partie 1** | Mode fragment : `{{ }}`, `{% if %}`, `{% include %}` | Implémenté — pipeline câblé dans `crates/core/schema/build/template/dynamic.rs` |
 | **Partie 2** | Mode page : `{% extends %}` (chaîne N-aire), `{% block %}`, `{% import %}`, `{% static %}`, `{% asset %}`, `{% script %}` | Implémenté — pipeline câblé dans `crates/core/schema/build/template/page.rs` et `static_page.rs` |
 
-**Hors périmètre de ce document** : ce guide couvre la compilation `.marius` → `render()`/HTML statique. Il ne couvre pas ce qui se passe *après* — comment `render()` est invoqué, à quelle fréquence, ni ce qui invalide le HTML déjà servi. Un `.marius` correct est une condition nécessaire, jamais suffisante, pour qu'un changement atteigne le navigateur (voir `runtime-lifecycle-guide.md`).
+**Hors périmètre de ce document** : ce guide couvre la compilation `.marius` → `render()`/HTML statique. Il ne couvre pas ce qui se passe *après* — comment `render()` est invoqué, à quelle fréquence, ni ce qui invalide le HTML déjà servi, ni comment un artefact déjà produit est ensuite transporté au runtime (chemin AOT monolithique ou chemin T2A expérimental segmenté, statut PROVISOIRE). Un `.marius` correct est une condition nécessaire, jamais suffisante, pour qu'un changement atteigne le navigateur (voir `runtime-lifecycle-guide.md`, en particulier §11 pour le chemin T2A — qui ne fait jamais que transporter des `Segment`s déjà tranchés par ce que ce document décrit ci-dessous, en particulier §4.8ter).
 
 ---
 
@@ -598,3 +598,4 @@ Toute violation est une erreur de compilation (`cargo build` échoue), jamais un
 ---
 
 _Document mis à jour le 18 septembre 2026 — extension `{% else %}`/`== N`/`!= N`, mécanisme `eliminate_recordless_conditions` (§4.8ter)._
+_Mis à jour le 19 septembre 2026 — renvoi croisé ajouté (§0/§1) vers `runtime-lifecycle-guide.md` §11 (chemin T2A expérimental, statut PROVISOIRE) ; aucun contenu de compilation modifié, ce guide reste exact et complet tel quel pour tout ce qui concerne `.marius`/`render()`._
