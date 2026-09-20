@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-19 02:39:46
+**Généré le:** 2026-09-20 04:46:42
 
 ## Racine du Workspace
 
@@ -254,8 +254,15 @@
 │   ├── HANDOFF-commentaires-marius.md
 │   ├── HANDOFF-js-deps-capacites-frontend-v2.md
 │   ├── HANDOFF-mode-page-blocs-imbriques.md
+│   ├── HANDOFF-scripts-architecture-reprise.md
+│   ├── Handoff-introduction of-an-AOT-route-representation-context.md
 │   ├── analyse-emission-plan.md
+│   ├── confrontation-code-sequencement-phase0A-5.md
 │   ├── enquete.md
+│   ├── handoff-cartographie-hyper(ADR-011).md
+│   ├── handoff-checkpoint-segment-resolution.md
+│   ├── handoff-implementation-t2a.md
+│   ├── handoff-t2a-experimental-integration-i1-i6.md
 │   ├── logical-data-model.pgsql
 │   ├── manifest-reactive-projection-OLD.md
 │   ├── static-usage-driven-selection-pipeline-v0_2_1.md
@@ -270,14 +277,9 @@
 │   ├── styles-mcss-guide.md
 │   └── terminal-memo-cmd.md
 ├── handoffs
-│   ├── HANDOFF-scripts-architecture-reprise.md
-│   ├── Handoff-introduction of-an-AOT-route-representation-context.md
 │   ├── SPECIFICATION-transport-segmente-t2a.md
 │   ├── SUIVI-js-deps-points-en-attente.md
-│   ├── confrontation-code-sequencement-phase0A-5.md
-│   ├── handoff-cartographie-hyper(ADR-011).md
-│   ├── handoff-checkpoint-segment-resolution.md
-│   ├── handoff-implementation-t2a.md
+│   ├── handoff-forge-t2a-production-integration.md
 │   ├── note-post-phase-5.3-generate-main.md
 │   └── risks.md
 ├── manifestos
@@ -327,6 +329,6 @@
     ├── provisioning-projection-specification.md
     └── specification-AOT-boundary-volatile-and-emission-plan-contract.md
 
-17 directories, 101 files
+17 directories, 103 files
 ```
 
