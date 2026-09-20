@@ -6,19 +6,19 @@
 
 use std::sync::Arc;
 
-use marius_render::{IdSource, LiveRegistry, RouteEntry, regenerate_and_swap};
-use marius_schema::{CONTENT_CORE_TOTAL_CAP, ContentCoreProjection};
+use marius_render::{LiveRegistry, RouteEntry, regenerate_and_swap, route_entry_from_spec};
+use marius_schema::{
+    CONTENT_CORE_ARTIFACT, CONTENT_CORE_TOTAL_CAP, CONTENT_DOCUMENT_ROUTE, ContentCoreProjection,
+};
 
-/// Topologie minimale locale à ce binaire — un seul packfile_key. Ne pas
-/// réutiliser ROUTE_TABLE de marius-server : couplage inverse crate render
-/// → server proscrit (Document 3 §7, séparation Shell/Forge déjà actée
-/// pour build.rs, même principe ici pour les binaires).
-static DUMP_ROUTE_TABLE: &[RouteEntry] = &[RouteEntry {
-    pattern: "/content/{id}",
-    packfile_key: "content_core",
-    id_source: IdSource::PathParam("id"),
-    content_type: "text/html; charset=utf-8",
-}];
+/// Topologie minimale locale à ce binaire — la seule route de contenu, DÉRIVÉE
+/// de la déclaration générée par le build de marius-schema (publication.toml),
+/// jamais redéclarée ici. Ne pas réutiliser ROUTE_TABLE de marius-server :
+/// couplage inverse crate render → server proscrit (Document 3 §7, séparation
+/// Shell/Forge déjà actée pour build.rs, même principe ici pour les
+/// binaires). La déclaration, elle, vit en amont des deux crates
+/// (marius-schema), donc reste accessible sans ce couplage.
+static DUMP_ROUTE_TABLE: &[RouteEntry] = &[route_entry_from_spec(&CONTENT_DOCUMENT_ROUTE)];
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &pool,
         &all_ids,
         CONTENT_CORE_TOTAL_CAP,
-        "content_core",
+        CONTENT_CORE_ARTIFACT.as_str(),
         &registry,
         &io_semaphore,
     )

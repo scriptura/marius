@@ -1263,6 +1263,12 @@ pub const fn align8(x: u64) -> u64 {
 mod store_registry;
 pub use store_registry::StoreRegistry;
 
+// Vocabulaire neutre de publication/exposition AOT (ArtifactKey, ArtifactSpec,
+// RouteSpec…) — voir publication.rs. Instances générées par le build de
+// marius-schema, jamais écrites à la main.
+pub mod publication;
+pub use publication::{ArtifactKey, ArtifactSpec, RouteSelection, RouteSpec};
+
 pub mod packfile_reader {
     use std::fs::File;
     use std::marker::PhantomData;

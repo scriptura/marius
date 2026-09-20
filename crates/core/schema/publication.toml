@@ -1,0 +1,52 @@
+# crates/core/schema/publication.toml
+#
+# Manifeste AOT de publication/exposition — lu par build/main.rs (module
+# build/publication.rs), jamais au runtime.
+#
+# Deux relations distinctes, jointes par la clé d'artefact :
+#
+#   [[artifact]]  artefact → composant producteur     (publication)
+#   [[route]]     route    → artefact + sélection     (exposition)
+#
+# Ce fichier est la SEULE définition de ces relations. Les représentations
+# propres à chaque crate en sont dérivées :
+#
+#   RouteSpec (marius-projection)
+#     ├─ RouteEntry      (marius-render, dérivation pure — représentation serveur)
+#     └─ RouteDescriptor (marius-projection, généré ici — représentation T2A)
+#
+# Rien ici n'est un type de render/server/Axum/Hyper : la politique de
+# parsing HTTP et le code 400 restent côté serveur.
+#
+# ── [[artifact]] ────────────────────────────────────────────────────────────
+#   key        identité logique de l'artefact publiable ([a-z][a-z0-9_]*).
+#              Nom du pack servi (artifacts/<key>.bin) et clé de résolution
+#              runtime. N'est PAS component_id.
+#   component  (optionnel) composant Forge producteur, "schema.table".
+#              Absent = artefact sans composant. Doit exister dans
+#              meta.containment_intent.
+#
+# La position d'un artefact dans ce fichier est son SourceKey (handle
+# compact de catalogue) : non persistant, pouvant changer entre deux builds.
+#
+# ── [[route]] ───────────────────────────────────────────────────────────────
+#   name       identifiant de la route ([a-z][a-z0-9_]*) — nom des constantes
+#              générées (<NAME>_ROUTE).
+#   pattern    motif d'URL, syntaxe {param}.
+#   artifact   clé de l'artefact servi.
+#   parameter  nom du paramètre HTTP : DOIT être l'unique {param} du motif.
+#   selection  "primary_key" : la valeur du paramètre est la clé primaire du
+#              composant producteur de l'artefact. La colonne SQL de cette PK
+#              est résolue par le build (elle n'a aucun rapport de nom avec
+#              `parameter`). Exige un artefact avec composant, à PK simple.
+
+[[artifact]]
+key = "content_core"
+component = "content.core"
+
+[[route]]
+name = "content_document"
+pattern = "/content/{id}"
+artifact = "content_core"
+parameter = "id"
+selection = "primary_key"

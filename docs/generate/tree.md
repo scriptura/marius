@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-20 06:20:47
+**Généré le:** 2026-09-20 20:27:41
 
 ## Racine du Workspace
 
@@ -18,12 +18,14 @@
 │   │   ├── projection
 │   │   │   ├── src
 │   │   │   │   ├── lib.rs
+│   │   │   │   ├── publication.rs
 │   │   │   │   └── store_registry.rs
 │   │   │   ├── Cargo.toml
 │   │   │   └── README.md
 │   │   └── schema
 │   │       ├── src
-│   │       │   └── lib.rs
+│   │       │   ├── lib.rs
+│   │       │   └── publication_tests.rs
 │   │       ├── templates
 │   │       │   ├── commerce
 │   │       │   │   └── product_core.marius
@@ -36,7 +38,8 @@
 │   │       │   ├── head.marius
 │   │       │   └── navigation.marius
 │   │       ├── Cargo.toml
-│   │       └── README.md
+│   │       ├── README.md
+│   │       └── publication.toml
 │   ├── forge
 │   │   ├── bridge-forge
 │   │   │   ├── src
@@ -120,6 +123,7 @@
 │       │   │   ├── packfile_builder.rs
 │       │   │   ├── regenerate.rs
 │       │   │   ├── registry.rs
+│       │   │   ├── route_derive.rs
 │       │   │   ├── store_provisioning.rs
 │       │   │   └── sweep.rs
 │       │   ├── Cargo.toml
@@ -202,7 +206,7 @@
 ├── README.md
 └── biome.jsonc
 
-54 directories, 142 files
+54 directories, 146 files
 ```
 
 ## Documentation du projet

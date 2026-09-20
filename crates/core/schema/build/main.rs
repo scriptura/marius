@@ -10,6 +10,12 @@
 //!    génération du corps `render()` — toute l'I/O disque vit ici.  
 //!    `db-forge` (`write_projection_stub`) reste un générateur pur : il reçoit
 //!    le résultat déjà calculé (`Option<(&str, &TemplateMetrics)>`).
+//! 4. **Publication/exposition AOT** : lecture de `publication.toml`
+//!    (artefacts, routes), validation croisée avec les composants et leurs PK
+//!    résolues ci-dessus, génération de `ARTIFACTS`/`ROUTES`/
+//!    `ROUTE_DESCRIPTORS` dans `generated_schema.rs` — seule définition de
+//!    ces relations, dont `marius-render`/`marius-server` dérivent leurs
+//!    représentations (`RouteEntry`…).
 //!
 //! ## Prérequis
 //!
@@ -25,12 +31,14 @@
 //! - [`modules_lowering`] : lowering des modules JS par template.
 //! - [`asset_lookup`] : résolution diagnostique `{% asset %}`.
 //! - [`template`] : pipeline Voie B (`.marius` → `render()`).
+//! - [`publication`] : manifeste de publication/exposition (`publication.toml`).
 
 mod asset_lookup;
 mod capabilities;
 mod manifest;
 mod markers;
 mod modules_lowering;
+mod publication;
 mod template;
 
 use std::path::PathBuf;
@@ -45,6 +53,7 @@ use marius_fragment_forge::VarlenField;
 
 use crate::capabilities::validate_capabilities;
 use crate::manifest::{build_dir, load_asset_manifest};
+use crate::publication::{ComponentFacts, generate_publication_code, load_publication};
 use crate::template::common::GENERATED_HEADER;
 use crate::template::dynamic::resolve_template;
 use crate::template::static_page::{STATIC_PAGES, resolve_static_page};
@@ -110,6 +119,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // inchangé depuis avant l'introduction de `LoadedAssets`.
     let assets = loaded.assets;
 
+    // Manifeste de publication/exposition (publication.toml) — parsé et validé
+    // structurellement AVANT toute connexion Postgres, même discipline que
+    // load_asset_manifest/validate_capabilities ci-dessus : une erreur de
+    // syntaxe ou d'incohérence interne fait échouer le build sur ce point
+    // précis. La validation croisée avec les composants (existence, PK) ne
+    // peut avoir lieu qu'après la boucle ci-dessous, une fois les PK résolues.
+    let publication = load_publication(&manifest_dir).unwrap_or_else(|()| {
+        // cargo:error déjà émis par load_publication — arrêt immédiat.
+        std::process::exit(1);
+    });
+    let mut component_facts: Vec<ComponentFacts> = Vec::new();
+
     // ── Pages sans donnée dynamique (STATIC_PAGES) ─────────────────────────
     //
     // Volontairement AVANT l'ouverture du pool Postgres ci-dessous : aucune
@@ -174,6 +195,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             PrimaryKey::Composite => None,
         };
+
+        // Faits pour la validation croisée du manifeste de publication : la PK
+        // est celle déjà introspectée ci-dessus (la même que celle dont
+        // write_projection_stub tire record_id()), jamais relue ailleurs.
+        component_facts.push(ComponentFacts {
+            component_id: format!("{}.{}", comp.schema, comp.table),
+            pk_column: match &pk {
+                PrimaryKey::Single(col) => Some(col.to_string()),
+                PrimaryKey::Composite => None,
+            },
+        });
 
         // Assemblage multi-slot (CONTRAT-implementation-multi-slot-varlena.md,
         // Étape 4) : comp.varlena_join est désormais Vec<VarlenJoin> (registry.rs,
@@ -254,6 +286,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|(body, metrics)| (body.as_str(), metrics)),
         );
     }
+
+    // ── Publication/exposition AOT ─────────────────────────────────────────
+    // Validation croisée (composants existants, PK simple pour la sélection
+    // `primary_key`) puis génération. Toujours après la boucle : c'est elle
+    // qui a résolu les PK. Jamais de code généré depuis un manifeste
+    // incohérent (generate_publication_code revalide).
+    let publication_code = generate_publication_code(&publication, &component_facts)
+        .unwrap_or_else(|errors| {
+            for e in errors {
+                println!("cargo:error=DB-Forge [publication] : {e}");
+            }
+            std::process::exit(1);
+        });
+    output.push_str(&publication_code);
 
     std::fs::write(&out_path, &output)?;
     eprintln!("DB-Forge : généré → {}", out_path.display());

@@ -86,6 +86,20 @@ pub mod collector {
 // Ce fichier est recréé à chaque `cargo build` si DATABASE_URL a changé.
 include!(concat!(env!("OUT_DIR"), "/generated_schema.rs"));
 
+// Tests de la publication AOT générée (publication.toml → generated_schema.rs).
+#[cfg(test)]
+mod publication_tests;
+
+// Logique pure de build/publication.rs (parsing, validation, génération du
+// manifeste de publication), montée ici sous cfg(test) pour être exécutée par
+// `cargo test` : un module de script de build n'a, sinon, aucun runner de
+// test. Le fichier est autonome (aucun `crate::`), donc compile à l'identique
+// dans les deux contextes.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../build/publication.rs"]
+mod publication_build;
+
 #[cfg(test)]
 mod tests {
     use super::*;

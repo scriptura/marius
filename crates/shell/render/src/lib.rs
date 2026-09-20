@@ -15,6 +15,7 @@ pub mod pack_html_index;
 pub mod packfile_builder;
 pub mod regenerate;
 pub mod registry;
+pub mod route_derive;
 pub mod store_provisioning;
 
 // Ré-export pour la façade
@@ -76,6 +77,13 @@ pub use store_provisioning::ensure_store_provisioned;
 // que la frontière réseau (marius-server) doit construire sa ROUTE_TABLE et
 // résoudre les chemins de packfiles avec les mêmes types que cold_start().
 pub use registry::{IdSource, LiveRegistry, RouteEntry, packfile_path_for};
+
+// route_entry_from_spec — dérivation const de la représentation serveur
+// (RouteEntry) depuis la RouteSpec neutre générée par le build de
+// marius-schema (publication.toml). Même convention que ci-dessus (fonction
+// principale d'un module, ré-exportée à plat) : marius-server et marius-dump
+// l'appellent via `marius_render::route_entry_from_spec`.
+pub use route_derive::route_entry_from_spec;
 
 // PackHtmlIndex — non ré-exporté avant cette session ("pas étendu, hors
 // périmètre de la Phase 2"). Phase 3 le requiert : LiveRegistry::load()

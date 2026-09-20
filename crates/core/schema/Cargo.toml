@@ -22,6 +22,8 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["sync"] }
+# build/publication.rs (monté sous cfg(test) dans lib.rs) parse le manifeste via `toml`.
+toml = { workspace = true }
 
 [build-dependencies]
 marius-db-forge = { workspace = true }
