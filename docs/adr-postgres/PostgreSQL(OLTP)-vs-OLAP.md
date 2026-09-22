@@ -1,4 +1,4 @@
-# Document d'Architecture : Rejet du Moteur OLAP au Profit de PostgreSQL pour le Modèle ECS/DOD
+# Document d'Architecture&nbsp;: Rejet du Moteur OLAP au Profit de PostgreSQL pour le Modèle ECS/DOD
 
 Le présent document détaille l'argumentaire technique justifiant le maintien de PostgreSQL (moteur orienté transactionnel - OLTP) face aux solutions orientées colonnes (OLAP, type DuckDB ou ClickHouse) pour l'implémentation de la topologie ECS (Entity Component System) et du pipeline de projection AOT (Ahead-of-Time).
 
