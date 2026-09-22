@@ -9,11 +9,18 @@
 > **Créé le 7 juillet 2026**, à la suite d'une session de débogage complète du
 > pipeline `.marius` → HTTP.
 >
-> **Mis à jour après l'introduction du pipeline de fusion incrémentale
-> CoW/Sweep Merge (Phases 4.2/4.3)** : le `store.bin` n'est pas une source de
-> lecture de la régénération HTML. Le delta est récupéré directement depuis
-> PostgreSQL via `Projection::fetch_batch`, rendu en mémoire, puis fusionné
-> avec la génération HTML actuellement servie.
+> **Corrigé le 21 septembre 2026 — pipeline réactif à deux étages.** Une version
+> antérieure de ce guide (mise à jour des Phases 4.2/4.3) affirmait que le
+> `store.bin` n'était pas une source de lecture de la régénération HTML et que
+> `P::fetch_batch` interrogeait PostgreSQL. **Ce n'est plus exact** depuis
+> l'introduction de `ingest_and_swap` (Étage 1) : le `fetch_batch` généré lit le
+> `store.bin` (mmap, via `StoreRegistry`) et n'utilise jamais son paramètre
+> `pool` ; la seule lecture SQL d'un tick est `P::fetch_from_pg`, appelée par
+> l'Étage 1 (et par `marius-dump`). Les sections concernées (schéma global, §0,
+> §1, §3, §4, §4bis, §5bis, §6, §7, §8, §9, §10, §11) ont été corrigées en
+> conséquence. Le format du pack HTML et la fusion incrémentale (`merge_sweep`)
+> sont inchangés.
+
 
 ## Schéma global — deux pipelines de nature différente et leur jonction runtime
 
@@ -22,64 +29,75 @@ Il faut distinguer deux temporalités.
 Le premier graphe est un graphe **AOT/build-time** : il transforme les
 templates `.marius` en code Rust compilé contenant les fonctions `render()`.
 
-Le second est le graphe **réactif/runtime** : une mutation SQL produit un
-événement `NOTIFY`, qui déclenche la récupération du delta depuis PostgreSQL,
-son rendu, sa fusion avec le pack HTML courant et enfin le swap atomique du
-registre de lecture.
+Le second est le graphe **réactif/runtime**, organisé en **deux étages** : une
+mutation SQL produit un événement `NOTIFY` ; l'Étage 1 (`ingest_and_swap`)
+récupère le delta depuis PostgreSQL et met à jour le `store.bin` (Copy-on-Write) ;
+l'Étage 2 (`regenerate_and_swap`) lit ce `store.bin`, rend les enregistrements du
+delta, les fusionne avec le pack HTML courant, puis swap atomiquement le registre
+de lecture.
 
 ```
               BUILD TIME (cargo build)                     RUNTIME (processus vivant)
               =======================                      ==========================
 
-        templates/*.marius                                      UPDATE / INSERT / DELETE (SQL)
-                │                                                          │
-                ▼                                                          ▼
-          fragment-forge                                          trigger PostgreSQL
-                │                                                          │
-                ▼                                                          ▼
-        render() généré (source)                                       pg_notify
-                │                                                          │
-                ▼                                                          ▼
-           cargo build                                               PgListener
-                │                                                          │
-                ▼                                                          ▼
-         ┌─────────────┐                                            Collector::insert(id)
-         │   binaire   │                                                  │
-         └─────────────┘                                                  ▼
-                │                                                  Collector::flush()
-                │                                                          │
-                │                                                          ▼
-                │                                                    Dispatcher
-                │                                                          │
-                │                                                          ▼
-                │                                                P::fetch_batch(pool, ids)
-                │                                                          │
-                │                                                          ▼
-                │                                                BatchRenderer::render_batch
-                │                                                          │
-                │                                                          ▼
-                │                                                   DeltaBatch en mémoire
-                │                                                          │
-                └────────────── render() compilé ◄─────────────────────────┤
-                                                                           ▼
-                                                              merge_sweep(old_pack, delta)
-                                                                           │
-                                                                           ▼
-                                                               nouveau pack HTML (.bin)
-                                                                           │
-                                                                           ▼
-                                                                    rename atomique
-                                                                           │
-                                                                           ▼
-                                                               LiveRegistry::store()
-                                                                           │
-                                                                           ▼
-                                                                    HTTP → pread()
+        templates/*.marius                        UPDATE / INSERT / DELETE (SQL)
+                │                                             │
+                ▼                                             ▼
+          fragment-forge                              trigger PostgreSQL
+                │                                             │
+                ▼                                             ▼
+        render() généré (source)                          pg_notify
+                │                                             │
+                ▼                                             ▼
+           cargo build                                    PgListener
+                │                                             │
+                ▼                                             ▼
+         ┌─────────────┐                             Collector::insert(id)
+         │   binaire   │                                      │
+         └─────────────┘                                      ▼
+                │                                    Collector::flush()
+                │                                             │
+                │                                             ▼
+                │                                     Dispatcher (un tick)
+                │                                             │
+                │                                             ▼
+                │                                  ÉTAGE 1 — ingest_and_swap
+                │                                    P::fetch_from_pg(pool, ids)      ← seule lecture SQL du tick
+                │                                    merge_store(ancien store, delta, supprimés)
+                │                                    store.bin.tmp → fsync → validation → rename
+                │                                    StoreRegistry::swap()
+                │                                             │
+                │                                             ▼
+                │                                  ÉTAGE 2 — regenerate_and_swap
+                │                                    P::fetch_batch(_pool, ids)       ← lecture mmap du store.bin frais
+                │                                             │
+                │                                             ▼
+                │                                    BatchRenderer::render_batch
+                │                                             │
+                └────────────── render() compilé ◄┤
+                                                              ▼
+                                                     DeltaBatch en mémoire
+                                                              │
+                                                              ▼
+                                                     merge_sweep(ancien pack, delta)
+                                                              │
+                                                              ▼
+                                                     nouveau pack HTML ({key}.bin)
+                                                              │
+                                                              ▼
+                                                        rename atomique
+                                                              │
+                                                              ▼
+                                                     LiveRegistry::store()
+                                                              │
+                                                              ▼
+                                                        HTTP → pread()
 ```
 
 **Point essentiel :** le `render()` généré par `fragment-forge` n'est pas un
 producteur de packfile au moment du build. Il est une partie du code du
-binaire runtime, puis est invoqué lorsque le chemin réactif traite un delta.
+binaire runtime, puis est invoqué lorsque le chemin réactif traite un delta
+(Étage 2).
 
 Inversement, le graphe runtime ne « recompile » jamais `render()`.
 
@@ -90,9 +108,9 @@ Ainsi :
 * cette recompilation ne régénère aucun pack HTML existant ;
 * une fois le nouveau binaire lancé, une régénération HTML doit encore être
   déclenchée par le mécanisme runtime approprié ;
-* cette régénération récupère les données concernées depuis PostgreSQL,
-  exécute le `render()` compilé, puis fusionne le résultat avec le pack
-  actuellement servi.
+* cette régénération lit les enregistrements du delta dans le `store.bin` (mis à
+  jour depuis PostgreSQL à l'Étage 1), exécute le `render()` compilé, puis
+  fusionne le résultat avec le pack actuellement servi.
 
 La jonction entre les deux graphes n'est donc pas un fichier intermédiaire :
 **c'est le code `render()` compilé qui est embarqué dans le processus runtime.**
@@ -112,24 +130,30 @@ cycles d'invalidation.
 
 Une confusion particulièrement importante doit être évitée :
 
-> **`{table}_store.bin` et `{table}.bin` ne forment pas une chaîne de lecture
-> `store → pack`.**
+> **`{table}_store.bin` et `{table}.bin` sont deux artefacts distincts, mais ils
+> forment bien une chaîne dans le chemin réactif normal :**
+> `PostgreSQL → (Étage 1) store.bin → (Étage 2) pack HTML`.
 
-Le premier est un artefact de transport/dump des données brutes. Le second
-est le pack HTML effectivement servi. Le chemin normal de régénération du
-second récupère ses données directement depuis PostgreSQL.
+Le premier est l'état de données brutes (format DOD, mmap, mis à jour en
+Copy-on-Write). Le second est le pack HTML effectivement servi. Le pack est rendu
+**à partir du store** ; seul l'Étage 1 interroge PostgreSQL. Diagnostiquer un HTML
+périmé exige donc de vérifier les deux étages, dans l'ordre (§9).
 
 Il existe par ailleurs une catégorie distincte de pages statiques (§1bis)
 qui ne participe pas du tout au cycle `NOTIFY`/Dispatcher.
 
 ## 1. Les artefacts et leurs responsabilités — ne jamais les confondre
 
-| Artefact                           | Producteur                                 | Contenu                                        | Déclencheur / invalidation                                             |
-| ---------------------------------- | ------------------------------------------ | ---------------------------------------------- | ---------------------------------------------------------------------- |
-| `render()` (dans le binaire)       | `cargo build` → `fragment-forge`           | Code Rust généré depuis `.marius`              | Modification du `.marius` ou des entrées surveillées par `build.rs`    |
-| `{table}_store.bin`                | `marius-dump` / `dumper::dump_table`       | Lignes brutes DOD, format de transport interne | Ré-exécution de `marius-dump`                                          |
-| `{table}.bin`                      | `regenerate_and_swap`                      | Pack HTML fusionné, avec blob + index + footer | Delta runtime traité par le `Dispatcher` ; provisioning initial séparé |
-| `{table}.html` pour `STATIC_PAGES` | `resolve_static_page` / `emit_static_html` | HTML statique déjà composé                     | `cargo build` de `core/schema`                                         |
+| Artefact                           | Producteur                                                        | Contenu                                        | Déclencheur / invalidation                                                          |
+| ---------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `render()` (dans le binaire)       | `cargo build` → `fragment-forge`                                  | Code Rust généré depuis `.marius`              | Modification du `.marius` ou des entrées surveillées par le build de `core/schema`  |
+| `{table}_store.bin`                | `marius-dump` (`dumper::dump_table`) ; `ingest_and_swap` (Étage 1) | Lignes brutes DOD `#[repr(C)]`, mmap           | Dump manuel ; delta runtime traité par le `Dispatcher` (Étage 1)                    |
+| `{key}.bin`                        | `regenerate_and_swap` (Étage 2)                                   | Pack HTML fusionné, avec blob + index + footer | Delta runtime, **après** l'Étage 1 ; provisioning initial séparé                    |
+| `{table}.html` pour `STATIC_PAGES` | `resolve_static_page` / `emit_static_html`                        | HTML statique déjà composé                     | `cargo build` de `core/schema`                                                      |
+
+Nommage exact des fichiers : voir §8 (`{key}` est le `packfile_key` de
+l'artefact — aujourd'hui `content_core` —, différent du nom du store).
+
 
 ### 1.1 `render()`
 
@@ -162,36 +186,44 @@ nouveau {table}.bin
 
 ### 1.2 `{table}_store.bin`
 
-Le `store.bin` contient les données brutes nécessaires au sous-système de
-stockage/dump.
+Le `store.bin` contient les lignes brutes du composant, au format
+`PackfileStoreHeader` + lignes `#[repr(C)]` + index d'ids + TOC/heap varlena. Il
+est mappé en mémoire (`StoreRegistry<P>`, un `Arc<PackfileReader<P>>` remplaçable
+atomiquement).
 
-Il est produit par `dumper::dump_table`.
+Il est produit par deux chemins :
 
-**Il n'est pas lu par `regenerate_and_swap`.**
+* `dumper::dump_table` (`marius-dump`) — extraction complète initiale ;
+* `ingest_and_swap` (Étage 1 de chaque tick) — fusion incrémentale du delta :
+  `P::fetch_from_pg(pool, ids)` → `merge_store` → `.tmp` + `fsync` →
+  validation → `rename` → `StoreRegistry::swap()`.
 
-Le code réel de `regenerate.rs` établit explicitement cette séparation :
+**Il est lu par `regenerate_and_swap`** (Étage 2), via `P::fetch_batch`. Le code
+généré (`db-forge`, `codegen/projection.rs`) le montre sans ambiguïté :
 
 ```rust
-let delta = fetch_delta_batch::<P>(pool, ids, total_cap).await?;
+async fn fetch_batch(_pool: &sqlx::PgPool, ids: &[i64]) -> Result<…> {
+    let reader = {NAME}_STORE.load();      // un seul load() par batch (INV-5)
+    // lookup O(log N) par id ; un id absent du store est ignoré (supprimé)
+}
 ```
 
-puis :
+Le paramètre `_pool` est conservé par la signature du trait `Projection` mais
+**n'est jamais utilisé** : aucun fallback réseau, un store non provisionné fait
+paniquer (fail-fast). `P::fetch_from_pg` (SQLx) est la voie d'extraction : appelée
+par `dumper::dump_table` et par `ingest_and_swap`, jamais par la régénération.
 
-```rust
-P::fetch_batch(pool, chunk)
-```
+La source des données du rendu est donc le `store.bin`, lui-même alimenté depuis
+PostgreSQL à l'Étage 1.
 
-La source des données du rendu est donc PostgreSQL, et non le
-`{table}_store.bin`.
-
-### 1.3 `{table}.bin` — le pack HTML
+### 1.3 `{key}.bin` — le pack HTML
 
 Le pack HTML est l'artefact effectivement consommé par le chemin HTTP.
 
-`regenerate_and_swap` :
+`regenerate_and_swap` (Étage 2) :
 
-1. récupère les identifiants du delta ;
-2. interroge PostgreSQL avec `P::fetch_batch` ;
+1. reçoit les identifiants du delta (déjà appliqués au store par l'Étage 1) ;
+2. lit les enregistrements correspondants dans le store avec `P::fetch_batch` ;
 3. rend les lignes récupérées ;
 4. construit un `DeltaBatch` en mémoire ;
 5. fusionne ce delta avec l'ancien pack via `merge_sweep` ;
@@ -210,7 +242,7 @@ C'est précisément la propriété introduite par la stratégie de **Sweep Merge
 ## 1bis. La quatrième catégorie — pages `STATIC_PAGES`
 
 Certaines pages `.marius` ne dépendent d'aucune donnée SQL dynamique et sont
-déclarées dans `STATIC_PAGES` (`crates/core/schema/build.rs`).
+déclarées dans `STATIC_PAGES` (`crates/core/schema/build/main.rs`).
 
 Aujourd'hui, cette catégorie comprend notamment `offline`.
 
@@ -299,49 +331,42 @@ Collector::insert(id)
                                   Dispatcher
                                       │
                                       ▼
-                              regenerate_and_swap
+                      ingest_and_swap  (Étage 1)
+                      fetch_from_pg → merge_store → store.bin
                                       │
                                       ▼
-                            P::fetch_batch(pool, ids)
+                      regenerate_and_swap  (Étage 2)
+                      fetch_batch (mmap du store) → render_batch
                                       │
                                       ▼
-                              render_batch()
+                             DeltaBatch
                                       │
                                       ▼
-                                DeltaBatch
+                          merge_sweep(old, delta)
                                       │
                                       ▼
-                         merge_sweep(old, delta)
+                               {key}.bin.tmp
                                       │
                                       ▼
-                              {table}.bin.tmp
+                             fsync + rename
                                       │
                                       ▼
-                            fsync + rename
-                                      │
-                                      ▼
-                         LiveRegistry::store()
+                          LiveRegistry::store()
 ```
 
-### 3.1 Le delta ne vient pas du `store.bin`
+### 3.1 Le delta transite par le `store.bin`
 
-C'est le point de correction le plus important par rapport à l'ancienne
-documentation.
+C'est le point qu'une version antérieure de ce guide décrivait de façon
+inversée (voir l'en-tête).
 
-Le `Collector` fournit à `regenerate_and_swap` les `ids` du tick courant :
-
-```rust
-regenerate_and_swap::<P>(
-    pool,
-    ids,
-    ...
-)
-```
-
-Ces identifiants sont ensuite transformés en données de rendu par :
+Le `Collector` fournit au `Dispatcher` les `ids` du tick courant (triés
+`ID ASC` par `ids.sort_unstable()` avant le rendu). Le `Dispatcher` exécute
+ensuite **deux étages dans un ordre strict** :
 
 ```rust
-P::fetch_batch(pool, chunk)
+ingest_and_swap::<P>(pool, &ids, io_semaphore)          // Étage 1
+regenerate_and_swap::<P>(pool, &ids, total_cap,
+                         packfile_key, registry, io_semaphore)   // Étage 2
 ```
 
 Le flux réel est donc :
@@ -349,9 +374,11 @@ Le flux réel est donc :
 ```text
 ids
  ↓
-PostgreSQL
+PostgreSQL          (P::fetch_from_pg — Étage 1, seule lecture SQL)
  ↓
-Record
+store.bin           (merge_store + rename + StoreRegistry::swap)
+ ↓
+Record              (P::fetch_batch — Étage 2, lecture mmap)
  ↓
 render()
  ↓
@@ -360,17 +387,10 @@ DeltaBatch
 merge_sweep()
 ```
 
-et non :
+**Invariant de tolérance aux pannes :** tout échec de l'Étage 1 interrompt le
+tick ; l'Étage 2 n'est jamais exécuté depuis un store non rafraîchi (il
+persisterait un delta incohérent).
 
-```text
-ids
- ↓
-store.bin
- ↓
-render()
- ↓
-pack
-```
 
 ### 3.2 Un changement de code seul n'invalide pas le pack
 
@@ -456,7 +476,7 @@ explicitement documentée.
 
 `ids` représente **le delta du tick courant**, pas l'ensemble de la table.
 
-`fetch_delta_batch` récupère uniquement ces identifiants, par chunks de
+`fetch_delta_batch` lit uniquement ces identifiants dans le store (via `P::fetch_batch`), par chunks de
 `CHUNK_SIZE` :
 
 ```text
@@ -498,11 +518,16 @@ untouched_entities_survive_successive_incremental_merges_then_delete
 Une entité peut ainsi survivre à plusieurs cycles sans être jamais refetchée
 ni rerendue.
 
-## 4bis. Suppression — absence PostgreSQL transformée en delta de suppression
+## 4bis. Suppression — absence dans PostgreSQL, puis absence dans le store
 
-Le contrat de `fetch_delta_batch` mérite également d'être explicité.
+La suppression est détectée **à deux niveaux successifs**, un par étage.
 
-Pour chaque ID demandé, si PostgreSQL ne retourne aucune ligne, cet ID est
+**Étage 1 (`ingest_and_swap`).** Pour chaque ID du tick, si `P::fetch_from_pg`
+ne retourne aucune ligne, cet ID est supprimé : il est passé à `merge_store` dans
+`deleted_ids`, qui retire la ligne du nouveau `store.bin`.
+
+**Étage 2 (`fetch_delta_batch`).** Pour chaque ID demandé, si `P::fetch_batch`
+(lecture du store fraîchement mis à jour) ne retourne aucune ligne, cet ID est
 considéré comme supprimé :
 
 ```rust
@@ -524,26 +549,24 @@ Collector
 id = 42
    │
    ▼
-P::fetch_batch()
+Étage 1 : fetch_from_pg → aucune ligne
+   │        → deleted_ids → merge_store → ligne retirée du store.bin
+   ▼
+Étage 2 : fetch_batch (store) → aucune ligne
    │
-   └── aucune ligne
-          │
-          ▼
-    DeltaEntry(id=42,
-               offset=0,
-               length=0)
-          │
-          ▼
-      merge_sweep
-          │
-          ▼
-      suppression du
-      fragment existant
+   ▼
+DeltaEntry(id=42, offset=0, length=0)
+   │
+   ▼
+merge_sweep
+   │
+   ▼
+suppression du fragment existant
 ```
 
-La suppression n'est donc pas propagée par un fichier `store.bin` : elle est
-déduite directement du résultat de la requête PostgreSQL correspondant au
-delta.
+La suppression est donc propagée **par le store** : l'Étage 1 la traduit en
+retrait de ligne, l'Étage 2 la déduit de l'absence de l'ID dans ce store.
+
 
 ## 5. Écriture physique du pack — CoW, durabilité et swap atomique
 
@@ -614,122 +637,154 @@ qui n'a pas été finalisée.
 
 ## 5bis. Le sémaphore I/O
 
-Le fetch PostgreSQL est volontairement hors du sémaphore :
+Le fetch réseau PostgreSQL (Étage 1) est volontairement hors du sémaphore :
 
 ```text
-fetch PostgreSQL
-       │
-       ▼
-attente io_semaphore
-       │
-       ▼
-spawn_blocking
-       │
-       ▼
-merge + I/O disque
+Étage 1                                   Étage 2
+fetch_from_pg (PostgreSQL)                fetch_batch (mmap du store, sans réseau)
+       │                                         │
+       ▼                                         ▼
+attente io_semaphore                      attente io_semaphore
+       │                                         │
+       ▼                                         ▼
+spawn_blocking                            spawn_blocking
+       │                                         │
+       ▼                                         ▼
+merge_store + I/O disque                  merge_sweep + I/O disque
 ```
 
 Le sémaphore régule la pression d'I/O disque et les risques de
 dirty-page storm ; il ne limite pas artificiellement les requêtes PostgreSQL.
 
-Le permis est acquis juste avant `spawn_blocking` et reste détenu pendant
-tout le noyau physique.
+**La même instance de sémaphore** est transmise aux deux étages par
+`Dispatcher::run` : la pression disque totale d'un tick (deux écritures,
+`store.bin` puis pack) reste bornée par un seul budget, non doublée.
 
-## 6. `marius-dump` — deux artefacts indépendants
+Chaque étage acquiert son permis juste avant son `spawn_blocking` et le
+conserve pendant tout son noyau physique.
 
-`marius-dump` peut produire deux choses distinctes :
 
-1. le `{table}_store.bin`, via `dumper::dump_table` ;
-2. le pack HTML `{table}.bin`, lorsqu'il appelle le chemin de régénération
-   correspondant.
+## 6. `marius-dump` — la chaîne store → pack, exécutée manuellement
 
-Ces deux opérations ne doivent pas être comprises comme :
+`marius-dump` est exécuté manuellement au déploiement (`cargo run --bin
+marius-dump`), jamais par `cargo build`, jamais par le `Dispatcher`. Il applique la
+**même chaîne** que le chemin réactif, en une passe sur tous les ids :
 
 ```text
-store.bin → pack.bin
+PostgreSQL
+    │  P::fetch_from_pg
+    ▼
+dumper::dump_table()  ──▶  {schema}_{table}_store.bin
+    │
+    ▼
+P::cold_start_store()        (monte le StoreRegistry local au process)
+    │
+    ▼
+ensure_provisioned(clé) + LiveRegistry::cold_start(topologie locale)
+    │
+    ▼
+regenerate_and_swap()        (lit le store via fetch_batch, écrit {key}.bin)
 ```
 
-mais comme deux productions indépendantes :
+Le `cold_start_store()` est **obligatoire** entre les deux : sans lui,
+`regenerate_and_swap` panique (`StoreRegistry` non provisionné) — `dump_table`
+aurait réussi, écrit le fichier, puis la régénération tenterait de le relire par
+un registre jamais monté dans ce process.
+
+Le store brut est aussi consommé par `marius-verify`, indépendamment du pack HTML.
+
+Lorsqu'un dump initial doit rendre immédiatement cohérents les artefacts d'un
+environnement, le store et le pack sont donc produits **dans cet ordre**, par le
+même binaire ; ils restent deux fichiers distincts (§1).
+
+La topologie locale de `marius-dump` est dérivée de la déclaration de publication
+(§11.8), sans réutiliser la `ROUTE_TABLE` de `marius-server` (couplage inverse
+`render → server` proscrit).
+
+
+## 7. Provisioning initial — pack HTML et store
+
+Un fichier absent n'est pas nécessairement une corruption. Deux fonctions,
+symétriques, garantissent l'existence d'un artefact **vide mais valide** :
+
+* `ensure_provisioned(packfile_key)` (`regenerate.rs`) pour le pack HTML ;
+* `ensure_store_provisioned::<P>()` (`store_provisioning.rs`) pour le store.
+
+Elles distinguent :
 
 ```text
-                    PostgreSQL
-                    /        \
-                   /          \
-                  ▼            ▼
-          dump_table()    regenerate_and_swap()
-                  │            │
-                  ▼            ▼
-             store.bin      table.bin
-```
-
-Le chemin normal de `regenerate_and_swap` ne lit pas le premier pour produire
-le second.
-
-Lorsqu'un dump initial doit rendre immédiatement cohérents les artefacts
-d'un environnement, il faut donc considérer séparément :
-
-* la production du store ;
-* le provisioning/rendu du pack HTML.
-
-## 7. Provisioning initial du pack HTML
-
-Un packfile absent n'est pas nécessairement une corruption.
-
-`ensure_provisioned` distingue :
-
-```text
-packfile absent
+fichier absent
      │
      ▼
-provisionnement
+provisionnement  (.tmp → fsync → rename)
      │
      ▼
-packfile vide mais valide
+fichier vide mais valide
 ```
 
 et :
 
 ```text
-packfile déjà présent
+fichier déjà présent
      │
      ▼
 aucune écriture
 ```
 
-Le provisioning est idempotent.
+Le provisioning est idempotent (`ProvisionOutcome::{AlreadyPresent,
+Provisioned}`).
 
 Il ne vérifie volontairement pas la validité d'un fichier déjà présent : cette
-responsabilité appartient au lecteur (`PackHtmlIndex::open`) lors du
-`cold_start`.
+responsabilité appartient au lecteur (`PackHtmlIndex::open`,
+`StoreRegistry::cold_start`) lors du démarrage à froid.
 
-Le séquencement est donc conceptuellement :
+Le séquencement du bootstrap (`main.rs`) est donc :
 
 ```text
-ensure_provisioned()
-        │
-        ▼
-cold_start()
-        │
-        ▼
-LiveRegistry
+ensure_provisioned(clé)              ensure_store_provisioned::<P>()
+        │                                        │
+        ▼                                        ▼
+LiveRegistry::cold_start(topologie)      P::cold_start_store()
 ```
 
-Le provisioning ne dépend ni de `PgPool` ni de `LiveRegistry`.
+Le provisioning ne dépend ni de `PgPool` ni de `LiveRegistry` : il ne dépend que
+d'une clé (pack) ou d'un chemin (store), jamais d'une route.
 
-## 8. Résolution de chemin des artefacts — un seul `artifacts/`, par convention de CWD
+### Topologie du `LiveRegistry`
 
-`packfile_path_for(key)` résout un chemin relatif au répertoire courant du
-processus au lancement.
+La topologie du `LiveRegistry` est **figée à sa construction** :
 
-Lancer un binaire depuis un autre répertoire peut donc produire un autre
-`artifacts/`.
+* `cold_start(&'static [RouteEntry])` ouvre le pack de chaque `packfile_key` (une
+  seule fois par clé) et échoue si un pack est absent ;
+* `with_indices(HashMap<…>)` construit un registre depuis une table de clés, sans
+  passer par des `RouteEntry` ;
+* `load(clé)` renvoie `None` pour une clé inconnue ; `store(clé, …)` **panique**
+  (invariant AOT) — de même que `regenerate_and_swap` sur une clé hors topologie.
+
+Un artefact dont la clé n'est pas dans la topologie n'est donc jamais ouvert.
+
+
+## 8. Résolution de chemin des artefacts — `MARIUS_ARTIFACTS_DIR`, sinon CWD
+
+Tous les chemins d'artefacts du runtime partagent la même racine :
+
+* `packfile_path_for(key)` (`registry.rs`) : `{racine}/{packfile_key}.bin` ;
+* `P::store_path()` (généré) : `{racine}/{schema}_{table}_store.bin`.
+
+`racine` est lue dans la variable d'environnement **`MARIUS_ARTIFACTS_DIR`** ;
+**si elle est absente, la racine vaut `artifacts`, relatif au répertoire courant
+du processus au lancement.** `packfile_path_for` lit la variable une seule fois
+(`OnceLock`) : un test in-process ne peut pas la faire varier.
+
+Sans variable, lancer un binaire depuis un autre répertoire peut donc produire un
+autre `artifacts/`.
 
 Par exemple :
 
 ```text
 workspace/
 └── artifacts/
-    └── article.bin
+    └── content_core.bin
 ```
 
 n'est pas nécessairement le fichier utilisé si le processus a été lancé
@@ -742,27 +797,35 @@ workspace/crates/shell/server/
 Dans ce cas, un autre :
 
 ```text
-crates/shell/server/artifacts/article.bin
+crates/shell/server/artifacts/content_core.bin
 ```
 
 peut être créé.
 
 Règle opérationnelle :
 
-> lancer les binaires du projet depuis la racine du workspace.
+> définir `MARIUS_ARTIFACTS_DIR` (chemin absolu) pour tous les binaires du
+> projet, ou à défaut les lancer depuis la racine du workspace.
 
 En cas de doute :
 
 ```bash
-find / -name "{table}*.bin" -exec ls -la {} \;
+find / -name "{key}*.bin" -exec ls -la {} \;
 ```
 
 permet de retrouver les exemplaires parasites et de comparer leurs mtime et
 leurs tailles.
 
+**Une convention de nommage n'est pas utilisée en production :** le trait
+`Projection` expose aussi `packfile_path()`, généré sous la forme
+`{racine}/{schema}_{table}_pack.bin`. Aucun code de production ne l'appelle : le
+pack réellement servi est `{racine}/{packfile_key}.bin`. Ne pas s'appuyer sur
+`packfile_path()`.
+
 La page statique `build/{theme}/{table}.html` relève en revanche de
-`CARGO_MANIFEST_DIR` dans `core/schema/build.rs` et n'obéit pas à cette même
-résolution CWD-relative.
+`CARGO_MANIFEST_DIR` dans `core/schema/build/main.rs` et n'obéit pas à cette même
+résolution.
+
 
 ## 9. Checklist de diagnostic — « le HTML ne reflète pas mon changement »
 
@@ -825,17 +888,27 @@ Collector
  ↓
 Dispatcher
  ↓
-regenerate_and_swap
+ingest_and_swap        (Étage 1)
+ ↓
+regenerate_and_swap    (Étage 2)
 ```
 
-Commencer par vérifier le trigger directement en base.
+Commencer par vérifier le trigger directement en base. Un log
+`[dispatcher] ingest_and_swap (…)` en erreur signifie que le tick a été
+interrompu **avant** l'Étage 2.
 
-### 4. Le `fetch_batch` récupère-t-il bien les données attendues ?
 
-La régénération lit PostgreSQL directement.
+### 4. Le store contient-il les données attendues ?
 
-Le `store.bin` n'est pas le bon endroit à inspecter pour déterminer pourquoi
-le HTML n'a pas été rendu avec une valeur SQL récente.
+`P::fetch_batch` lit le `store.bin`, pas PostgreSQL. Si le HTML n'a pas été rendu
+avec une valeur SQL récente, vérifier d'abord que **l'Étage 1 a réussi** :
+mtime et taille de `{schema}_{table}_store.bin` avant et après une mutation SQL de
+test, et l'absence d'erreur `ingest_and_swap` dans les logs du `Dispatcher`.
+
+Un HTML périmé avec un store à jour désigne l'Étage 2 (rendu, fusion, écriture) ;
+un store périmé désigne l'Étage 1 (`fetch_from_pg`, `merge_store`) ou le
+déclencheur.
+
 
 ### 5. Le pack HTML a-t-il été effectivement remplacé ?
 
@@ -868,9 +941,12 @@ Si les étapes précédentes sont saines, examiner :
 * `PackHtmlIndex::open` ;
 * `LiveRegistry::store`.
 
-Le point important est que **l'échec du fetch PostgreSQL intervient avant toute
-écriture disque**. Le test `fetch_failure_leaves_old_packfile_and_registry_untouched`
-formalise cette propriété.
+Le point important est que **tout échec de lecture intervient avant toute
+écriture disque du pack** : les tests
+`fetch_failure_leaves_old_packfile_and_registry_untouched` (Étage 2) et
+`fetch_failure_leaves_disk_and_registry_untouched` (Étage 1, `ingest_and_swap.rs`)
+formalisent cette propriété pour chaque étage.
+
 
 ## 10. Modèle mental définitif
 
@@ -906,13 +982,15 @@ Pour une projection dynamique, le chemin de donnée à retenir est celui-ci :
                        Dispatcher
                             │
                             ▼
-                    IDs du delta
+                    IDs du delta (triés)
                             │
                             ▼
-                  PostgreSQL fetch_batch
+              ÉTAGE 1 — ingest_and_swap
+        fetch_from_pg → merge_store → store.bin (CoW)
                             │
                             ▼
-                    records en mémoire
+              ÉTAGE 2 — regenerate_and_swap
+          fetch_batch (mmap du store.bin) → records
                             │
                             ▼
                     render() compilé
@@ -932,18 +1010,21 @@ Pour une projection dynamique, le chemin de donnée à retenir est celui-ci :
                        rename atomique
                             │
                             ▼
-                     LiveRegistry
+                      LiveRegistry
                             │
                             ▼
-                         HTTP
+                          HTTP
                             │
                             ▼
-                          pread()
+                         pread()
 ```
 
-Et surtout, **il ne faut pas insérer `store.bin` dans ce graphe**.
+Et surtout, **le `store.bin` fait partie de ce graphe** : il est l'étage
+intermédiaire entre PostgreSQL et le pack. Ne pas l'omettre lors d'un diagnostic
+(§9), mais ne pas non plus le confondre avec le pack : ce sont deux artefacts,
+deux formats, deux producteurs (Étage 1 / Étage 2).
 
-`store.bin` appartient à un autre chemin :
+Le même enchaînement est joué une fois, sur tous les ids, par `marius-dump` :
 
 ```text
 PostgreSQL
@@ -953,10 +1034,14 @@ marius-dump / dumper::dump_table
     │
     ▼
 store.bin
+    │
+    ▼
+regenerate_and_swap
+    │
+    ▼
+{key}.bin
 ```
 
-Les deux chemins peuvent être produits par le même outillage de dump, mais
-ils ne constituent pas une chaîne de dépendances de lecture.
 
 ## 11. Chemin T2A expérimental (I1→I6) — segment ordonnancé, statut PROVISOIRE
 
@@ -974,8 +1059,11 @@ Le chemin décrit par les sections 1 à 10 de ce guide (Forge → `render()` →
 `regenerate_and_swap` → `LiveRegistry` → HTTP → `pread()`) reste
 intégralement la doctrine **AOT monolithique** — une page = une source mmap
 contiguë, servie par `read_at`/`spawn_blocking` (`handlers.rs::deliver`).
-Ce chemin n'a pas été modifié par le prototype T2A et reste la référence
-pour toute page qui n'a pas explicitement de besoin de segmentation.
+Ce chemin n'a pas été modifié par le prototype T2A. Il reste légitime
+lorsqu'**une représentation unique suffit** et qu'aucun cycle indépendant ne
+doit être isolé dans la réponse ; il n'est pas pour autant la cible de toute
+route (une réponse qui doit réunir des projections à cycles indépendants relève
+de la représentation segmentée).
 
 Le prototype ajoute, à titre expérimental, une **seconde famille
 d'émission**, pour des réponses composées de plusieurs segments
@@ -983,8 +1071,8 @@ d'émission**, pour des réponses composées de plusieurs segments
 `SegmentDescriptor`/`RouteDescriptor` (`crates/core/projection/src/lib.rs`),
 et `MaterializedSource`/`ResolvedRange`/`resolve_generation`/`resolve_range`
 (`crates/shell/render/src/emission.rs`, non modifié par le prototype). Ces
-deux chemins coexistent ; le second n'a aujourd'hui **aucune route de
-production réelle** — voir §11.7.
+deux chemins coexistent ; le second n'est aujourd'hui exposé que par des routes
+**expérimentales non publiques** — voir §11.7 et §11.8.
 
 ### 11.2 Contextualisation de route : résolue en amont, jamais au runtime
 
@@ -1002,7 +1090,9 @@ ces derniers n'existent plus une fois `render()` compilé.
 ### 11.3 `MaterializedSource`, `ResolvedRange` et conservation de génération
 
 `resolve_generation` transforme un `SourceSpec` en `MaterializedSource`
-(aujourd'hui : `MaterializedSource::Mmap { handle: Arc<PackHtmlIndex> }`),
+(seule variante résolue aujourd'hui : `MaterializedSource::Mmap { handle:
+Arc<PackHtmlIndex> }` ; la variante `Volatile` existe mais n'est pas exploitable :
+son contrat est en cours de définition),
 par injection d'une fonction `fetch` — jamais par appel direct à
 `LiveRegistry` depuis `emission.rs`, qui reste ainsi agnostique du
 transport et du mécanisme de résolution (voir §11.5).
@@ -1074,13 +1164,67 @@ ni auditées par ce prototype — voir SPEC v2 §4/§6.
 
 ### 11.7 Statut
 
-`experimental_t2a.rs` est un module **PROVISOIRE**, sans route de
-production réelle, non intégré à `ROUTE_TABLE`/Forge. Son existence ne
-doit pas être lue comme une décision de routage ou de catalogue — 
-seulement comme la démonstration que la frontière transport T2A
-fonctionne réellement, de bout en bout, sur au moins une route réelle
-(`content_core`). Voir le handoff pour la liste des écarts restants avant
-toute intégration Forge réelle.
+`experimental_t2a.rs` reste un module **PROVISOIRE** : ses routes sont montées
+sous le préfixe non public `/__experimental/t2a`, hors `ROUTE_TABLE`. Deux
+familles y coexistent :
+
+* les **fixtures historiques K=1/K=3** (statiques, écrites à la main) — elles ne
+  sont pas une sortie de la Forge et ne démontrent aucune segmentation de
+  production ;
+* **une route par entrée de la déclaration de publication** (§11.8), dont le
+  `RouteDescriptor` K=1 est généré par le build, résolue par le catalogue réel
+  `SourceKey → artefact` (plus aucun mapping écrit en dur).
+
+Cette dernière route prouve la chaîne de production Forge → T2A sur
+`/content/{id}` (mêmes octets que le chemin monolithique, mêmes statuts 404/400) ;
+elle **ne démontre pas** une segmentation : K=1 n'a qu'un segment. Voir le handoff
+pour les écarts restants.
+
+### 11.8 Déclaration de publication — `publication.toml`
+
+Depuis l'intégration Forge → T2A K=1, la relation *route → artefact → paramètre*
+n'est plus écrite à la main dans chaque crate. Elle est déclarée **une seule
+fois** dans `crates/core/schema/publication.toml`, lu par le build de
+`core/schema` (`build/publication.rs`) :
+
+* `[[artifact]]` : `key` (l'`ArtifactKey`, ex. `content_core`) et `component`
+  optionnel (`content.core`) ;
+* `[[route]]` : `name`, `pattern` (`/content/{id}`), `artifact`, `parameter`
+  (`id`), `selection = "primary_key"`.
+
+Le build valide le manifeste (structure, existence du composant, PK simple) et
+génère dans `generated_schema.rs` : `ARTIFACTS`, `<KEY>_ARTIFACT`,
+`<KEY>_SOURCE_KEY`, `<NAME>_ROUTE` (un `RouteSpec` neutre), `ROUTES` et
+`ROUTE_DESCRIPTORS`. Les représentations propres à chaque crate en sont
+**dérivées** :
+
+```text
+RouteSpec (marius-projection, neutre)
+  ├─ RouteEntry      (marius-render — `route_entry_from_spec`, const)
+  │     → ROUTE_TABLE, DUMP_ROUTE_TABLE, topologie du LiveRegistry
+  └─ RouteDescriptor (généré par le build — représentation T2A, K=1)
+```
+
+Trois identités à ne pas confondre :
+
+```text
+component_id  ≠  ArtifactKey  ≠  SourceKey(u16)
+```
+
+* `component_id` : identité logique du composant Forge (`content.core`) ;
+* `ArtifactKey` : identité de l'artefact publiable ; son `as_str()` **est** le
+  `packfile_key` du runtime (nom du pack : `{racine}/{clé}.bin`, §8) ;
+* `SourceKey(n)` : position de l'artefact dans `ARTIFACTS`, handle de catalogue
+  **non persistant** (peut changer entre deux builds).
+
+Un artefact peut exister sans composant, et un composant peut produire plusieurs
+artefacts : la déclaration ne suppose ni l'un ni l'autre. Le paramètre HTTP (`id`)
+et la colonne SQL de la clé primaire (`document_id`) sont deux identités
+distinctes, jamais renommées pour coïncider ; la politique de parsing du
+paramètre et le code 400 restent côté serveur.
+
+Contrainte de topologie (§7) : une clé d'artefact servie par T2A doit figurer dans
+la topologie du `LiveRegistry`, sans quoi son pack n'est jamais ouvert.
 
 ---
 
@@ -1088,3 +1232,4 @@ _Créé le 7 juillet 2026._
 _Mis à jour le 25 août 2026_
 _Mis à jour le 18 septembre 2026 — corrections de nommage (renvois croisés vers `fragment-forge-guide.md`) et précision sur le garde-fou §4.8/§4.8ter (conditions `record.*` désormais éliminées, pas seulement rejetées)._
 _Mis à jour le 19 septembre 2026 — ajout §11 (chemin T2A expérimental I1→I6, statut PROVISOIRE) ; sections 1→10 inchangées, chemin AOT monolithique non affecté._
+_Corrigé le 21 septembre 2026 — pipeline réactif à deux étages (`ingest_and_swap` puis `regenerate_and_swap` : le `fetch_batch` généré lit le `store.bin`, il n'interroge pas PostgreSQL) ; résolution des chemins d'artefacts (`MARIUS_ARTIFACTS_DIR`) ; provisioning du store ; topologie du `LiveRegistry` ; `marius-dump` ; §11.7 mis à jour et §11.8 ajouté (déclaration de publication `publication.toml`, `ArtifactKey`/`SourceKey`). Aucun changement au format du pack ni à la fusion `merge_sweep`._
