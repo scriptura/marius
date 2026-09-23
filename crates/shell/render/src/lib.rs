@@ -105,7 +105,17 @@ pub use pack_html_index::PackHtmlIndex;
 // source de vérité par injection, jamais par un appel direct à
 // `LiveRegistry`). Voir `emission.rs` pour le détail du périmètre exclu de
 // cette phase (Volatile, IoSlice, writev/sendmsg, Axum/Hyper/Tokio).
+// VolatileCapacityExceeded, VolatileStorage, resolve_volatile_generation,
+// resolve_volatile_range — contrat Volatile V1b/V1c
+// (handoff-volatile-vertical-slice.md §6, NOTE-contrat-volatile-v1.md).
+// Correction : ces éléments existent dans emission.rs depuis V1b mais
+// n'avaient pas été ajoutés à cette façade à cette occasion — oubli
+// symétrique à celui déjà documenté plus haut pour render_batch_pure,
+// découvert ici à la première tentative réelle d'un appelant hors
+// emission.rs (crates/shell/server/src/experimental_volatile_t2a.rs, V1c)
+// de nommer `marius_render::resolve_volatile_generation`.
 pub use emission::{
     EmissionPlan, MaterializedSource, RequestArena, ResolvedRange, SourceResolutionContext,
-    resolve_generation, resolve_range, source_spec_for,
+    VolatileCapacityExceeded, VolatileStorage, resolve_generation, resolve_range,
+    resolve_volatile_generation, resolve_volatile_range, source_spec_for,
 };

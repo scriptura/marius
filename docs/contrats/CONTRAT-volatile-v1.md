@@ -120,3 +120,58 @@ inchangé depuis V1a) :
 
 **Toujours non traité** (P4, P5, V1c) : aucun adaptateur HTTP, aucun
 `Bytes::from_owner`, aucun point d'appel dans un handler asynchrone.
+
+## État couvert par V1c (clôture de V1)
+
+Frontière HTTP réelle, dans `crates/shell/server/src/experimental_volatile_t2a.rs`
+(nouveau module, **test-only** — voir réserve ci-dessous) + un ajout mécanique
+oublié en V1b dans la façade `crates/shell/render/src/lib.rs` :
+
+- `VolatileOwner { storage: Arc<VolatileStorage> }` — pendant de `MmapOwner`
+  (`experimental_t2a.rs`, inchangé) pour le chemin volatile. `Bytes::from_owner`
+  conserve ce owner vivant jusqu'au drop de tous les `Bytes`/`Body` qui en
+  dérivent (P4) — garantie de la crate `bytes` elle-même, pas un mécanisme
+  ajouté par ce module.
+- Fixture K=3 réelle : `StaticArtifact(prefix) → VolatileSlot → StaticArtifact(suffix)`,
+  ordre d'émission = ordre de déclaration (volatile jamais déplacé en fin de
+  réponse).
+- Producteur toujours **injecté** (`std::sync::RwLock<Vec<u8>>` mutable par
+  les tests) — aucun catalogue réel, aucun SQL, aucune Forge (V3, inchangé).
+- Chemin de résolution entièrement synchrone (aucun `.await` dans
+  `resolve_volatile_route_to_response`) — P5 (ordre producteur → statiques,
+  aucun emprunt en vol à travers un point de suspension) est donc
+  **trivialement** satisfaite ici : rien ne suspend. La discipline
+  d'ordonnancement réelle (emprunt à travers une I/O `.await` véritable)
+  reste à démontrer en V3, quand le producteur deviendra une lecture SQL
+  asynchrone.
+
+**Réserve explicite — non monté en production (`main()`)** : contrairement à
+`experimental_t2a::mount_experimental` (mergé dans `main()`, réutilisant un
+packfile déjà provisionné par `ROUTE_TABLE`), ce module est déclaré
+`#[cfg(test)]` de bout en bout. Le monter en production exigerait de
+provisionner/cold-start un nouvel artefact au démarrage — explicitement exclu
+du périmètre V1c (« production réelle »). La démonstration reste réelle (vrai
+`TcpListener`, vrai `reqwest::Client`, vrai `Bytes::from_owner`/`Body`/Hyper)
+mais uniquement au travers de `cargo test`. Décision prise et signalée dans
+cette note, pas arbitrée silencieusement — à confirmer ou infirmer par
+l'utilisateur avant V2.
+
+**Garanties réellement démontrées par les tests** (voir rapport de session
+pour le détail par test) :
+- round-trip HTTP K=3 mixte, octets exacts, `Content-Length` = somme des
+  longueurs réelles (jamais la capacité) ;
+- snapshot : une requête en vol garde sa propre matérialisation statique ET
+  volatile après une rotation `ArcSwap` et un changement de producteur
+  survenus pendant qu'elle est en vol ;
+- dépassement de capacité → 500 contrôlé, jamais de panic, jamais de
+  troncature ;
+- absence de copie entre `VolatileStorage::as_slice()` et ce que
+  `VolatileOwner` remet à `Bytes::from_owner` (égalité de pointeur — ne
+  couvre pas le pointeur interne du `Bytes` construit, non garanti par la
+  crate `bytes`) ;
+- non-régression : `experimental_t2a.rs`/`t2a_experimental_regression_suite`
+  non modifiés.
+
+**Non démontré, explicitement reporté à V2/V3** : catalogue `ProducerKey →
+implémentation` réel, producteur asynchrone (SQL), Forge/`publication.toml`,
+route volatile en production, mesure d'allocations en couches séparées.

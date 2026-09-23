@@ -30,6 +30,13 @@
 //!   les tables sont précalculées (AOT) et résident physiquement dans le segment `.rodata`.
 
 mod experimental_t2a;
+// Test-only (V1c) — jamais mergé dans main() : voir l'en-tête de module
+// pour la justification (monter une route réelle ici exigerait de
+// provisionner un nouvel artefact au démarrage, hors périmètre V1c
+// « production réelle »). Rapport de session : décision explicite, pas
+// une omission.
+#[cfg(test)]
+mod experimental_volatile_t2a;
 mod handlers; // PROVISOIRE — EXPÉRIMENTAL, voir en-tête du module.
 
 use std::sync::Arc;
@@ -921,5 +928,189 @@ mod tests {
             .await
             .expect("corps après rotation");
         assert_eq!(&after_rotation_body[..], FRAG_ROTATED);
+    }
+
+    // =========================================================================
+    // Test — T2A Volatile expérimental (V1c) : Static → Volatile → Static
+    //
+    // Un seul test, une seule écriture de fixture — clé propre
+    // (`experimental_volatile_t2a::VOLATILE_FIXTURE_PACKFILE_KEY`, jamais
+    // "content_core") — regroupant toutes les démonstrations du contrat
+    // V1c (A round-trip, B Content-Length, C snapshot producteur, E
+    // overflow→500, G rotation statique) : même discipline que
+    // t2a_experimental_regression_suite ci-dessus, pour éviter toute
+    // collision de parallélisme cargo test sur le fichier physique du
+    // packfile de fixture ou l'état global du producteur volatile fixture.
+    //
+    // D et F (drop observable, absence de copie) sont démontrés séparément,
+    // en tests unitaires purs (experimental_volatile_t2a.rs) — propriétés
+    // garanties par le type/le contrat documenté de Bytes::from_owner, pas
+    // par un comportement observable uniquement via un aller-retour réseau.
+    // =========================================================================
+    #[tokio::test]
+    async fn t2a_volatile_regression_suite() {
+        const PREFIX: &[u8] = b"<header>marius</header>";
+        const SUFFIX: &[u8] = b"<footer>fin</footer>";
+
+        experimental_volatile_t2a::set_volatile_fixture_payload(b"Alice".to_vec());
+        write_fixture_packfile(
+            experimental_volatile_t2a::VOLATILE_FIXTURE_PACKFILE_KEY,
+            &[(1, PREFIX), (2, SUFFIX)],
+        );
+
+        // RouteEntry minimal — seule la présence de la clé importe ici
+        // (pour que cold_start() la mmap) : pattern/id_source ne sont
+        // jamais exercés (la route T2A volatile est hors ROUTE_TABLE).
+        let route_table: &'static [RouteEntry] = Box::leak(
+            vec![RouteEntry {
+                pattern: "/content/{id}",
+                packfile_key: experimental_volatile_t2a::VOLATILE_FIXTURE_PACKFILE_KEY,
+                id_source: IdSource::PathParam("id"),
+                content_type: "text/html; charset=utf-8",
+            }]
+            .into_boxed_slice(),
+        );
+
+        let registry =
+            Arc::new(LiveRegistry::cold_start(route_table).expect("cold_start doit réussir"));
+        let registry_for_rotation = Arc::clone(&registry);
+        let app = build_router(route_table, registry.clone()).merge(
+            experimental_volatile_t2a::mount_experimental_volatile(registry),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind port éphémère");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            let conn_builder = HyperConnectionBuilder::new(TokioExecutor::new());
+            let graceful = GracefulShutdown::new();
+            loop {
+                let (stream, _peer_addr) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(e) => panic!("serveur de test — accept() échoué: {e}"),
+                };
+                let io = TokioIo::new(stream);
+                let hyper_service = TowerToHyperService::new(app.clone());
+                let conn = conn_builder.serve_connection(io, hyper_service);
+                let conn = graceful.watch(conn.into_owned());
+                tokio::spawn(async move {
+                    let _ = conn.await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+
+        // ── A/B — round-trip K=3 mixte, Content-Length exact ────────────
+        let resp = client
+            .get(format!("http://{addr}/__experimental/t2a/volatile"))
+            .send()
+            .await
+            .expect("requête T2A volatile (A/B)");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let content_length = resp.content_length().expect("Content-Length présent");
+        let body = resp.bytes().await.expect("corps");
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(PREFIX);
+        expected.extend_from_slice(b"Alice");
+        expected.extend_from_slice(SUFFIX);
+
+        assert_eq!(
+            content_length,
+            (PREFIX.len() + b"Alice".len() + SUFFIX.len()) as u64,
+            "Content-Length doit être prefix+effective_len(volatile)+suffix, \
+             jamais la capacité maximale (256) du segment volatile"
+        );
+        assert_eq!(&body[..], &expected[..]);
+
+        // ── C/G — snapshot : rotation statique + changement de producteur
+        //    volatile pendant qu'une requête est en vol ──────────────────
+        //
+        // Même méthode que l'invariant I4 (t2a_experimental_regression_suite,
+        // ci-dessus) : send() ne résout qu'une fois les en-têtes reçus,
+        // jamais le corps. resolve_volatile_route_to_response() est
+        // entièrement synchrone (aucun .await dans son corps, y compris
+        // pour le producteur volatile de cette fixture — V1c : le
+        // producteur est une closure synchrone, pas encore une I/O réelle,
+        // cf. rapport de session) : au moment où send() retourne
+        // ci-dessous, prefix/suffix ont chacun déjà leur propre
+        // Arc<PackHtmlIndex> cloné, ET le segment volatile a déjà été
+        // intégralement produit et possédé (VolatileStorage) — avant toute
+        // rotation/changement de producteur ultérieur.
+        let resp_in_flight = client
+            .get(format!("http://{addr}/__experimental/t2a/volatile"))
+            .send()
+            .await
+            .expect("requête en vol (C/G) — en-têtes reçus, corps pas encore lu");
+        assert_eq!(resp_in_flight.status(), reqwest::StatusCode::OK);
+
+        // Rotation statique (G) : nouvelle génération pour la même clé.
+        const PREFIX_ROTATED: &[u8] = b"<header>rotated</header>";
+        const SUFFIX_ROTATED: &[u8] = b"<footer>rotated</footer>";
+        write_fixture_packfile(
+            experimental_volatile_t2a::VOLATILE_FIXTURE_PACKFILE_KEY,
+            &[(1, PREFIX_ROTATED), (2, SUFFIX_ROTATED)],
+        );
+        let rotated_index = Arc::new(
+            marius_render::PackHtmlIndex::open(&marius_render::packfile_path_for(
+                experimental_volatile_t2a::VOLATILE_FIXTURE_PACKFILE_KEY,
+            ))
+            .expect("ouverture de la génération v2 (rotation)"),
+        );
+        registry_for_rotation.store(
+            experimental_volatile_t2a::VOLATILE_FIXTURE_PACKFILE_KEY,
+            rotated_index,
+        );
+
+        // Changement de producteur volatile (C) : "Alice" → "Bob", pendant
+        // que la requête en vol ci-dessus tient déjà sa propre
+        // matérialisation, possédée indépendamment de cet état partagé.
+        experimental_volatile_t2a::set_volatile_fixture_payload(b"Bob".to_vec());
+
+        // Le corps de la requête en vol — lu APRÈS rotation ET changement
+        // de producteur — reste celui matérialisé avant les deux :
+        // prefix/suffix v1, "Alice" jamais "Bob".
+        let mut expected_in_flight = Vec::new();
+        expected_in_flight.extend_from_slice(PREFIX);
+        expected_in_flight.extend_from_slice(b"Alice");
+        expected_in_flight.extend_from_slice(SUFFIX);
+        let in_flight_body = resp_in_flight
+            .bytes()
+            .await
+            .expect("corps de la requête en vol, après rotation+changement de producteur");
+        assert_eq!(&in_flight_body[..], &expected_in_flight[..]);
+
+        // Une requête ultérieure, elle, voit la nouvelle génération
+        // statique ET la nouvelle production volatile.
+        let resp_after = client
+            .get(format!("http://{addr}/__experimental/t2a/volatile"))
+            .send()
+            .await
+            .expect("requête après rotation+changement de producteur");
+        assert_eq!(resp_after.status(), reqwest::StatusCode::OK);
+        let mut expected_after = Vec::new();
+        expected_after.extend_from_slice(PREFIX_ROTATED);
+        expected_after.extend_from_slice(b"Bob");
+        expected_after.extend_from_slice(SUFFIX_ROTATED);
+        let after_body = resp_after.bytes().await.expect("corps après rotation");
+        assert_eq!(&after_body[..], &expected_after[..]);
+
+        // ── E — dépassement de capacité (256) → 500 contrôlé ─────────────
+        let oversized_payload = vec![b'X'; 300]; // > VOLATILE_CAPACITY (256)
+        experimental_volatile_t2a::set_volatile_fixture_payload(oversized_payload);
+        let resp_overflow = client
+            .get(format!("http://{addr}/__experimental/t2a/volatile"))
+            .send()
+            .await
+            .expect("requête overflow (E)");
+        assert_eq!(
+            resp_overflow.status(),
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "effective_len (300) > capacity (256) doit produire un 500 \
+             contrôlé, jamais une troncature ni un panic"
+        );
     }
 }
