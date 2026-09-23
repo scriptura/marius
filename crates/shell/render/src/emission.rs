@@ -466,7 +466,10 @@ mod tests {
 
     #[test]
     fn resolve_generation_volatile_slot_is_never_constructed() {
-        let spec = SourceSpec::VolatileSlot { capacity: 128 };
+        let spec = SourceSpec::VolatileSlot {
+            capacity: 128,
+            producer: marius_projection::ProducerKey(0),
+        };
         let result = resolve_generation(&spec, |_key| {
             panic!("fetch ne doit jamais être appelé pour VolatileSlot")
         });

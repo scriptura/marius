@@ -239,6 +239,95 @@ mod tests_source_id {
     // absent (cf. commentaire de section ci-dessus).
 }
 
+// ─── ProducerKey — identité opaque d'un producteur volatile (V1a, contrat
+//     Volatile P8, handoff-volatile-vertical-slice.md §4.3) ────────────────
+//
+// Désigne, pour un `SourceSpec::VolatileSlot`, QUEL producteur matérialise
+// le contenu — jamais COMMENT (l'implémentation du producteur vit hors de
+// `emission.rs`, hors de ce crate : P8). Même convention que `SourceKey`
+// ci-dessus : catalogue de build, position/handle non persistant (peut
+// changer entre deux builds), aucune méthode de résolution portée par ce
+// type lui-même. `ProducerKey` et `SourceKey` restent deux catalogues
+// distincts, jamais interchangeables (un producteur volatile n'est jamais
+// une position dans `ARTIFACTS`, et réciproquement) — même absence
+// volontaire de `From`/`Into` entre les deux qu'entre `SourceId` et
+// `SourceKey`.
+//
+// Nom de travail retenu tel quel (handoff §10 point 5, confirmé) — à ne
+// changer que si un conflit réel dans le code l'impose.
+/// Identifiant opaque d'un producteur de contenu volatile, attribué par un
+/// futur catalogue de build (Forge, V2) — jamais résolu par ce type
+/// lui-même. Catalogue distinct de celui de `SourceKey`.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ProducerKey(pub u16);
+
+const _: () = assert!(
+    std::mem::size_of::<ProducerKey>() == std::mem::size_of::<u16>(),
+    "ProducerKey doit avoir exactement la taille de u16 (repr(transparent))"
+);
+const _: () = assert!(
+    std::mem::size_of::<ProducerKey>() == 2,
+    "ProducerKey doit occuper exactement 2 octets"
+);
+const _: () = assert!(
+    std::mem::align_of::<ProducerKey>() == std::mem::align_of::<u16>(),
+    "ProducerKey doit avoir l'alignement de u16"
+);
+
+#[cfg(test)]
+mod tests_producer_key {
+    use super::ProducerKey;
+
+    #[test]
+    fn layout_is_exactly_two_bytes_aligned_as_u16() {
+        assert_eq!(std::mem::size_of::<ProducerKey>(), 2);
+        assert_eq!(
+            std::mem::align_of::<ProducerKey>(),
+            std::mem::align_of::<u16>()
+        );
+    }
+
+    #[test]
+    fn is_copy_not_move() {
+        let a = ProducerKey(3);
+        let b = a;
+        assert_eq!(a, b);
+        assert_eq!(a, ProducerKey(3)); // `a` réutilisé après `b` — exige Copy
+    }
+
+    #[test]
+    fn equality_is_by_value() {
+        assert_eq!(ProducerKey(0), ProducerKey(0));
+        assert_ne!(ProducerKey(0), ProducerKey(1));
+    }
+
+    #[test]
+    fn ord_matches_underlying_u16() {
+        let mut keys = vec![ProducerKey(3), ProducerKey(1), ProducerKey(2)];
+        keys.sort();
+        assert_eq!(keys, vec![ProducerKey(1), ProducerKey(2), ProducerKey(3)]);
+    }
+
+    #[test]
+    fn usable_as_hashmap_key() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert(ProducerKey(1), "username_first_user");
+        assert_eq!(map.get(&ProducerKey(1)), Some(&"username_first_user"));
+        assert_eq!(map.get(&ProducerKey(2)), None);
+    }
+
+    #[test]
+    fn debug_format_is_available() {
+        let _ = format!("{:?}", ProducerKey(1));
+    }
+
+    // Catalogue distinct de SourceKey — même garantie que SourceId/SourceKey
+    // (commentaire de section ci-dessus) : le compilateur est la preuve,
+    // rien à exécuter (`ProducerKey(1) == SourceKey(1)` ne compile pas).
+}
+
 // ─── SourceSpec — recette de résolution d'un SourceId (Phase 2, GO 2026-09) ─
 //
 // DESIGN runtime-segment-pipeline post-ADR-011, §13.2. Table de résolution
@@ -280,7 +369,10 @@ pub enum SourceSpec {
     /// Origine à réserver dans l'arène de requête — capacité maximale
     /// connue à la compilation (Forge), longueur effective connue à la
     /// matérialisation (hors périmètre de ce type et de cette phase).
-    VolatileSlot { capacity: u32 },
+    /// `producer` : identité opaque du producteur qui matérialisera le
+    /// contenu (contrat Volatile P8) — le dispatch vers son implémentation
+    /// vit hors de ce crate, hors de `emission.rs` (V1b/V1c).
+    VolatileSlot { capacity: u32, producer: ProducerKey },
 }
 
 // Absence de Drop — propriété explicitement requise (liste de vérification
@@ -295,7 +387,7 @@ const _: () = assert!(
 
 #[cfg(test)]
 mod tests_source_spec {
-    use super::{SourceId, SourceKey, SourceSpec};
+    use super::{ProducerKey, SourceId, SourceKey, SourceSpec};
 
     // Copy — même méthode qu'ailleurs dans ce module : vérifiée par
     // l'usage (réutilisation après un déplacement apparent), pas par
@@ -319,12 +411,42 @@ mod tests_source_spec {
             SourceSpec::StaticArtifact { key: SourceKey(2) }
         );
         assert_eq!(
-            SourceSpec::VolatileSlot { capacity: 64 },
-            SourceSpec::VolatileSlot { capacity: 64 }
+            SourceSpec::VolatileSlot {
+                capacity: 64,
+                producer: ProducerKey(1)
+            },
+            SourceSpec::VolatileSlot {
+                capacity: 64,
+                producer: ProducerKey(1)
+            }
         );
         assert_ne!(
-            SourceSpec::VolatileSlot { capacity: 64 },
-            SourceSpec::VolatileSlot { capacity: 128 }
+            SourceSpec::VolatileSlot {
+                capacity: 64,
+                producer: ProducerKey(1)
+            },
+            SourceSpec::VolatileSlot {
+                capacity: 128,
+                producer: ProducerKey(1)
+            }
+        );
+    }
+
+    // Le producteur fait partie de l'égalité structurelle au même titre que
+    // la capacité — deux VolatileSlot de même capacité mais de producteurs
+    // différents ne sont jamais la même Source (P8 : le producteur EST
+    // l'identité de résolution du contenu).
+    #[test]
+    fn producer_participates_in_equality() {
+        assert_ne!(
+            SourceSpec::VolatileSlot {
+                capacity: 64,
+                producer: ProducerKey(1)
+            },
+            SourceSpec::VolatileSlot {
+                capacity: 64,
+                producer: ProducerKey(2)
+            }
         );
     }
 
@@ -336,7 +458,10 @@ mod tests_source_spec {
     fn different_variants_are_never_equal() {
         assert_ne!(
             SourceSpec::StaticArtifact { key: SourceKey(0) },
-            SourceSpec::VolatileSlot { capacity: 0 }
+            SourceSpec::VolatileSlot {
+                capacity: 0,
+                producer: ProducerKey(0)
+            }
         );
     }
 
@@ -348,9 +473,15 @@ mod tests_source_spec {
             SourceSpec::VolatileSlot { .. } => panic!("mauvaise variante"),
         }
 
-        let volatile_spec = SourceSpec::VolatileSlot { capacity: 4096 };
+        let volatile_spec = SourceSpec::VolatileSlot {
+            capacity: 4096,
+            producer: ProducerKey(7),
+        };
         match volatile_spec {
-            SourceSpec::VolatileSlot { capacity } => assert_eq!(capacity, 4096),
+            SourceSpec::VolatileSlot { capacity, producer } => {
+                assert_eq!(capacity, 4096);
+                assert_eq!(producer, ProducerKey(7));
+            }
             SourceSpec::StaticArtifact { .. } => panic!("mauvaise variante"),
         }
     }
@@ -371,12 +502,18 @@ mod tests_source_spec {
     fn indexable_by_source_id_in_a_plain_slice() {
         let sources = [
             SourceSpec::StaticArtifact { key: SourceKey(10) },
-            SourceSpec::VolatileSlot { capacity: 256 },
+            SourceSpec::VolatileSlot {
+                capacity: 256,
+                producer: ProducerKey(3),
+            },
         ];
         let cart_id = SourceId(1);
         assert_eq!(
             sources[cart_id.0 as usize],
-            SourceSpec::VolatileSlot { capacity: 256 }
+            SourceSpec::VolatileSlot {
+                capacity: 256,
+                producer: ProducerKey(3)
+            }
         );
     }
 }
@@ -468,6 +605,17 @@ mod tests_request_value_id {
 /// Référence AOT à la sélection d'un segment — jamais la valeur runtime
 /// résolue pour une requête donnée (cf. DESIGN §2.1, distinction
 /// sélection/valeur de sélection runtime).
+///
+/// `NotApplicable` — ajouté V1a, contrat Volatile P7
+/// (handoff-volatile-vertical-slice.md §4.3/§6) : un segment
+/// `SourceSpec::VolatileSlot` n'est jamais *extrait* d'une collection
+/// préexistante par clé (il est *produit* à la requête) — il n'a donc
+/// **aucune** sélection par PK. Ne jamais utiliser `Constant(0)` ni
+/// `RequestSlot(RequestValueId(0))` comme valeur fictive pour ce cas :
+/// l'absence de sélection est elle-même une information, pas un défaut
+/// arbitraire de `Constant`/`RequestSlot`. Invariant de cohérence
+/// `VolatileSlot ⇔ NotApplicable` vérifié par [`segment_matches_source`]
+/// ci-dessous (§6, P7).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SegmentSelection {
     /// Valeur connue à la compilation — aucune extraction runtime requise.
@@ -475,6 +623,10 @@ pub enum SegmentSelection {
     /// Référence opaque vers un emplacement du contexte de requête —
     /// jamais une valeur HTTP elle-même.
     RequestSlot(RequestValueId),
+    /// Aucune sélection : le segment est produit par un
+    /// `SourceSpec::VolatileSlot`, jamais extrait d'une collection par
+    /// clé. Réservé exclusivement à ce cas (P7).
+    NotApplicable,
 }
 
 const _: () = assert!(
@@ -514,8 +666,26 @@ mod tests_segment_selection {
             SegmentSelection::Constant(0),
             SegmentSelection::RequestSlot(RequestValueId(0))
         );
+        assert_ne!(SegmentSelection::Constant(0), SegmentSelection::NotApplicable);
+        assert_ne!(
+            SegmentSelection::RequestSlot(RequestValueId(0)),
+            SegmentSelection::NotApplicable
+        );
     }
 
+    // NotApplicable est une unique valeur (unit variant) — Copy, égale à
+    // elle-même, jamais construite avec une donnée fictive (0/Constant(0)
+    // ne doivent jamais s'y substituer — cf. doc de la variante).
+    #[test]
+    fn not_applicable_is_copy_and_equal_to_itself() {
+        let a = SegmentSelection::NotApplicable;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // NotApplicable est une variante du même type SegmentSelection — la
+    // propriété needs_drop porte sur le type entier, elle couvre donc déjà
+    // cette variante sans assertion distincte.
     #[test]
     fn never_needs_drop() {
         assert!(!std::mem::needs_drop::<SegmentSelection>());
@@ -627,6 +797,154 @@ const _: () = assert!(
     "SegmentDescriptor ne doit jamais nécessiter de Drop — chemin chaud \
      sans allocation (ADR-011 §7)"
 );
+
+// ─── Cohérence Volatile — contrat Volatile P7 (V1a) ─────────────────────────
+//
+// handoff-volatile-vertical-slice.md §6, propriété P7 : « NotApplicable :
+// invariant VolatileSlot ⇔ NotApplicable, vérifié par le générateur (erreur
+// de build) et par le runtime (500, jamais de panic). » Ce module ne décide
+// ni l'un ni l'autre de ces deux points de vérification (le générateur
+// n'existe pas avant V2 ; le 500 runtime est un choix d'adaptateur HTTP,
+// V1c) — il fournit seulement le PRÉDICAT pur, commun aux deux futurs
+// appelants, pour que ni l'un ni l'autre n'aient à réimplémenter la règle.
+//
+// Porte également la cohérence du drapeau `SegmentFlags::VOLATILE`
+// (handoff §4.3, dernière clause de la liste : « invariants de cohérence
+// (VolatileSlot ⇔ NotApplicable, flag VOLATILE) ») : un segment ne peut pas
+// porter `VOLATILE` sans que sa Source résolue soit `VolatileSlot`, ni
+// l'inverse — sans cette seconde moitié, un segment `VolatileSlot` non
+// marqué `VOLATILE` échapperait à `is_single_file_compatible` (DESIGN §9.1)
+// alors qu'il ne devrait jamais être éligible à `SingleFile`.
+/// Cohérence d'un `SegmentDescriptor` avec la `SourceSpec` qu'il référence
+/// (déjà résolue par l'appelant, typiquement via `route.sources[source.0]`
+/// — cette résolution elle-même n'est pas de la responsabilité de ce
+/// module). Vrai si et seulement si :
+///
+/// - `source` est `VolatileSlot` ⟺ `segment.selection` est `NotApplicable` ;
+/// - `source` est `VolatileSlot` ⟺ `segment.flags` porte `VOLATILE`.
+///
+/// Prédicat pur, sans allocation, sans effet de bord — ne panique jamais,
+/// ne décide d'aucune politique d'erreur : la traduction en échec de build
+/// (V2) ou en réponse 500 (V1c) reste entièrement à la charge de l'appelant.
+pub fn segment_matches_source(segment: &SegmentDescriptor, source: &SourceSpec) -> bool {
+    let source_is_volatile = matches!(source, SourceSpec::VolatileSlot { .. });
+
+    let selection_matches = matches!(
+        (segment.selection, source_is_volatile),
+        (SegmentSelection::NotApplicable, true)
+            | (SegmentSelection::Constant(_), false)
+            | (SegmentSelection::RequestSlot(_), false)
+    );
+
+    let flags_match = segment.flags.is_volatile() == source_is_volatile;
+
+    selection_matches && flags_match
+}
+
+#[cfg(test)]
+mod tests_segment_matches_source {
+    use super::{
+        ProducerKey, SegmentDescriptor, SegmentFlags, SegmentSelection, SourceId, SourceKey,
+        SourceSpec, segment_matches_source,
+    };
+
+    fn volatile_source() -> SourceSpec {
+        SourceSpec::VolatileSlot {
+            capacity: 256,
+            producer: ProducerKey(1),
+        }
+    }
+
+    fn static_source() -> SourceSpec {
+        SourceSpec::StaticArtifact { key: SourceKey(0) }
+    }
+
+    #[test]
+    fn volatile_source_with_not_applicable_and_flag_is_coherent() {
+        let segment = SegmentDescriptor {
+            source: SourceId(0),
+            selection: SegmentSelection::NotApplicable,
+            flags: SegmentFlags::VOLATILE,
+        };
+        assert!(segment_matches_source(&segment, &volatile_source()));
+    }
+
+    #[test]
+    fn static_source_with_constant_and_no_flag_is_coherent() {
+        let segment = SegmentDescriptor {
+            source: SourceId(0),
+            selection: SegmentSelection::Constant(1),
+            flags: SegmentFlags::NONE,
+        };
+        assert!(segment_matches_source(&segment, &static_source()));
+    }
+
+    #[test]
+    fn static_source_with_request_slot_and_no_flag_is_coherent() {
+        let segment = SegmentDescriptor {
+            source: SourceId(0),
+            selection: SegmentSelection::RequestSlot(super::RequestValueId(0)),
+            flags: SegmentFlags::NONE,
+        };
+        assert!(segment_matches_source(&segment, &static_source()));
+    }
+
+    // ── violations : jamais Constant(0)/RequestSlot(0) comme substitut de
+    //    NotApplicable pour une Source volatile (cf. doc de la variante) ──
+
+    #[test]
+    fn volatile_source_with_constant_selection_is_incoherent() {
+        let segment = SegmentDescriptor {
+            source: SourceId(0),
+            selection: SegmentSelection::Constant(0),
+            flags: SegmentFlags::VOLATILE,
+        };
+        assert!(!segment_matches_source(&segment, &volatile_source()));
+    }
+
+    #[test]
+    fn volatile_source_with_request_slot_selection_is_incoherent() {
+        let segment = SegmentDescriptor {
+            source: SourceId(0),
+            selection: SegmentSelection::RequestSlot(super::RequestValueId(0)),
+            flags: SegmentFlags::VOLATILE,
+        };
+        assert!(!segment_matches_source(&segment, &volatile_source()));
+    }
+
+    #[test]
+    fn static_source_with_not_applicable_selection_is_incoherent() {
+        let segment = SegmentDescriptor {
+            source: SourceId(0),
+            selection: SegmentSelection::NotApplicable,
+            flags: SegmentFlags::NONE,
+        };
+        assert!(!segment_matches_source(&segment, &static_source()));
+    }
+
+    // ── violations : cohérence du drapeau VOLATILE, indépendamment de la
+    //    sélection ─────────────────────────────────────────────────────
+
+    #[test]
+    fn volatile_source_without_volatile_flag_is_incoherent() {
+        let segment = SegmentDescriptor {
+            source: SourceId(0),
+            selection: SegmentSelection::NotApplicable,
+            flags: SegmentFlags::NONE, // manque VOLATILE
+        };
+        assert!(!segment_matches_source(&segment, &volatile_source()));
+    }
+
+    #[test]
+    fn static_source_with_volatile_flag_is_incoherent() {
+        let segment = SegmentDescriptor {
+            source: SourceId(0),
+            selection: SegmentSelection::Constant(1),
+            flags: SegmentFlags::VOLATILE, // ne devrait jamais être posé ici
+        };
+        assert!(!segment_matches_source(&segment, &static_source()));
+    }
+}
 
 #[cfg(test)]
 mod tests_segment_descriptor {
