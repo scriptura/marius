@@ -20,19 +20,26 @@
 //!   jamais par un appel direct à `LiveRegistry`. L'alimentation réelle par
 //!   le catalogue AOT/`LiveRegistry` est une intégration distincte,
 //!   délibérément non entreprise ici (cf. rapport de session).
-//! - Il n'invente ni producteur, ni cycle d'invalidation, ni stockage
-//!   effectif, ni protocole de publication, ni longueur effective pour les
-//!   Sources `Volatile` — `SourceSpec::VolatileSlot` reste une description
-//!   AOT sans alimentation runtime à ce stade.
+//! - Il n'invente ni catalogue de producteurs, ni cycle d'invalidation, ni
+//!   protocole de publication pour les Sources `Volatile` — le contrat
+//!   d'ownership/longueur effective (P1/P2/P3, V1b) est implémenté
+//!   (`VolatileStorage`, `resolve_volatile_generation`,
+//!   `resolve_volatile_range`), mais le producteur reste **injecté** par
+//!   l'appelant (closure), jamais résolu depuis un vrai catalogue
+//!   `ProducerKey → implémentation` (V3 : SQL/`account_core`).
 //! - Il ne construit aucun `IoSlice`, ne connaît ni `writev`/`sendmsg`, ni
-//!   Axum, ni Hyper, ni Tokio.
+//!   Axum, ni Hyper, ni Tokio. Aucune dépendance vers `bytes` — l'adaptation
+//!   `Bytes::from_owner` reste côté `marius-server` (V1c).
 //! - `RequestArena` ne fixe aucun mécanisme d'acquisition, pool, stratégie
 //!   de recyclage, ni unité d'exécution propriétaire — seuls les
-//!   invariants verrouillés par DESIGN §11.1 sont implémentés.
+//!   invariants verrouillés par DESIGN §11.1 sont implémentés. `VolatileStorage`
+//!   (ci-dessous) est un stockage possédé **distinct** de `RequestArena` —
+//!   ce n'est pas une réintroduction de l'arène worker réutilisée (contrat
+//!   Volatile V1b, contrainte 1).
 
 use std::sync::Arc;
 
-use marius_projection::{RouteDescriptor, SourceId, SourceKey, SourceSpec};
+use marius_projection::{ProducerKey, RouteDescriptor, SourceId, SourceKey, SourceSpec};
 
 use crate::pack_html_index::PackHtmlIndex;
 
@@ -44,38 +51,128 @@ use crate::pack_html_index::PackHtmlIndex;
 /// (DESIGN §3). Enum fermé, pas trait object — cohérent avec l'interdiction
 /// d'indirection dynamique sur le chemin chaud (ADR-011 §7).
 ///
-/// N'est PAS `Copy` — la variante `Mmap` porte un `Arc<PackHtmlIndex>`
-/// (`Arc: Drop`), incompatible avec `Copy` par construction du langage
-/// (DESIGN §3, correction explicite d'une version antérieure de la
-/// délibération qui la traitait comme telle par erreur).
+/// N'est PAS `Copy` — la variante `Mmap` porte un `Arc<PackHtmlIndex>` et la
+/// variante `Volatile` un `Arc<VolatileStorage>` (`Arc: Drop`), incompatible
+/// avec `Copy` par construction du langage (DESIGN §3, correction explicite
+/// d'une version antérieure de la délibération qui la traitait comme telle
+/// par erreur).
 #[derive(Clone)]
 pub enum MaterializedSource {
-    /// Artefact statique publié — aujourd'hui l'unique variante réellement
-    /// constructible par ce module (`resolve_generation` ci-dessous).
+    /// Artefact statique publié — construit par `resolve_generation`
+    /// ci-dessous.
     Mmap { handle: Arc<PackHtmlIndex> },
-    /// Segment de requête (session, panier...) — variante structurelle
-    /// préparée par le DESIGN, mais dont le producteur, le cycle
-    /// d'invalidation, le stockage et le protocole de publication restent
-    /// délibérément non implémentés à cette phase (GO §8). Aucune fonction
-    /// de ce module ne construit cette variante.
-    Volatile { arena_ptr: *const u8 },
+    /// Segment volatile (session, panier...) — contrat Volatile P1/P2/P3
+    /// (V1b) : stockage **possédé et partageable** (`Arc<VolatileStorage>`),
+    /// jamais un pointeur emprunté sur une arène recyclée. Construit
+    /// exclusivement par `resolve_volatile_generation` ci-dessous — jamais
+    /// par `resolve_generation` (qui reste le chemin `StaticArtifact`
+    /// uniquement).
+    Volatile { storage: Arc<VolatileStorage> },
 }
 
 // `#[derive(Debug)]` est impossible ici : `PackHtmlIndex` (crate::pack_html_index,
 // non modifié par cette phase) ne dérive pas `Debug`, et `Arc<T>: Debug`
 // exige `T: Debug`. Implémentation manuelle, minimale — n'expose jamais le
-// contenu de `PackHtmlIndex`, seulement la variante.
+// contenu de `PackHtmlIndex` ni le contenu produit d'un `VolatileStorage`
+// (P1 : jamais de fuite d'un contenu potentiellement sensible via un trait
+// de diagnostic — seule la métadonnée, longueur/capacité, est affichée),
+// seulement la variante.
 impl std::fmt::Debug for MaterializedSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MaterializedSource::Mmap { .. } => f.write_str("MaterializedSource::Mmap(..)"),
-            MaterializedSource::Volatile { arena_ptr } => f
+            MaterializedSource::Volatile { storage } => f
                 .debug_struct("MaterializedSource::Volatile")
-                .field("arena_ptr", arena_ptr)
+                .field("effective_len", &storage.effective_len())
+                .field("capacity", &storage.capacity())
                 .finish(),
         }
     }
 }
+
+// =============================================================================
+// VolatileStorage — contrat Volatile P1/P2/P3, V1b
+// =============================================================================
+//
+// handoff-volatile-vertical-slice.md §6 (repris par NOTE-contrat-volatile-v1.md) :
+//   P1 — aucun raw pointer dans MaterializedSource::Volatile ;
+//   P2 — longueur effective portée par le stockage, effective_len > capacity
+//        = erreur contrôlée (jamais de lecture/écriture hors bornes) ;
+//   P3 — handle possédé et partageable, aucune dépendance bytes/axum/hyper.
+//
+// Design retenu — PAS de double buffer : `from_produced` prend possession
+// directement du `Vec<u8>` déjà produit par l'appelant (le futur producteur
+// réel écrira typiquement dans un `String` — `String::into_bytes()` est une
+// reinterprétation de layout, pas une copie). Aucune seconde allocation
+// `capacity`-dimensionnée n'est créée pour y recopier ce contenu : le
+// buffer possédé est dimensionné exactement à ce qui a été produit
+// (`effective_len`), `capacity` n'est conservée que comme borne AOT à
+// vérifier UNE fois, ici, pas comme taille d'allocation. Voir le rapport de
+// session pour la réserve honnête sur `Vec::into_boxed_slice()` (peut
+// réallouer si le `Vec` produit a une capacité excédentaire — détail de la
+// bibliothèque standard, pas une copie introduite par ce module).
+
+/// Stockage possédé d'un contenu volatile — contrat P1/P2/P3.
+///
+/// `capacity` est la borne AOT (`SourceSpec::VolatileSlot.capacity`),
+/// vérifiée une seule fois à la construction — jamais la taille allouée du
+/// buffer, qui n'est dimensionné qu'à ce qui a réellement été produit.
+pub struct VolatileStorage {
+    buf: Box<[u8]>,
+    capacity: u32,
+}
+
+/// Erreur contrôlée — P2 : `effective_len > capacity` au moment de la
+/// matérialisation. Seule issue de ce cas : jamais de troncature, jamais de
+/// panic, jamais d'accès hors bornes. La traduction en réponse HTTP 500
+/// (NOTE-contrat-volatile-v1.md, P2) reste à la charge de l'appelant — ce
+/// type ne fait que porter les deux valeurs nécessaires à ce diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VolatileCapacityExceeded {
+    pub capacity: u32,
+    pub effective_len: usize,
+}
+
+impl VolatileStorage {
+    /// Prend possession de `payload` — aucune copie introduite par cette
+    /// fonction (cf. commentaire de section). Échoue si `payload.len()`
+    /// dépasse `capacity` (P2) ; réussit, y compris pour `payload` vide
+    /// (`effective_len = 0 <= capacity`, quelle que soit `capacity`).
+    pub fn from_produced(payload: Vec<u8>, capacity: u32) -> Result<Self, VolatileCapacityExceeded> {
+        if payload.len() > capacity as usize {
+            return Err(VolatileCapacityExceeded {
+                capacity,
+                effective_len: payload.len(),
+            });
+        }
+        Ok(Self {
+            buf: payload.into_boxed_slice(),
+            capacity,
+        })
+    }
+
+    /// Longueur réellement produite — jamais `capacity` elle-même (DESIGN
+    /// Volatile P2 : les deux sont des grandeurs distinctes).
+    #[inline(always)]
+    pub fn effective_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    #[inline(always)]
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    #[inline(always)]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.buf
+    }
+}
+
+const _: () = assert!(
+    !std::mem::needs_drop::<VolatileCapacityExceeded>(),
+    "VolatileCapacityExceeded ne porte que des scalaires — ne doit jamais nécessiter de Drop"
+);
 
 /// Résout une génération publiée pour `spec`, via `fetch` — cette primitive
 /// ne connaît jamais `LiveRegistry` directement (séparation volontaire,
@@ -84,9 +181,13 @@ impl std::fmt::Debug for MaterializedSource {
 /// dur ici. Les tests de ce module injectent des `PackHtmlIndex`
 /// synthétiques — ces fixtures ne sont pas une API de production.
 ///
-/// Ne gère aujourd'hui que `SourceSpec::StaticArtifact` — `VolatileSlot`
-/// retourne toujours `None` : son producteur n'existe pas encore (GO §8),
-/// ce n'est pas une omission mais une limite volontaire de cette phase.
+/// Ne gère que `SourceSpec::StaticArtifact` — `VolatileSlot` retourne
+/// toujours `None` ici, non par limitation mais par nature : un Volatile
+/// n'est jamais « récupéré » depuis un catalogue déjà publié (§2.1, P5 —
+/// il est *produit* à la requête). Voir [`resolve_volatile_generation`]
+/// pour ce second chemin, délibérément distinct plutôt que fusionné dans
+/// cette fonction (contrat Volatile V1b, contrainte 5 : « ne détourne pas
+/// le mécanisme statique »).
 pub fn resolve_generation<F>(spec: &SourceSpec, fetch: F) -> Option<MaterializedSource>
 where
     F: FnOnce(SourceKey) -> Option<Arc<PackHtmlIndex>>,
@@ -96,6 +197,45 @@ where
             fetch(*key).map(|handle| MaterializedSource::Mmap { handle })
         }
         SourceSpec::VolatileSlot { .. } => None,
+    }
+}
+
+/// Résout (matérialise) une Source `VolatileSlot`, via `produce` — pendant
+/// équivalent de `resolve_generation` pour le chemin volatile, contrat
+/// Volatile V1b. Distinct par nature, pas seulement par signature : un
+/// Volatile n'a pas de génération publiée à *récupérer* (`fetch`), il a un
+/// contenu à *produire* (`produce`) — d'où deux fonctions plutôt qu'un
+/// paramètre supplémentaire sur `resolve_generation` (qui resterait, pour
+/// tout appelant `StaticArtifact` existant, une signature inchangée).
+///
+/// `produce` reçoit la `ProducerKey` opaque portée par la Source (P8) et
+/// renvoie le contenu produit — cette phase (V1b) n'impose aucune forme au
+/// producteur au-delà de cette closure injectée ; aucun catalogue réel
+/// `ProducerKey → implémentation` n'existe encore (V3).
+///
+/// Retourne :
+/// - `None` si `spec` n'est pas `VolatileSlot` (mésappariement de variante,
+///   même discipline que `resolve_generation` pour `StaticArtifact`) ;
+/// - `Some(Err(_))` si le contenu produit dépasse `capacity` (P2) ;
+/// - `Some(Ok(_))` sinon.
+pub fn resolve_volatile_generation<Prod>(
+    spec: &SourceSpec,
+    produce: Prod,
+) -> Option<Result<MaterializedSource, VolatileCapacityExceeded>>
+where
+    Prod: FnOnce(ProducerKey) -> Vec<u8>,
+{
+    match spec {
+        SourceSpec::VolatileSlot { capacity, producer } => {
+            let payload = produce(*producer);
+            Some(
+                VolatileStorage::from_produced(payload, *capacity)
+                    .map(|storage| MaterializedSource::Volatile {
+                        storage: Arc::new(storage),
+                    }),
+            )
+        }
+        SourceSpec::StaticArtifact { .. } => None,
     }
 }
 
@@ -236,8 +376,13 @@ const _: () = assert!(
 /// `SegmentSelection`/le contexte de requête est hors périmètre de cette
 /// phase, cf. rapport de session).
 ///
-/// Ne gère aujourd'hui que `MaterializedSource::Mmap` — `Volatile` retourne
-/// toujours `None`, pour la même raison que `resolve_generation` (GO §8).
+/// Ne gère que `MaterializedSource::Mmap` — `Volatile` retourne toujours
+/// `None` ici, non par limitation mais par nature : un segment `Volatile`
+/// n'est jamais sélectionné par valeur (`SegmentSelection::NotApplicable`,
+/// P7) — il n'y a donc jamais de `selection_value` légitime à lui
+/// transmettre. Voir [`resolve_volatile_range`] pour ce second chemin, qui
+/// ne prend délibérément aucun `selection_value` (contrat Volatile V1b,
+/// contrainte 5 : « ne détourne pas le mécanisme statique »).
 pub fn resolve_range<'a>(
     source: &'a MaterializedSource,
     selection_value: i64,
@@ -249,6 +394,23 @@ pub fn resolve_range<'a>(
             Some(ResolvedRange { bytes })
         }
         MaterializedSource::Volatile { .. } => None,
+    }
+}
+
+/// Résout la plage physique d'un segment `Volatile` déjà matérialisé —
+/// pendant de `resolve_range` pour le chemin volatile, contrat V1b. Aucun
+/// `selection_value` : la Source entière EST la plage résolue (P7,
+/// `SegmentSelection::NotApplicable`) — rien à extraire par clé.
+///
+/// Retourne `None` si `source` n'est pas `Volatile`, même discipline que
+/// `resolve_range` pour `Mmap` — jamais un panic sur un mésappariement de
+/// variante.
+pub fn resolve_volatile_range(source: &MaterializedSource) -> Option<ResolvedRange<'_>> {
+    match source {
+        MaterializedSource::Volatile { storage } => Some(ResolvedRange {
+            bytes: storage.as_slice(),
+        }),
+        MaterializedSource::Mmap { .. } => None,
     }
 }
 
@@ -601,8 +763,12 @@ mod tests {
 
     #[test]
     fn resolve_range_volatile_is_never_resolved() {
+        // resolve_range() reste le chemin sélection/StaticArtifact — même
+        // avec un stockage volatile valide et non vide, il ne le résout
+        // jamais (cf. resolve_volatile_range ci-dessous pour le bon chemin).
+        let storage = VolatileStorage::from_produced(b"Alice".to_vec(), 64).unwrap();
         let source = MaterializedSource::Volatile {
-            arena_ptr: std::ptr::null(),
+            storage: Arc::new(storage),
         };
         assert!(resolve_range(&source, 1).is_none());
     }
@@ -610,6 +776,167 @@ mod tests {
     #[test]
     fn resolved_range_never_needs_drop() {
         assert!(!std::mem::needs_drop::<ResolvedRange<'static>>());
+    }
+
+    // =========================================================================
+    // Contrat Volatile V1b — P1/P2/P3, tests A-E (rapport de session)
+    // =========================================================================
+
+    fn volatile_spec(capacity: u32, producer: u16) -> SourceSpec {
+        SourceSpec::VolatileSlot {
+            capacity,
+            producer: ProducerKey(producer),
+        }
+    }
+
+    // ── A. longueur effective ────────────────────────────────────────────
+
+    #[test]
+    fn volatile_effective_len_is_the_produced_length_not_the_capacity() {
+        let spec = volatile_spec(192, 1);
+        let payload_37_bytes = vec![b'A'; 37]; // longueur construite, pas comptée à la main
+        let resolved = resolve_volatile_generation(&spec, move |_producer| payload_37_bytes)
+            .expect("spec VolatileSlot doit produire Some(..)")
+            .expect("37 <= 192 : la production doit réussir");
+
+        let range = resolve_volatile_range(&resolved).expect("Volatile doit se résoudre");
+        assert_eq!(range.len(), 37);
+
+        let MaterializedSource::Volatile { storage } = &resolved else {
+            panic!("attendu Volatile");
+        };
+        assert_eq!(storage.effective_len(), 37);
+        assert_eq!(storage.capacity(), 192);
+    }
+
+    // ── B. dépassement de capacité ───────────────────────────────────────
+
+    #[test]
+    fn volatile_capacity_overflow_is_a_controlled_error_not_a_panic() {
+        // Test unitaire direct sur VolatileStorage — le point unique où P2
+        // est vérifié (cf. commentaire de section VolatileStorage).
+        // VolatileStorage ne dérive ni PartialEq ni Debug (volontaire — pas
+        // de fuite de contenu via un trait de diagnostic, cf. Debug de
+        // MaterializedSource) : comparaison par pattern match, pas
+        // assert_eq! sur le Result complet.
+        let payload = vec![0u8; 33];
+        match VolatileStorage::from_produced(payload, 32) {
+            Err(err) => assert_eq!(
+                err,
+                VolatileCapacityExceeded {
+                    capacity: 32,
+                    effective_len: 33,
+                }
+            ),
+            Ok(_) => panic!("33 > 32 doit échouer (P2), jamais réussir"),
+        }
+    }
+
+    #[test]
+    fn volatile_capacity_overflow_propagates_through_resolve_volatile_generation() {
+        let spec = volatile_spec(32, 1);
+        let resolved = resolve_volatile_generation(&spec, |_producer| vec![0u8; 33])
+            .expect("spec VolatileSlot doit produire Some(..)");
+        // MaterializedSource ne dérive pas PartialEq (cf. commentaire de
+        // l'enum) — comparaison explicite plutôt qu'un assert_eq! sur le
+        // Result complet.
+        match resolved {
+            Err(err) => assert_eq!(
+                err,
+                VolatileCapacityExceeded {
+                    capacity: 32,
+                    effective_len: 33,
+                }
+            ),
+            Ok(_) => panic!("33 > 32 doit échouer (P2), jamais réussir"),
+        }
+        // Aucun MaterializedSource::Volatile n'existe dans ce cas — rien à
+        // résoudre, rien à lire hors bornes : le Err() EST l'issue complète.
+    }
+
+    // ── C. ownership : le stockage reste vivant tant qu'un Arc l'est ────
+
+    #[test]
+    fn volatile_storage_outlives_the_materialized_source_that_first_held_it() {
+        let spec = volatile_spec(64, 1);
+        let resolved = resolve_volatile_generation(&spec, |_| b"contenu vivant".to_vec())
+            .unwrap()
+            .unwrap();
+
+        let MaterializedSource::Volatile { storage } = &resolved else {
+            panic!("attendu Volatile");
+        };
+        let storage_handle = Arc::clone(storage); // P4 : clonage du handle possédé
+
+        drop(resolved); // le MaterializedSource d'origine ne vit plus
+
+        // Le stockage reste utilisable via le clone conservé — sa validité
+        // ne dépend d'aucun MaterializedSource particulier, seulement du
+        // dernier Arc encore vivant (P3 : possédé ET partageable).
+        assert_eq!(storage_handle.as_slice(), b"contenu vivant");
+
+        let source_from_clone = MaterializedSource::Volatile {
+            storage: storage_handle,
+        };
+        let range = resolve_volatile_range(&source_from_clone).unwrap();
+        assert_eq!(range.as_slice(), b"contenu vivant");
+    }
+
+    // ── D. snapshot : une matérialisation ne voit jamais une production
+    //    ultérieure ─────────────────────────────────────────────────────
+
+    #[test]
+    fn volatile_snapshot_is_unaffected_by_a_later_production() {
+        let spec = volatile_spec(64, 1);
+
+        // Première matérialisation : "Alice".
+        let first = resolve_volatile_generation(&spec, |_| b"Alice".to_vec())
+            .unwrap()
+            .unwrap();
+        let first_range = resolve_volatile_range(&first).unwrap();
+        assert_eq!(first_range.as_slice(), b"Alice");
+
+        // Une production ultérieure et indépendante renvoie "Bob" — aucun
+        // mécanisme de ce module ne relie les deux : `resolve_volatile_generation`
+        // matérialise à chaque appel, jamais en place (pas de swap, pas de
+        // mutation partagée à travers deux appels).
+        let second = resolve_volatile_generation(&spec, |_| b"Bob".to_vec())
+            .unwrap()
+            .unwrap();
+        let second_range = resolve_volatile_range(&second).unwrap();
+        assert_eq!(second_range.as_slice(), b"Bob");
+
+        // L'instantané de la première matérialisation, toujours vivant,
+        // n'a pas changé.
+        assert_eq!(first_range.as_slice(), b"Alice");
+    }
+
+    // ── E. absence de copie entre le stockage possédé et la plage résolue ─
+
+    #[test]
+    fn resolve_volatile_range_borrows_the_owned_buffer_without_copying() {
+        // Propriété réellement garantie par le type (pas un détail
+        // d'implémentation du producteur, cf. commentaire de section
+        // VolatileStorage) : ResolvedRange emprunte directement le buffer
+        // possédé par VolatileStorage — égalité de POINTEUR, pas seulement
+        // de contenu, même méthode que I5 (handoff-t2a-experimental-integration).
+        let spec = volatile_spec(64, 1);
+        let resolved = resolve_volatile_generation(&spec, |_| b"pas de copie ici".to_vec())
+            .unwrap()
+            .unwrap();
+
+        let MaterializedSource::Volatile { storage } = &resolved else {
+            panic!("attendu Volatile");
+        };
+        let storage_ptr = storage.as_slice().as_ptr();
+
+        let range = resolve_volatile_range(&resolved).unwrap();
+        assert_eq!(
+            range.ptr(),
+            storage_ptr,
+            "ResolvedRange doit pointer exactement dans le buffer de \
+             VolatileStorage — aucune recopie à la résolution"
+        );
     }
 
     // ── RequestArena : capacité bornée, bump/reset ──────────────────────
