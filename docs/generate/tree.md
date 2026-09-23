@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-20 20:27:41
+**Généré le:** 2026-09-23 06:58:36
 
 ## Racine du Workspace
 
@@ -268,7 +268,8 @@
 │   ├── CONTRAT-implementation-multi-slot-varlena.md
 │   ├── CONTRAT-implementation-projection-segmentee.md
 │   ├── CONTRAT-implementation-varlena-raw.md
-│   └── CONTRAT-marius-one-page-extension.md
+│   ├── CONTRAT-marius-one-page-extension.md
+│   └── CONTRAT-volatile-v1.md
 ├── generate
 │   └── tree.md
 ├── guides
@@ -284,6 +285,7 @@
 │   ├── SPECIFICATION-transport-segmente-t2a.md
 │   ├── SUIVI-js-deps-points-en-attente.md
 │   ├── handoff-forge-t2a-production-integration.md
+│   ├── handoff-volatile-vertical-slice.md
 │   ├── note-post-phase-5.3-generate-main.md
 │   └── risks.md
 ├── manifestos
@@ -333,6 +335,6 @@
     ├── provisioning-projection-specification.md
     └── specification-AOT-boundary-volatile-and-emission-plan-contract.md
 
-17 directories, 103 files
+17 directories, 105 files
 ```
 
