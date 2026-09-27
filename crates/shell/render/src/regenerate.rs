@@ -29,7 +29,8 @@
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter, Write};
-use std::path::Path;
+use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -186,6 +187,16 @@ async fn fetch_delta_batch<P: Projection>(
         .into_inner()
         .map_err(|e| io::Error::other(e.to_string()))?;
 
+    Ok(build_delta_batch(payload_index, payload, ids))
+}
+
+/// Construit un `DeltaBatch` depuis un index physique déjà rendu (entries
+/// triées C1 + détection des suppressions) — factorisé hors de
+/// `fetch_delta_batch` (V2d) pour être réutilisé, à l'identique, par
+/// `fetch_delta_batches_with_volatile_split` ci-dessous : même règle de
+/// détection des suppressions pour le monolithique et pour head/tail,
+/// jamais deux implémentations divergentes de la même logique.
+fn build_delta_batch(payload_index: Vec<PackfileEntry>, payload: Vec<u8>, ids: &[i64]) -> DeltaBatch {
     let mut entries: Vec<DeltaEntry> = Vec::with_capacity(ids.len());
     for entry in &payload_index {
         debug_assert!(
@@ -213,15 +224,327 @@ async fn fetch_delta_batch<P: Projection>(
     }
 
     // C1 (sweep.rs) : delta.entries strictement trié par entity_id croissant.
-    // Précondition reconstruite ici, pas reportée sur l'appelant — `ids` n'a
-    // aucune obligation d'ordre côté Collector::flush() (hors scope de cette
-    // session). Un doublon résiduel dans `ids` violerait C1 (tri strict, pas
-    // large) et serait détecté par le debug_assert de merge_sweep, pas
-    // silencieusement absorbé ici.
     entries.sort_unstable_by_key(|e| e.entity_id);
 
-    Ok(DeltaBatch { entries, payload })
+    DeltaBatch { entries, payload }
 }
+
+// =============================================================================
+// Région volatile (V2c/V2d) — extension minimale, PAS un moteur générique
+// =============================================================================
+//
+// Exactement DEUX cibles supplémentaires fixes (head, tail), jamais une
+// liste arbitraire de N artefacts : `SplitRenderTarget` est utilisé en
+// paire (`Option<(SplitRenderTarget<P>, SplitRenderTarget<P>)>`), jamais en
+// `Vec`. `fetch_delta_batches_with_volatile_split` appelle `P::fetch_batch`
+// UNE fois par chunk — jamais une seconde ingestion pour head/tail : les
+// trois rendus (monolithique + head + tail) partagent le même `batch`
+// (`&[(P::Record, P::VarlenOwned)]`, emprunté, jamais cloné) déjà fetché.
+
+/// Une cible de rendu supplémentaire (head OU tail) — clé de packfile,
+/// capacité, fonction de rendu LIBRE (jamais une méthode du trait
+/// `Projection` : `render_head`/`render_tail` restent hors trait, décision
+/// V2c §5 — le trait reste celui du composant/table, inchangé).
+pub struct SplitRenderTarget<P: Projection> {
+    pub packfile_key: &'static str,
+    pub total_cap: usize,
+    pub render: fn(&P::Record, &P::VarlenOwned, &mut String),
+}
+
+/// Pendant minimal de `BatchRenderer` pour une fonction de rendu simple
+/// (`String` direct, aucun `RenderChunk`) — jamais un remplacement de
+/// `BatchRenderer` (celui-ci reste inchangé, utilisé tel quel pour le
+/// rendu monolithique ci-dessous). `render_head`/`render_tail` n'ont pas
+/// besoin de la mécanique segments empruntés/bufferisés de
+/// `P::render_chunks` (V2c : aucune des deux moitiés ne porte le champ
+/// `marius:large_content` en zéro-copie — documenté comme hors périmètre
+/// du vertical slice, pas un oubli).
+struct SimpleBatchRenderer<P: Projection> {
+    buf: String,
+    index: Vec<PackfileEntry>,
+    _proj: PhantomData<P>,
+}
+
+impl<P: Projection> SimpleBatchRenderer<P> {
+    fn new(total_cap: usize, batch_len: usize) -> Self {
+        Self {
+            buf: String::with_capacity(total_cap),
+            index: Vec::with_capacity(batch_len),
+            _proj: PhantomData,
+        }
+    }
+
+    fn render_batch<W: Write>(
+        &mut self,
+        records: &[(P::Record, P::VarlenOwned)],
+        render: fn(&P::Record, &P::VarlenOwned, &mut String),
+        writer: &mut BufWriter<W>,
+        offset_start: u64,
+    ) -> io::Result<u64> {
+        let mut offset = offset_start;
+        for (record, varlena) in records {
+            self.buf.clear();
+            render(record, varlena, &mut self.buf);
+            let bytes = self.buf.as_bytes();
+            writer.write_all(bytes)?;
+            let len = bytes.len() as u32;
+            self.index.push(PackfileEntry {
+                id: P::record_id(record),
+                offset,
+                len,
+                _pad: [0u8; 4],
+            });
+            offset += len as u64;
+        }
+        Ok(offset)
+    }
+
+    fn reset(&mut self, next_batch_len: usize) {
+        self.index.clear();
+        if self.index.capacity() < next_batch_len {
+            self.index.reserve(next_batch_len - self.index.capacity());
+        }
+    }
+
+    fn index(&self) -> &[PackfileEntry] {
+        &self.index
+    }
+}
+
+/// Accumulateurs head/tail — un seul champ (`Option`) plutôt que deux
+/// paramètres séparés, pour ne jamais désynchroniser la paire pendant la
+/// boucle de chunks ci-dessous.
+struct SplitAccumulator<P: Projection> {
+    head_writer: BufWriter<Vec<u8>>,
+    head_renderer: SimpleBatchRenderer<P>,
+    head_index: Vec<PackfileEntry>,
+    head_offset: u64,
+    tail_writer: BufWriter<Vec<u8>>,
+    tail_renderer: SimpleBatchRenderer<P>,
+    tail_index: Vec<PackfileEntry>,
+    tail_offset: u64,
+}
+
+/// Pendant de `fetch_delta_batch` — même contrat (une ingestion par chunk,
+/// suppressions détectées de façon identique via `build_delta_batch`),
+/// étendu pour produire, en plus du `DeltaBatch` monolithique, les deux
+/// `DeltaBatch` head/tail quand `volatile_split` est fourni — à partir du
+/// MÊME `batch` fetché, jamais d'un second appel à `P::fetch_batch`.
+async fn fetch_delta_batches_with_volatile_split<P: Projection>(
+    pool: &sqlx::PgPool,
+    ids: &[i64],
+    total_cap: usize,
+    volatile_split: Option<&(SplitRenderTarget<P>, SplitRenderTarget<P>)>,
+) -> io::Result<(DeltaBatch, Option<(DeltaBatch, DeltaBatch)>)> {
+    let mut mono_writer = BufWriter::new(Vec::<u8>::new());
+    let mut mono_renderer = BatchRenderer::<P>::new(total_cap, ids.len().min(CHUNK_SIZE));
+    let mut mono_index: Vec<PackfileEntry> = Vec::with_capacity(ids.len());
+    let mut mono_offset = 0u64;
+
+    let mut split_acc: Option<SplitAccumulator<P>> = volatile_split.map(|(head, tail)| {
+        let batch_len = ids.len().min(CHUNK_SIZE);
+        SplitAccumulator {
+            head_writer: BufWriter::new(Vec::<u8>::new()),
+            head_renderer: SimpleBatchRenderer::new(head.total_cap, batch_len),
+            head_index: Vec::with_capacity(ids.len()),
+            head_offset: 0,
+            tail_writer: BufWriter::new(Vec::<u8>::new()),
+            tail_renderer: SimpleBatchRenderer::new(tail.total_cap, batch_len),
+            tail_index: Vec::with_capacity(ids.len()),
+            tail_offset: 0,
+        }
+    });
+
+    for chunk in ids.chunks(CHUNK_SIZE) {
+        // Ingestion UNIQUE pour ce chunk, partagée par les (jusqu'à) trois
+        // rendus ci-dessous — `&batch` est emprunté par chaque
+        // `render_batch`, jamais cloné, jamais refetché (contrainte V2d
+        // impérative : une seule acquisition des données source).
+        let batch = P::fetch_batch(pool, chunk)
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        mono_offset = mono_renderer.render_batch(&batch, &mut mono_writer, mono_offset)?;
+        mono_index.extend_from_slice(mono_renderer.index());
+        mono_renderer.reset(CHUNK_SIZE);
+
+        if let (Some((head, tail)), Some(acc)) = (volatile_split, split_acc.as_mut()) {
+            acc.head_offset =
+                acc.head_renderer
+                    .render_batch(&batch, head.render, &mut acc.head_writer, acc.head_offset)?;
+            acc.head_index.extend_from_slice(acc.head_renderer.index());
+            acc.head_renderer.reset(CHUNK_SIZE);
+
+            acc.tail_offset =
+                acc.tail_renderer
+                    .render_batch(&batch, tail.render, &mut acc.tail_writer, acc.tail_offset)?;
+            acc.tail_index.extend_from_slice(acc.tail_renderer.index());
+            acc.tail_renderer.reset(CHUNK_SIZE);
+        }
+    }
+
+    let mono_payload = mono_writer
+        .into_inner()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let mono_delta = build_delta_batch(mono_index, mono_payload, ids);
+
+    let split_delta = match split_acc {
+        None => None,
+        Some(acc) => {
+            let head_payload = acc
+                .head_writer
+                .into_inner()
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            let tail_payload = acc
+                .tail_writer
+                .into_inner()
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            Some((
+                build_delta_batch(acc.head_index, head_payload, ids),
+                build_delta_batch(acc.tail_index, tail_payload, ids),
+            ))
+        }
+    };
+
+    Ok((mono_delta, split_delta))
+}
+
+/// Une clé déjà résolue (chemin final, chemin temporaire, ancienne
+/// génération) — même résolution que `regenerate_and_swap` (§ ci-dessus),
+/// faite une fois par clé avant tout fetch réseau (fail-fast identique).
+struct ResolvedTarget {
+    packfile_key: &'static str,
+    final_path: PathBuf,
+    tmp_path: PathBuf,
+    old: Arc<PackHtmlIndex>,
+}
+
+fn resolve_target(packfile_key: &'static str, registry: &LiveRegistry) -> io::Result<ResolvedTarget> {
+    let final_path = packfile_path_for(packfile_key);
+    let tmp_path = final_path.with_extension("tmp");
+    if let Some(parent) = tmp_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let old = registry.load(packfile_key).unwrap_or_else(|| {
+        panic!(
+            "regenerate_and_swap_with_volatile_split: clé \"{packfile_key}\" absente de la \
+             topologie figée à la construction — violation de l'invariant AOT (clé non \
+             provisionnée par with_indices()/cold_start())"
+        )
+    });
+    Ok(ResolvedTarget {
+        packfile_key,
+        final_path,
+        tmp_path,
+        old,
+    })
+}
+
+/// Extension minimale du vertical slice Volatile (V2c/V2d) : régénère
+/// l'artefact monolithique de `P` (comportement STRICTEMENT identique à
+/// `regenerate_and_swap` ci-dessus quand `volatile_split` est `None` — K=1
+/// inchangé) et, si `volatile_split` est fourni, les deux artefacts
+/// head/tail associés — à partir d'une SEULE série d'appels à
+/// `P::fetch_batch` (jamais une seconde ingestion, cf.
+/// `fetch_delta_batches_with_volatile_split`).
+///
+/// PAS un mécanisme générique « N artifacts » : exactement zéro ou deux
+/// cibles supplémentaires, jamais une liste. Le trait `Projection` reste
+/// celui du composant/table actuel — aucune `ContentCoreHeadProjection`/
+/// `ContentCoreTailProjection` introduite.
+#[allow(clippy::too_many_arguments)]
+pub async fn regenerate_and_swap_with_volatile_split<P: Projection>(
+    pool: &sqlx::PgPool,
+    ids: &[i64],
+    total_cap: usize,
+    packfile_key: &'static str,
+    volatile_split: Option<(SplitRenderTarget<P>, SplitRenderTarget<P>)>,
+    registry: &LiveRegistry,
+    io_semaphore: &tokio::sync::Semaphore,
+) -> io::Result<()> {
+    // ---- Résolution des clés — avant tout fetch réseau (fail-fast) --------
+    let mono_target = resolve_target(packfile_key, registry)?;
+    let split_targets = match &volatile_split {
+        None => None,
+        Some((head, tail)) => Some((
+            resolve_target(head.packfile_key, registry)?,
+            resolve_target(tail.packfile_key, registry)?,
+        )),
+    };
+
+    // ---- Segment 1 — fetch réseau Postgres, UNE fois pour les (jusqu'à)
+    // trois cibles. Hors périmètre du sémaphore, même discipline que
+    // regenerate_and_swap.
+    let (mono_delta, split_delta) = fetch_delta_batches_with_volatile_split::<P>(
+        pool,
+        ids,
+        total_cap,
+        volatile_split.as_ref(),
+    )
+    .await?;
+
+    // ---- Segment 2 — attente du permis : un seul acquire() pour l'écriture
+    // physique des (jusqu'à) trois packfiles de ce tick, pas un par packfile
+    // — même granularité de backpressure que le K=1 existant (un tick =
+    // une acquisition), pas une nouvelle politique introduite ici.
+    let _permit = io_semaphore
+        .acquire()
+        .await
+        .map_err(|_| io::Error::other("io_semaphore fermé de manière inattendue"))?;
+
+    // ---- Segment 3 — noyau synchrone, déporté sur spawn_blocking. Les
+    // (jusqu'à) trois fusions/écritures sont indépendantes (packfiles
+    // distincts) — regroupées dans le même spawn_blocking pour rester sous
+    // le même permis que segment 2, jamais une politique de concurrence
+    // nouvelle entre elles.
+    let new_indices = tokio::task::spawn_blocking(move || -> io::Result<Vec<(&'static str, PackHtmlIndex)>> {
+        let mut results = Vec::with_capacity(1 + split_targets.as_ref().map_or(0, |_| 2));
+        results.push((
+            mono_target.packfile_key,
+            apply_merge_io_sync(
+                mono_target.old.as_ref(),
+                &mono_delta,
+                &mono_target.tmp_path,
+                &mono_target.final_path,
+            )?,
+        ));
+        if let (Some((head_target, tail_target)), Some((head_delta, tail_delta))) =
+            (split_targets, split_delta)
+        {
+            results.push((
+                head_target.packfile_key,
+                apply_merge_io_sync(
+                    head_target.old.as_ref(),
+                    &head_delta,
+                    &head_target.tmp_path,
+                    &head_target.final_path,
+                )?,
+            ));
+            results.push((
+                tail_target.packfile_key,
+                apply_merge_io_sync(
+                    tail_target.old.as_ref(),
+                    &tail_delta,
+                    &tail_target.tmp_path,
+                    &tail_target.final_path,
+                )?,
+            ));
+        }
+        Ok(results)
+    })
+    .await
+    .map_err(io::Error::other)??;
+
+    // Dernière étape, sans exception — mêmes garanties que regenerate_and_swap :
+    // tout Err ci-dessus retourne avant cette ligne, chaque ancien Arc reste
+    // servi tel quel tant que son propre store() n'a pas eu lieu.
+    for (key, new_index) in new_indices {
+        registry.store(key, Arc::new(new_index));
+    }
+
+    Ok(())
+}
+
 
 /// Noyau fusion + I/O physique — strictement synchrone et bloquant, zéro
 /// dépendance Tokio (résolution Blocage 1). Phase 4.3 encapsulera l'APPEL
@@ -669,6 +992,12 @@ mod tests {
         *DB.lock().unwrap() = rows.to_vec();
     }
 
+    // Compteur d'appels — V2d, test de non-double-ingestion
+    // (regenerate_and_swap_with_volatile_split). N'affecte aucun test
+    // existant : incrémenté, jamais lu, sauf par les tests qui le
+    // réinitialisent explicitement.
+    static FETCH_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     #[repr(C)]
     #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
     struct StubRecord {
@@ -698,6 +1027,7 @@ mod tests {
             ids: &[i64],
         ) -> impl std::future::Future<Output = marius_projection::BatchResult<Self>> + Send
         {
+            FETCH_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let db = DB.lock().unwrap();
             let batch: Vec<(StubRecord, ())> = ids
                 .iter()
@@ -743,8 +1073,215 @@ mod tests {
         }
     }
 
-    /// Simule un échec de connexion/requête PostgreSQL — pour le test de
-    /// robustesse à l'interruption (échoue avant toute écriture I/O).
+    // ── Fonctions de rendu head/tail — V2d, mêmes conventions que
+    //    `StubProjection::render` ci-dessus (préfixe distinctif pour
+    //    différencier visuellement mono/head/tail dans les assertions).
+    fn stub_render_head(record: &StubRecord, _varlena: &(), buf: &mut String) {
+        use std::fmt::Write as _;
+        write!(buf, "<head{}>", record.generation).unwrap();
+    }
+
+    fn stub_render_tail(record: &StubRecord, _varlena: &(), buf: &mut String) {
+        use std::fmt::Write as _;
+        write!(buf, "<tail{}>", record.generation).unwrap();
+    }
+
+    // =========================================================================
+    // V2d — régénération multi-artefacts (content_core / _head / _tail)
+    // =========================================================================
+
+    /// Démontre les deux exigences centrales de V2d dans un seul test :
+    /// (1) une SEULE ingestion (`fetch_batch`) alimente les trois rendus ;
+    /// (2) `render_head`/`render_tail` (fonctions libres, pas des méthodes
+    /// du trait) reçoivent bien les MÊMES données que le rendu monolithique
+    /// — content_core_head/tail portent la même `generation` que
+    /// content_core pour chaque id.
+    #[tokio::test]
+    async fn volatile_split_renders_head_and_tail_from_a_single_fetch_batch_call() {
+        let mono_key = unique_test_key("split_mono");
+        let head_key = unique_test_key("split_head");
+        let tail_key = unique_test_key("split_tail");
+        let pool = stub_pool();
+
+        db_set(&[(1, 5), (2, 7)]);
+        write_initial_packfile(mono_key, &[(1, ""), (2, "")]);
+        write_initial_packfile(head_key, &[(1, ""), (2, "")]);
+        write_initial_packfile(tail_key, &[(1, ""), (2, "")]);
+
+        let mut indices = HashMap::new();
+        for key in [mono_key, head_key, tail_key] {
+            let idx = PackHtmlIndex::open(&packfile_path_for(key)).expect("ouverture amorce");
+            indices.insert(key, ArcSwap::from_pointee(idx));
+        }
+        let registry = LiveRegistry::with_indices(indices);
+        let io_sem = tokio::sync::Semaphore::new(1);
+
+        FETCH_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        let split = Some((
+            SplitRenderTarget::<StubProjection> {
+                packfile_key: head_key,
+                total_cap: STUB_TOTAL_CAP,
+                render: stub_render_head,
+            },
+            SplitRenderTarget::<StubProjection> {
+                packfile_key: tail_key,
+                total_cap: STUB_TOTAL_CAP,
+                render: stub_render_tail,
+            },
+        ));
+
+        regenerate_and_swap_with_volatile_split::<StubProjection>(
+            &pool,
+            &[1, 2],
+            STUB_TOTAL_CAP,
+            mono_key,
+            split,
+            &registry,
+            &io_sem,
+        )
+        .await
+        .expect("le tick segmenté doit réussir");
+
+        assert_eq!(
+            FETCH_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "une seule ingestion (un seul chunk pour 2 ids) doit alimenter \
+             les trois rendus — jamais une par cible"
+        );
+
+        let mono = registry.load(mono_key).unwrap();
+        let head = registry.load(head_key).unwrap();
+        let tail = registry.load(tail_key).unwrap();
+
+        assert_eq!(read_fragment(&mono, 1), Some("<g5>".to_string()));
+        assert_eq!(read_fragment(&mono, 2), Some("<g7>".to_string()));
+        // head/tail portent la MÊME generation que le monolithique pour
+        // chaque id — même Record, jamais une donnée divergente.
+        assert_eq!(read_fragment(&head, 1), Some("<head5>".to_string()));
+        assert_eq!(read_fragment(&head, 2), Some("<head7>".to_string()));
+        assert_eq!(read_fragment(&tail, 1), Some("<tail5>".to_string()));
+        assert_eq!(read_fragment(&tail, 2), Some("<tail7>".to_string()));
+    }
+
+    /// K=1 strictement inchangé : `regenerate_and_swap_with_volatile_split`
+    /// avec `volatile_split: None` doit produire un résultat identique,
+    /// octet pour octet, à `regenerate_and_swap` — la nouvelle fonction
+    /// n'est pas un chemin parallèle divergent pour le cas non segmenté.
+    #[tokio::test]
+    async fn volatile_split_none_matches_plain_regenerate_and_swap_byte_for_byte() {
+        let key_a = unique_test_key("k1_plain");
+        let key_b = unique_test_key("k1_via_split_fn");
+        let pool = stub_pool();
+
+        db_set(&[(1, 3)]);
+        write_initial_packfile(key_a, &[(1, "")]);
+        write_initial_packfile(key_b, &[(1, "")]);
+
+        let mut indices = HashMap::new();
+        for key in [key_a, key_b] {
+            let idx = PackHtmlIndex::open(&packfile_path_for(key)).expect("ouverture amorce");
+            indices.insert(key, ArcSwap::from_pointee(idx));
+        }
+        let registry = LiveRegistry::with_indices(indices);
+        let io_sem = tokio::sync::Semaphore::new(1);
+
+        regenerate_and_swap::<StubProjection>(&pool, &[1], STUB_TOTAL_CAP, key_a, &registry, &io_sem)
+            .await
+            .expect("regenerate_and_swap (existant) doit réussir");
+        regenerate_and_swap_with_volatile_split::<StubProjection>(
+            &pool,
+            &[1],
+            STUB_TOTAL_CAP,
+            key_b,
+            None,
+            &registry,
+            &io_sem,
+        )
+        .await
+        .expect("regenerate_and_swap_with_volatile_split(None) doit réussir");
+
+        let a = registry.load(key_a).unwrap();
+        let b = registry.load(key_b).unwrap();
+        assert_eq!(
+            read_fragment(&a, 1),
+            read_fragment(&b, 1),
+            "même contenu, que le tick passe par l'ancienne ou la nouvelle fonction"
+        );
+        assert_eq!(read_fragment(&a, 1), Some("<g3>".to_string()));
+    }
+
+    /// Convention de nommage réellement en vigueur (rapport de session,
+    /// `route_derive.rs`/`regenerate_and_swap` — jamais `P::packfile_path()`,
+    /// toujours `packfile_path_for(clé)`) : les fichiers physiques
+    /// s'appellent exactement `{clé}.bin`, jamais `{clé}_pack.bin` — vérifié
+    /// ici pour content_core_head/content_core_tail spécifiquement, pas
+    /// seulement affirmé.
+    #[tokio::test]
+    async fn head_and_tail_packfiles_use_the_artifact_key_convention_not_the_pack_suffix() {
+        let mono_key = "content_core"; // clé réelle (ArtifactKey), pas de suffixe
+        let head_key = "content_core_head";
+        let tail_key = unique_test_key("naming_tail"); // clé unique pour éviter toute collision inter-tests sur le fichier physique partagé "content_core_tail.bin"
+        let pool = stub_pool();
+
+        // mono_key/head_key utilisent volontairement les clés RÉELLES du
+        // vertical slice (pas unique_test_key) pour vérifier le chemin
+        // physique exact qu'utilisera la production — au prix de devoir
+        // nettoyer explicitement en fin de test (pas de clé jetable ici).
+        db_set(&[(1, 9)]);
+        write_initial_packfile(mono_key, &[(1, "")]);
+        write_initial_packfile(head_key, &[(1, "")]);
+        write_initial_packfile(tail_key, &[(1, "")]);
+
+        assert_eq!(
+            packfile_path_for(head_key),
+            std::path::PathBuf::from("artifacts/content_core_head.bin"),
+            "convention réelle : {{clé}}.bin, jamais {{clé}}_pack.bin"
+        );
+
+        let mut indices = HashMap::new();
+        for key in [mono_key, head_key, tail_key] {
+            let idx = PackHtmlIndex::open(&packfile_path_for(key)).expect("ouverture amorce");
+            indices.insert(key, ArcSwap::from_pointee(idx));
+        }
+        let registry = LiveRegistry::with_indices(indices);
+        let io_sem = tokio::sync::Semaphore::new(1);
+
+        let split = Some((
+            SplitRenderTarget::<StubProjection> {
+                packfile_key: head_key,
+                total_cap: STUB_TOTAL_CAP,
+                render: stub_render_head,
+            },
+            SplitRenderTarget::<StubProjection> {
+                packfile_key: tail_key,
+                total_cap: STUB_TOTAL_CAP,
+                render: stub_render_tail,
+            },
+        ));
+        regenerate_and_swap_with_volatile_split::<StubProjection>(
+            &pool,
+            &[1],
+            STUB_TOTAL_CAP,
+            mono_key,
+            split,
+            &registry,
+            &io_sem,
+        )
+        .await
+        .expect("doit réussir");
+
+        assert!(
+            std::path::Path::new("artifacts/content_core_head.bin").exists(),
+            "le fichier physique doit exister exactement à ce chemin"
+        );
+
+        cleanup(&packfile_path_for(mono_key));
+        cleanup(&packfile_path_for(head_key));
+        cleanup(&packfile_path_for(tail_key));
+    }
+
+
     struct FailingProjection;
 
     impl Projection for FailingProjection {

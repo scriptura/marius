@@ -6,7 +6,34 @@
 
 use std::path::Path;
 
-use marius_fragment_forge::FlatPageToken;
+use marius_fragment_forge::{FlatPageToken, TemplateMetrics};
+
+/// Résultat de résolution d'un template Mode Page — V2c. `body`/`metrics`
+/// couvrent TOUJOURS le rendu monolithique (le composant garde son artefact
+/// complet, cf. rapport de session : « le monolithique reste valide »),
+/// que la région volatile s'applique ou non à ce component. `volatile_split`
+/// n'est `Some` que si une `[[volatile_region]]` (`build/publication.rs`)
+/// référence ce component — calculé sur un CLONE des tokens déjà résolus
+/// par le pipeline commun (parse/link/lower/validate/eliminate/hoist,
+/// exécuté une seule fois quel que soit ce champ), jamais une seconde
+/// invocation de `resolve_page_template`/`resolve_template`.
+pub(crate) struct TemplateRender {
+    pub body: String,
+    pub metrics: TemplateMetrics,
+    pub volatile_split: Option<VolatileSplitTemplateRender>,
+}
+
+/// Rendu de la partition (head, tail) d'un template — présent seulement
+/// dans `TemplateRender::volatile_split`. Distinct du monolithique : deux
+/// corps Rust, deux jeux de métriques indépendants (chaque moitié a ses
+/// propres `TemplateMetrics`, jamais partagées ni sommées — cf. rapport
+/// V2c §Q3 : « chaque partie doit recevoir son propre TemplateMetrics »).
+pub(crate) struct VolatileSplitTemplateRender {
+    pub head_body: String,
+    pub head_metrics: TemplateMetrics,
+    pub tail_body: String,
+    pub tail_metrics: TemplateMetrics,
+}
 
 // En-tête statique du fichier généré — pas de couplage sur fragment-forge pour
 // ce seul token textuel (décision architecturale Phase 0).
@@ -117,12 +144,8 @@ pub(crate) fn split_static_at_marker<'src>(
 /// différence de `split_static_at_marker` ci-dessus (un seul marqueur, un
 /// seul cas d'échec possible — `None` suffisait).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// intentionally unused until V2c wires the split into template publication —
-// câblage réel (publication.toml → artefacts → RouteDescriptor K=3) prévu
-// pour V2c, pas cet incrément (V2b : mécanique de séparation isolée et
-// testée, aucun appelant de production encore). Retirer cet allow au
-// premier appel réel introduit par V2c — jamais avant.
-#[allow(dead_code)]
+// Premier appel réel : crate::template::page::resolve_page_template (V2c).
+// allow(dead_code) retiré — plus jamais nécessaire tant qu'un appelant existe.
 pub(crate) enum SplitRegionError {
     /// `begin_marker` n'apparaît dans aucun `FlatPageToken::Static` du flux.
     BeginMarkerNotFound,
@@ -171,10 +194,8 @@ pub(crate) enum SplitRegionError {
 /// Voir [`SplitRegionError`]. Jamais de panic, jamais de troncature ou de
 /// résolution silencieuse d'une ambiguïté (marqueur dupliqué, région
 /// traversant un token non-`Static`).
-// intentionally unused until V2c wires the split into template publication —
-// même justification que SplitRegionError ci-dessus. Retirer cet allow au
-// premier appel réel introduit par V2c — jamais avant.
-#[allow(dead_code)]
+// Premier appel réel : crate::template::page::resolve_page_template (V2c).
+// allow(dead_code) retiré.
 pub(crate) fn split_static_at_region<'src>(
     tokens: Vec<FlatPageToken<'src>>,
     begin_marker: &str,

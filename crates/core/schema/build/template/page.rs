@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use marius_fragment_forge::{
     AssetLookup, FlatPageToken, ImportRef, NamedBlockRange, PageArena, PageImportError,
-    PageLinkError, PageSourceToken, ParsedPageTemplate, SchemaIndex, TemplateId, TemplateMetrics,
+    PageLinkError, PageSourceToken, ParsedPageTemplate, SchemaIndex, TemplateId,
     VarlenField, collect_blocks, collect_static_refs, collect_top_level_imports,
     eliminate_recordless_conditions, extract_static_marker_facts, generate_aot_snippet,
     generate_segmented_snippet, hoist_and_dedupe_scripts, link_chain, lower, parse_page_tokens,
@@ -34,7 +34,10 @@ use crate::asset_lookup::resolve_asset_lookup;
 use crate::capabilities::CapabilityInfo;
 use crate::manifest::AssetEntry;
 use crate::modules_lowering::{lower_modules_for_template, render_modules_as_rust};
-use crate::template::common::{read_template_file, split_static_at_marker};
+use crate::template::common::{
+    SplitRegionError, TemplateRender, VolatileSplitTemplateRender, read_template_file,
+    split_static_at_marker, split_static_at_region,
+};
 use crate::{MODULES_PLACEHOLDER, SCRIPTS_PLACEHOLDER};
 
 /// Profondeur maximale de la chaîne `{% extends %}`, fichier de la table
@@ -364,7 +367,15 @@ pub(crate) fn resolve_page_template<'src>(
     child_src: &'src str,
     child_extends: &'src str,
     capabilities: &[(String, CapabilityInfo)],
-) -> Result<(String, TemplateMetrics), ()> {
+    // V2c — `Some(marker)` : une [[volatile_region]] (build/publication.rs)
+    // s'applique à ce component ; `marker` est son identifiant nu (ex.
+    // "nav_profile"), jamais la chaîne de marqueur HTML déjà formée — c'est
+    // CETTE fonction qui connaît le format `<!-- MARIUS_VOLATILE_BEGIN/END -->`,
+    // pas `build/publication.rs` (séparation déjà actée : publication ne
+    // connaît que des identités, pas un format de template). `None` : K=1,
+    // comportement strictement inchangé par rapport à avant cet incrément.
+    volatile_marker: Option<&str>,
+) -> Result<TemplateRender, ()> {
     // ── Phase 1 — Découverte de la chaîne extends ───────────────────────
     //
     // `visited_paths[0]` est un label synthétique (jamais un chemin
@@ -699,7 +710,7 @@ pub(crate) fn resolve_page_template<'src>(
     let metrics = resolve_and_measure(
         &mut tokens,
         &schema_index,
-        get_file_size,
+        &get_file_size,
         resolve_asset_len,
         modules_lowering.static_bytes,
     )
@@ -732,7 +743,87 @@ pub(crate) fn resolve_page_template<'src>(
         )
     };
 
-    Ok((body, metrics))
+    // ── Région volatile (V2c) ────────────────────────────────────────────
+    //
+    // `tokens` (post-MODULES_PLACEHOLDER, avant `resolve_and_measure` —
+    // celui-ci mute en place, mais ne change ni le nombre ni le contenu
+    // textuel des tokens, seulement les longueurs qu'il résout à
+    // l'intérieur de certaines variantes non-`Static` : le clone ci-dessous,
+    // pris APRÈS le calcul du monolithique, porte donc les mêmes offsets de
+    // marqueurs qu'avant résolution — aucune divergence entre les deux).
+    // `FlatPageToken<'src>: Copy` (token.rs, Phase 1.1) : ce clone ne
+    // recopie aucun contenu source, seulement des slices — jamais une
+    // seconde invocation de parse/link_chain/lower/validate_ast/
+    // eliminate_recordless_conditions/hoist_and_dedupe_scripts, exécutés
+    // une seule fois ci-dessus, que la région volatile s'applique ou non.
+    let volatile_split = match volatile_marker {
+        None => None,
+        Some(marker) => {
+            let begin_marker = format!("<!-- MARIUS_VOLATILE_BEGIN {marker} -->");
+            const END_MARKER: &str = "<!-- MARIUS_VOLATILE_END -->";
+            let (mut head_tokens, mut tail_tokens) =
+                split_static_at_region(tokens.clone(), &begin_marker, END_MARKER).map_err(
+                    |e: SplitRegionError| {
+                        println!(
+                            "cargo:error=DB-Forge [{schema}.{table}] : région volatile «{marker}» \
+                             mal formée dans le Root {} : {e:?}",
+                            root_path.display()
+                        );
+                    },
+                )?;
+
+            let head_metrics = resolve_and_measure(
+                &mut head_tokens,
+                &schema_index,
+                &get_file_size,
+                resolve_asset_len,
+                0,
+            )
+            .map_err(|errors| {
+                println!(
+                    "cargo:error=DB-Forge [{schema}.{table}] : résolution de la partie AOT \
+                     avant la région volatile «{marker}» échouée : {errors:?}"
+                );
+            })?;
+            let tail_metrics = resolve_and_measure(
+                &mut tail_tokens,
+                &schema_index,
+                &get_file_size,
+                resolve_asset_len,
+                0,
+            )
+            .map_err(|errors| {
+                println!(
+                    "cargo:error=DB-Forge [{schema}.{table}] : résolution de la partie AOT \
+                     après la région volatile «{marker}» échouée : {errors:?}"
+                );
+            })?;
+
+            // Aucune des deux moitiés ne porte de champ segmenté à elle
+            // seule de façon fiable (`has_segment` porte sur le composant
+            // entier) — `generate_aot_snippet` uniquement ici, jamais
+            // `generate_segmented_snippet` : combiner région volatile et
+            // `marius:large_content` sur le même composant est hors
+            // périmètre de ce vertical slice (aucun des deux mécanismes ne
+            // l'interdit structurellement, mais rien ne l'exerce ni ne le
+            // teste ici).
+            let head_body = generate_aot_snippet(&head_tokens, &schema_index, resolve_asset_url, "");
+            let tail_body = generate_aot_snippet(&tail_tokens, &schema_index, resolve_asset_url, "");
+
+            Some(VolatileSplitTemplateRender {
+                head_body,
+                head_metrics,
+                tail_body,
+                tail_metrics,
+            })
+        }
+    };
+
+    Ok(TemplateRender {
+        body,
+        metrics,
+        volatile_split,
+    })
 }
 
 // =============================================================================

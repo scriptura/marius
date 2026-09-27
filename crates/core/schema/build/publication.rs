@@ -63,10 +63,24 @@ pub(crate) struct RouteDecl {
     pub selection: String,
 }
 
+/// `[[volatile_region]]` (V2c) — jonction entre un `component` et la
+/// partition de son template en (head, volatile, tail). Distincte de
+/// `[[artifact]]` (identité) : cette déclaration ne PORTE aucune identité
+/// d'artefact elle-même, elle en RÉFÉRENCE deux déjà déclarées.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VolatileRegionDecl {
+    pub component: String,
+    pub marker: String,
+    pub head_artifact: String,
+    pub tail_artifact: String,
+    pub capacity: u32,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct PublicationManifest {
     pub artifacts: Vec<ArtifactDecl>,
     pub routes: Vec<RouteDecl>,
+    pub volatile_regions: Vec<VolatileRegionDecl>,
 }
 
 /// Faits sur un composant, collectés par la boucle Forge de `main()`.
@@ -177,6 +191,41 @@ fn read_string(
     }
 }
 
+/// Pendant de [`read_string`] pour un entier TOML — seul champ numérique du
+/// manifeste à ce jour (`[[volatile_region]].capacity`, V2c). Même
+/// discipline de messages nominatifs, même signature à `required`.
+fn read_u32(
+    table: &toml::Table,
+    key: &str,
+    ctx: &str,
+    required: bool,
+    errors: &mut Vec<String>,
+) -> Option<u32> {
+    match table.get(key) {
+        None => {
+            if required {
+                errors.push(format!("{ctx} : clé obligatoire «{key}» absente"));
+            }
+            None
+        }
+        Some(value) => match value.as_integer() {
+            Some(n) => match u32::try_from(n) {
+                Ok(v) => Some(v),
+                Err(_) => {
+                    errors.push(format!(
+                        "{ctx} : «{key}» doit tenir dans un u32 (valeur lue : {n})"
+                    ));
+                    None
+                }
+            },
+            None => {
+                errors.push(format!("{ctx} : «{key}» doit être un entier"));
+                None
+            }
+        },
+    }
+}
+
 fn read_array_of_tables<'a>(
     root: &'a toml::Table,
     key: &str,
@@ -218,7 +267,7 @@ pub(crate) fn parse_publication(src: &str) -> Result<PublicationManifest, Vec<St
         Err(e) => return Err(vec![format!("TOML invalide : {e}")]),
     };
     let root = &root;
-    check_known_keys(root, &["artifact", "route"], "manifeste", &mut errors);
+    check_known_keys(root, &["artifact", "route", "volatile_region"], "manifeste", &mut errors);
 
     let mut manifest = PublicationManifest::default();
 
@@ -260,6 +309,35 @@ pub(crate) fn parse_publication(src: &str) -> Result<PublicationManifest, Vec<St
                 artifact,
                 parameter,
                 selection,
+            });
+        }
+    }
+
+    for (i, table) in read_array_of_tables(root, "volatile_region", &mut errors)
+        .into_iter()
+        .enumerate()
+    {
+        let ctx = format!("volatile_region[{i}]");
+        check_known_keys(
+            table,
+            &["component", "marker", "head_artifact", "tail_artifact", "capacity"],
+            &ctx,
+            &mut errors,
+        );
+        let component = read_string(table, "component", &ctx, true, &mut errors);
+        let marker = read_string(table, "marker", &ctx, true, &mut errors);
+        let head_artifact = read_string(table, "head_artifact", &ctx, true, &mut errors);
+        let tail_artifact = read_string(table, "tail_artifact", &ctx, true, &mut errors);
+        let capacity = read_u32(table, "capacity", &ctx, true, &mut errors);
+        if let (Some(component), Some(marker), Some(head_artifact), Some(tail_artifact), Some(capacity)) =
+            (component, marker, head_artifact, tail_artifact, capacity)
+        {
+            manifest.volatile_regions.push(VolatileRegionDecl {
+                component,
+                marker,
+                head_artifact,
+                tail_artifact,
+                capacity,
             });
         }
     }
@@ -330,6 +408,39 @@ pub(crate) fn parse_publication(src: &str) -> Result<PublicationManifest, Vec<St
         }
     }
 
+    // ── Régions volatiles (V2c) ────────────────────────────────────────
+    let mut seen_region_components: HashSet<&str> = HashSet::new();
+    for region in &manifest.volatile_regions {
+        let ctx = format!("région volatile «{}»", region.marker);
+        if !seen_keys.contains(region.head_artifact.as_str()) {
+            errors.push(format!(
+                "{ctx} : head_artifact «{}» non déclaré ([[artifact]] absent)",
+                region.head_artifact
+            ));
+        }
+        if !seen_keys.contains(region.tail_artifact.as_str()) {
+            errors.push(format!(
+                "{ctx} : tail_artifact «{}» non déclaré ([[artifact]] absent)",
+                region.tail_artifact
+            ));
+        }
+        if region.head_artifact == region.tail_artifact {
+            errors.push(format!(
+                "{ctx} : head_artifact et tail_artifact doivent être distincts \
+                 (les deux valent «{}»)",
+                region.head_artifact
+            ));
+        }
+        if !seen_region_components.insert(region.component.as_str()) {
+            errors.push(format!(
+                "{ctx} : le composant «{}» est déjà couvert par une autre \
+                 [[volatile_region]] — une seule région par composant, \
+                 jamais d'ambiguïté sur la région applicable",
+                region.component
+            ));
+        }
+    }
+
     if errors.is_empty() {
         Ok(manifest)
     } else {
@@ -383,6 +494,37 @@ pub(crate) fn validate_against_components(
                  «{component}» a une PK composite",
                 route.name
             ));
+        }
+    }
+
+    for region in &manifest.volatile_regions {
+        let ctx = format!("région volatile «{}»", region.marker);
+        if !components.iter().any(|c| c.component_id == region.component) {
+            errors.push(format!(
+                "{ctx} : composant «{}» absent de meta.containment_intent",
+                region.component
+            ));
+        }
+        for (role, key) in [
+            ("head_artifact", &region.head_artifact),
+            ("tail_artifact", &region.tail_artifact),
+        ] {
+            let Some(artifact) = manifest.artifacts.iter().find(|a| &a.key == key) else {
+                continue; // absence déjà signalée par parse_publication
+            };
+            match &artifact.component {
+                Some(c) if c == &region.component => {}
+                Some(c) => errors.push(format!(
+                    "{ctx} : {role} «{key}» porte le composant «{c}», \
+                     attendu «{}» (celui de la région)",
+                    region.component
+                )),
+                None => errors.push(format!(
+                    "{ctx} : {role} «{key}» n'a aucun composant, \
+                     attendu «{}» (celui de la région)",
+                    region.component
+                )),
+            }
         }
     }
 
@@ -520,13 +662,19 @@ pub(crate) fn generate_publication_code(
     writeln!(out, "];").unwrap();
     writeln!(out).unwrap();
 
-    // RouteDescriptor T2A — K=1, aligné index à index sur ROUTES.
+    // RouteDescriptor T2A — K=1 par défaut, K=3 pour la route dont
+    // l'artefact appartient à un `component` couvert par [[volatile_region]]
+    // (V2c). Aligné index à index sur ROUTES dans les deux cas.
     writeln!(
         out,
         "/// `RouteDescriptor` T2A de chaque route de `ROUTES` (même index).\n\
          ///\n\
-         /// K=1 : un segment, une source, sélection `RequestSlot(0)` — le slot 0\n\
-         /// est rempli, côté serveur, par l'unique paramètre HTTP de la route.\n\
+         /// K=1 (par défaut) : un segment, une source, sélection `RequestSlot(0)` —\n\
+         /// le slot 0 est rempli, côté serveur, par l'unique paramètre HTTP de la\n\
+         /// route. K=3 (route dont l'artefact appartient à un `component` couvert\n\
+         /// par [[volatile_region]]) : StaticArtifact(head) → VolatileSlot →\n\
+         /// StaticArtifact(tail), head et tail partageant le même `RequestSlot(0)`\n\
+         /// (même sélection, deux artefacts distincts — contrat Volatile P7).\n\
          /// `backend_kind` : champ hérité d'un modèle antérieur, non consommé par\n\
          /// T2A — valeur neutre, sans signification architecturale."
     )
@@ -537,32 +685,131 @@ pub(crate) fn generate_publication_code(
     )
     .unwrap();
     for route in &manifest.routes {
+        let route_artifact = manifest
+            .artifacts
+            .iter()
+            .find(|a| a.key == route.artifact)
+            .expect("route validée : artefact déclaré");
         let source_index = manifest
             .artifacts
             .iter()
             .position(|a| a.key == route.artifact)
             .expect("route validée : artefact déclaré");
+
+        // Une région volatile s'applique à cette route si le `component` de
+        // SON artefact (pas l'artefact lui-même) est couvert — jamais
+        // l'inverse : `route.artifact` reste "content_core" (monolithique,
+        // RouteSpec/RouteEntry inchangés), seule cette représentation T2A
+        // bascule.
+        let volatile_region = route_artifact.component.as_ref().and_then(|component| {
+            manifest
+                .volatile_regions
+                .iter()
+                .find(|r| &r.component == component)
+        });
+
         writeln!(out, "    {p}::RouteDescriptor {{").unwrap();
-        writeln!(out, "        segments: &[{p}::SegmentDescriptor {{").unwrap();
-        writeln!(out, "            source: {p}::SourceId(0),").unwrap();
-        writeln!(
-            out,
-            "            selection: {p}::SegmentSelection::RequestSlot({p}::RequestValueId(0)),"
-        )
-        .unwrap();
-        writeln!(out, "            flags: {p}::SegmentFlags::NONE,").unwrap();
-        writeln!(out, "        }}],").unwrap();
-        writeln!(
-            out,
-            "        sources: &[{p}::SourceSpec::StaticArtifact {{ key: {p}::SourceKey({source_index}) }}],"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "        backend_kind: {p}::EmissionBackendKind::Scatter,"
-        )
-        .unwrap();
-        writeln!(out, "        volatile_capacity: 0,").unwrap();
+        match volatile_region {
+            None => {
+                // K=1 — texte identique à avant cet incrément, pour toute
+                // route non couverte par [[volatile_region]].
+                writeln!(out, "        segments: &[{p}::SegmentDescriptor {{").unwrap();
+                writeln!(out, "            source: {p}::SourceId(0),").unwrap();
+                writeln!(
+                    out,
+                    "            selection: {p}::SegmentSelection::RequestSlot({p}::RequestValueId(0)),"
+                )
+                .unwrap();
+                writeln!(out, "            flags: {p}::SegmentFlags::NONE,").unwrap();
+                writeln!(out, "        }}],").unwrap();
+                writeln!(
+                    out,
+                    "        sources: &[{p}::SourceSpec::StaticArtifact {{ key: {p}::SourceKey({source_index}) }}],"
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "        backend_kind: {p}::EmissionBackendKind::Scatter,"
+                )
+                .unwrap();
+                writeln!(out, "        volatile_capacity: 0,").unwrap();
+            }
+            Some(region) => {
+                // K=3 — vertical slice Volatile (V2c). `head`/`tail` déjà
+                // validés (existence, même `component`, distincts) par
+                // `validate_against_components`/`parse_publication` : les
+                // deux `.position()` ci-dessous ne peuvent pas échouer ici.
+                let head_index = manifest
+                    .artifacts
+                    .iter()
+                    .position(|a| a.key == region.head_artifact)
+                    .expect("région volatile validée : head_artifact déclaré");
+                let tail_index = manifest
+                    .artifacts
+                    .iter()
+                    .position(|a| a.key == region.tail_artifact)
+                    .expect("région volatile validée : tail_artifact déclaré");
+                writeln!(
+                    out,
+                    "        // Région volatile «{}» — [[volatile_region]], V2c.",
+                    region.marker
+                )
+                .unwrap();
+                writeln!(out, "        segments: &[").unwrap();
+                writeln!(out, "            {p}::SegmentDescriptor {{").unwrap();
+                writeln!(out, "                source: {p}::SourceId(0),").unwrap();
+                writeln!(
+                    out,
+                    "                selection: {p}::SegmentSelection::RequestSlot({p}::RequestValueId(0)),"
+                )
+                .unwrap();
+                writeln!(out, "                flags: {p}::SegmentFlags::NONE,").unwrap();
+                writeln!(out, "            }},").unwrap();
+                writeln!(out, "            {p}::SegmentDescriptor {{").unwrap();
+                writeln!(out, "                source: {p}::SourceId(1),").unwrap();
+                writeln!(
+                    out,
+                    "                selection: {p}::SegmentSelection::NotApplicable,"
+                )
+                .unwrap();
+                writeln!(out, "                flags: {p}::SegmentFlags::VOLATILE,").unwrap();
+                writeln!(out, "            }},").unwrap();
+                writeln!(out, "            {p}::SegmentDescriptor {{").unwrap();
+                writeln!(out, "                source: {p}::SourceId(2),").unwrap();
+                writeln!(
+                    out,
+                    "                selection: {p}::SegmentSelection::RequestSlot({p}::RequestValueId(0)),"
+                )
+                .unwrap();
+                writeln!(out, "                flags: {p}::SegmentFlags::NONE,").unwrap();
+                writeln!(out, "            }},").unwrap();
+                writeln!(out, "        ],").unwrap();
+                writeln!(out, "        sources: &[").unwrap();
+                writeln!(
+                    out,
+                    "            {p}::SourceSpec::StaticArtifact {{ key: {p}::SourceKey({head_index}) }},"
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {p}::SourceSpec::VolatileSlot {{ capacity: {}, producer: {p}::ProducerKey(0) }},",
+                    region.capacity
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {p}::SourceSpec::StaticArtifact {{ key: {p}::SourceKey({tail_index}) }},"
+                )
+                .unwrap();
+                writeln!(out, "        ],").unwrap();
+                writeln!(
+                    out,
+                    "        backend_kind: {p}::EmissionBackendKind::Scatter,"
+                )
+                .unwrap();
+                writeln!(out, "        volatile_capacity: {},", region.capacity).unwrap();
+            }
+        }
         writeln!(out, "    }},").unwrap();
     }
     writeln!(out, "];").unwrap();
@@ -633,10 +880,20 @@ mod tests {
         let m = parse_publication(REAL_MANIFEST).expect("le manifeste réel doit être valide");
         assert_eq!(
             m.artifacts,
-            vec![ArtifactDecl {
-                key: "content_core".into(),
-                component: Some("content.core".into()),
-            }]
+            vec![
+                ArtifactDecl {
+                    key: "content_core".into(),
+                    component: Some("content.core".into()),
+                },
+                ArtifactDecl {
+                    key: "content_core_head".into(),
+                    component: Some("content.core".into()),
+                },
+                ArtifactDecl {
+                    key: "content_core_tail".into(),
+                    component: Some("content.core".into()),
+                },
+            ]
         );
         assert_eq!(
             m.routes,
@@ -646,6 +903,16 @@ mod tests {
                 artifact: "content_core".into(),
                 parameter: "id".into(),
                 selection: "primary_key".into(),
+            }]
+        );
+        assert_eq!(
+            m.volatile_regions,
+            vec![VolatileRegionDecl {
+                component: "content.core".into(),
+                marker: "nav_profile".into(),
+                head_artifact: "content_core_head".into(),
+                tail_artifact: "content_core_tail".into(),
+                capacity: 512,
             }]
         );
     }
@@ -670,7 +937,145 @@ mod tests {
         assert!(code.contains("pub static ROUTE_DESCRIPTORS"), "{code}");
     }
 
+    // ── Région volatile (V2c) — câblage réel, pas théorique ─────────────
+
     #[test]
+    fn real_manifest_generates_a_k3_route_descriptor_for_content_document() {
+        let m = parse_publication(REAL_MANIFEST).unwrap();
+        let code = generate_publication_code(&m, &content_core_facts()).unwrap();
+        // head = SourceKey(1), tail = SourceKey(2) — ordre du manifeste :
+        // content_core(0), content_core_head(1), content_core_tail(2).
+        assert!(
+            code.contains(
+                "SourceSpec::StaticArtifact { key: ::marius_projection::SourceKey(1) }"
+            ),
+            "{code}"
+        );
+        assert!(
+            code.contains(
+                "SourceSpec::VolatileSlot { capacity: 512, producer: ::marius_projection::ProducerKey(0) }"
+            ),
+            "{code}"
+        );
+        assert!(
+            code.contains(
+                "SourceSpec::StaticArtifact { key: ::marius_projection::SourceKey(2) }"
+            ),
+            "{code}"
+        );
+        assert!(
+            code.contains("SegmentSelection::NotApplicable"),
+            "{code}"
+        );
+        assert!(code.contains("SegmentFlags::VOLATILE"), "{code}");
+        assert!(code.contains("volatile_capacity: 512,"), "{code}");
+        // Le K=1 monolithique (SourceKey(0), RouteEntry/RouteSpec) reste
+        // généré tel quel — CONTENT_CORE_SOURCE_KEY toujours présent
+        // (vérifié par le test précédent) : cette route n'a PAS disparu,
+        // seule sa représentation T2A (ROUTE_DESCRIPTORS) a changé de forme.
+    }
+
+    #[test]
+    fn route_without_volatile_region_still_generates_k1() {
+        // Un manifeste sans [[volatile_region]] du tout doit produire
+        // EXACTEMENT le texte K=1 précédent — non-régression explicite.
+        let src = "[[artifact]]\nkey=\"a\"\ncomponent=\"s.t\"\n\
+                   [[route]]\nname=\"r\"\npattern=\"/x/{id}\"\nartifact=\"a\"\n\
+                   parameter=\"id\"\nselection=\"primary_key\"\n";
+        let m = parse_publication(src).unwrap();
+        let facts = vec![ComponentFacts {
+            component_id: "s.t".into(),
+            pk_column: Some("id".into()),
+        }];
+        let code = generate_publication_code(&m, &facts).unwrap();
+        assert!(
+            code.contains(
+                "sources: &[::marius_projection::SourceSpec::StaticArtifact { key: ::marius_projection::SourceKey(0) }],"
+            ),
+            "{code}"
+        );
+        assert!(
+            !code.contains("SourceSpec::VolatileSlot"),
+            "aucune route de ce manifeste n'a de région volatile : {code}"
+        );
+        assert!(!code.contains("SegmentSelection::NotApplicable"), "{code}");
+    }
+
+    #[test]
+    fn volatile_region_head_artifact_must_be_declared() {
+        let src = "[[artifact]]\nkey=\"t\"\n\
+                   [[volatile_region]]\ncomponent=\"s.t\"\nmarker=\"m\"\n\
+                   head_artifact=\"missing_head\"\ntail_artifact=\"t\"\ncapacity=64\n";
+        assert_err_contains(parse_publication(src), "head_artifact «missing_head» non déclaré");
+    }
+
+    #[test]
+    fn volatile_region_tail_artifact_must_be_declared() {
+        let src = "[[artifact]]\nkey=\"h\"\n\
+                   [[volatile_region]]\ncomponent=\"s.t\"\nmarker=\"m\"\n\
+                   head_artifact=\"h\"\ntail_artifact=\"missing_tail\"\ncapacity=64\n";
+        assert_err_contains(parse_publication(src), "tail_artifact «missing_tail» non déclaré");
+    }
+
+    #[test]
+    fn volatile_region_head_and_tail_must_be_distinct() {
+        let src = "[[artifact]]\nkey=\"same\"\n\
+                   [[volatile_region]]\ncomponent=\"s.t\"\nmarker=\"m\"\n\
+                   head_artifact=\"same\"\ntail_artifact=\"same\"\ncapacity=64\n";
+        assert_err_contains(parse_publication(src), "doivent être distincts");
+    }
+
+    #[test]
+    fn two_volatile_regions_on_the_same_component_are_ambiguous() {
+        let src = "[[artifact]]\nkey=\"h1\"\n[[artifact]]\nkey=\"t1\"\n\
+                   [[artifact]]\nkey=\"h2\"\n[[artifact]]\nkey=\"t2\"\n\
+                   [[volatile_region]]\ncomponent=\"s.t\"\nmarker=\"m1\"\n\
+                   head_artifact=\"h1\"\ntail_artifact=\"t1\"\ncapacity=64\n\
+                   [[volatile_region]]\ncomponent=\"s.t\"\nmarker=\"m2\"\n\
+                   head_artifact=\"h2\"\ntail_artifact=\"t2\"\ncapacity=64\n";
+        assert_err_contains(parse_publication(src), "déjà couvert par une autre");
+    }
+
+    #[test]
+    fn volatile_region_component_must_exist_in_registry() {
+        let src = "[[artifact]]\nkey=\"h\"\ncomponent=\"s.t\"\n\
+                   [[artifact]]\nkey=\"t\"\ncomponent=\"s.t\"\n\
+                   [[volatile_region]]\ncomponent=\"s.t\"\nmarker=\"m\"\n\
+                   head_artifact=\"h\"\ntail_artifact=\"t\"\ncapacity=64\n";
+        let m = parse_publication(src).unwrap();
+        let errors = validate_against_components(&m, &[]).expect_err("composant absent");
+        assert!(errors.iter().any(|e| e.contains("s.t")), "{errors:?}");
+    }
+
+    #[test]
+    fn volatile_region_head_and_tail_must_share_the_regions_component() {
+        let src = "[[artifact]]\nkey=\"h\"\ncomponent=\"s.other\"\n\
+                   [[artifact]]\nkey=\"t\"\ncomponent=\"s.t\"\n\
+                   [[volatile_region]]\ncomponent=\"s.t\"\nmarker=\"m\"\n\
+                   head_artifact=\"h\"\ntail_artifact=\"t\"\ncapacity=64\n";
+        let m = parse_publication(src).unwrap();
+        let facts = vec![
+            ComponentFacts {
+                component_id: "s.t".into(),
+                pk_column: None,
+            },
+            ComponentFacts {
+                component_id: "s.other".into(),
+                pk_column: None,
+            },
+        ];
+        let errors =
+            validate_against_components(&m, &facts).expect_err("head porte un autre composant");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("head_artifact") && e.contains("s.other")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+
     fn real_manifest_is_rejected_when_component_is_missing_from_registry() {
         let m = parse_publication(REAL_MANIFEST).unwrap();
         let errors = validate_against_components(&m, &[]).expect_err("composant absent");

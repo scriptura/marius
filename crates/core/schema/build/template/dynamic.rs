@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use marius_fragment_forge::{
-    AssetLookup, SchemaIndex, TemplateMetrics, VarlenField, detect_extends,
+    AssetLookup, SchemaIndex, VarlenField, detect_extends,
     eliminate_recordless_conditions, generate_aot_snippet, generate_segmented_snippet,
     parse_page_tokens, parse_tokens, resolve_and_measure, scan, validate_ast,
 };
@@ -17,7 +17,10 @@ use marius_fragment_forge::{
 use crate::asset_lookup::resolve_asset_lookup;
 use crate::capabilities::CapabilityInfo;
 use crate::manifest::AssetEntry;
-use crate::template::common::read_template_file;
+use crate::template::common::{
+    SplitRegionError, TemplateRender, VolatileSplitTemplateRender, read_template_file,
+    split_static_at_region,
+};
 use crate::template::page::resolve_page_template;
 
 /// Tente de résoudre le template `.marius` d'une table via le pipeline
@@ -42,9 +45,14 @@ use crate::template::page::resolve_page_template;
 ///
 /// Retourne :
 ///   `Ok(None)`        : fichier absent — cargo:warning émis, fallback stub.
-///   `Ok(Some((body, metrics)))` : template résolu avec succès, Mode
-///                       Fragment ou Mode Page indifféremment — même
-///                       structure de retour, aucun marqueur de mode.
+///   `Ok(Some(render))` : template résolu avec succès, Mode Fragment ou
+///                       Mode Page indifféremment — même type de retour
+///                       (`TemplateRender`, V2c) : `render.body`/`.metrics`
+///                       couvrent toujours le rendu monolithique ;
+///                       `render.volatile_split` n'est `Some` que si
+///                       `volatile_marker` l'est également (paramètre
+///                       calculé par l'appelant depuis
+///                       `build/publication.rs::VolatileRegionDecl`).
 ///   `Err(())`         : toute erreur de parsing/validation/résolution
 ///                       (Mode Fragment), ou tout échec de
 ///                       `resolve_page_template` (Mode Page — Phase 6.2 :
@@ -63,7 +71,11 @@ pub(crate) fn resolve_template(
     fixed: &[marius_fragment_forge::FieldSpec],
     varlena: &[VarlenField],
     capabilities: &[(String, CapabilityInfo)],
-) -> Result<Option<(String, TemplateMetrics)>, ()> {
+    // V2c — `Some(marker)` : identifiant nu d'une [[volatile_region]]
+    // (`build/publication.rs`) couvrant ce component. `None` : K=1,
+    // comportement strictement inchangé.
+    volatile_marker: Option<&str>,
+) -> Result<Option<TemplateRender>, ()> {
     let template_path: PathBuf = Path::new(manifest_dir)
         .join("templates")
         .join(schema)
@@ -107,7 +119,7 @@ pub(crate) fn resolve_template(
             .extends
             .expect("detect_extends garantit extends.is_some() après parse réussi");
 
-        let (body, metrics) = resolve_page_template(
+        let render = resolve_page_template(
             manifest_dir,
             assets,
             schema,
@@ -117,8 +129,9 @@ pub(crate) fn resolve_template(
             &src,
             child_extends,
             capabilities,
+            volatile_marker,
         )?;
-        return Ok(Some((body, metrics)));
+        return Ok(Some(render));
     }
 
     let spans = scan(&src);
@@ -167,7 +180,7 @@ pub(crate) fn resolve_template(
     let metrics = resolve_and_measure(
         &mut tokens,
         &schema_index,
-        get_file_size,
+        &get_file_size,
         resolve_asset_len,
         // Fragment isolé, jamais de <head>, jamais de marqueur
         // MODULES_PLACEHOLDER dans ce flux — 0 en dur, `capabilities` n'a
@@ -191,5 +204,67 @@ pub(crate) fn resolve_template(
         generate_aot_snippet(&tokens, &schema_index, resolve_asset_url, "")
     };
 
-    Ok(Some((body, metrics)))
+    // Région volatile (V2c) — même mécanique qu'en Mode Page
+    // (resolve_page_template) : un marqueur BEGIN/END en Mode Fragment
+    // reste conceptuellement valide (`split_static_at_region` n'a aucune
+    // connaissance du mode), même si aucun template Mode Fragment actuel
+    // n'en porte (navigation.marius est composé en Mode Page). Implémenté
+    // ici pour que le type de retour de `resolve_template` reste uniforme
+    // entre les deux branches — jamais un cas « non supporté » silencieux.
+    let volatile_split = match volatile_marker {
+        None => None,
+        Some(marker) => {
+            let begin_marker = format!("<!-- MARIUS_VOLATILE_BEGIN {marker} -->");
+            const END_MARKER: &str = "<!-- MARIUS_VOLATILE_END -->";
+            let (mut head_tokens, mut tail_tokens) =
+                split_static_at_region(tokens.clone(), &begin_marker, END_MARKER).map_err(
+                    |e: SplitRegionError| {
+                        println!(
+                            "cargo:error=DB-Forge [{schema}.{table}] : région volatile «{marker}» \
+                             mal formée : {e:?}"
+                        );
+                    },
+                )?;
+            let head_metrics = resolve_and_measure(
+                &mut head_tokens,
+                &schema_index,
+                &get_file_size,
+                resolve_asset_len,
+                0,
+            )
+            .map_err(|errors| {
+                println!(
+                    "cargo:error=DB-Forge [{schema}.{table}] : résolution de la partie AOT \
+                     avant la région volatile «{marker}» échouée : {errors:?}"
+                );
+            })?;
+            let tail_metrics = resolve_and_measure(
+                &mut tail_tokens,
+                &schema_index,
+                &get_file_size,
+                resolve_asset_len,
+                0,
+            )
+            .map_err(|errors| {
+                println!(
+                    "cargo:error=DB-Forge [{schema}.{table}] : résolution de la partie AOT \
+                     après la région volatile «{marker}» échouée : {errors:?}"
+                );
+            })?;
+            let head_body = generate_aot_snippet(&head_tokens, &schema_index, resolve_asset_url, "");
+            let tail_body = generate_aot_snippet(&tail_tokens, &schema_index, resolve_asset_url, "");
+            Some(VolatileSplitTemplateRender {
+                head_body,
+                head_metrics,
+                tail_body,
+                tail_metrics,
+            })
+        }
+    };
+
+    Ok(Some(TemplateRender {
+        body,
+        metrics,
+        volatile_split,
+    }))
 }

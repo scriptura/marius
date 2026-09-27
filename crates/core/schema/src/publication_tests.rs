@@ -15,8 +15,9 @@ use marius_projection::{
 };
 
 use crate::{
-    ARTIFACTS, CONTENT_CORE_ARTIFACT, CONTENT_CORE_SOURCE_KEY, CONTENT_DOCUMENT_ROUTE,
-    ContentCoreProjection, ROUTE_DESCRIPTORS, ROUTES,
+    ARTIFACTS, CONTENT_CORE_ARTIFACT, CONTENT_CORE_HEAD_SOURCE_KEY, CONTENT_CORE_SOURCE_KEY,
+    CONTENT_CORE_TAIL_SOURCE_KEY, CONTENT_DOCUMENT_ROUTE, ContentCoreProjection,
+    ROUTE_DESCRIPTORS, ROUTES,
 };
 
 #[test]
@@ -91,34 +92,92 @@ fn source_key_resolves_to_the_artifact_and_back() {
     );
 }
 
-/// `RouteDescriptor` K=1 dérivé de la déclaration : un segment, une source,
-/// sélection par le slot 0 (rempli par le paramètre HTTP côté serveur), aucun
-/// Volatile.
+/// `RouteDescriptor` de `content_document` — K=3 depuis `[[volatile_region]]`
+/// (V2c, publication.toml) : StaticArtifact(head) → VolatileSlot →
+/// StaticArtifact(tail), head et tail partageant le même `RequestSlot(0)`
+/// (même sélection HTTP, deux artefacts distincts — contrat Volatile P7).
+///
+/// Remplace l'ancien test générique « toute route est K=1 » : `content_document`
+/// est actuellement la SEULE route du manifeste réel, et elle est désormais
+/// K=3 — un test bouclant sur `ROUTES` en supposant K=1 partout n'a plus de
+/// route à couvrir. La forme K=1 elle-même reste vérifiée par
+/// `build/publication.rs::route_without_volatile_region_still_generates_k1`
+/// (manifeste synthétique, texte généré) — ce fichier-ci teste le manifeste
+/// réel, qui n'a plus aucune route purement K=1 à ce jour.
 #[test]
-fn route_descriptor_is_k1_and_derives_from_the_route_spec() {
+fn content_document_route_descriptor_is_k3_for_its_volatile_region() {
     assert_eq!(ROUTE_DESCRIPTORS.len(), ROUTES.len());
 
-    for (route, descriptor) in ROUTES.iter().zip(ROUTE_DESCRIPTORS) {
-        assert_eq!(descriptor.segments.len(), 1, "K=1 : un seul segment");
-        assert_eq!(descriptor.sources.len(), 1, "une seule source");
-        assert_eq!(descriptor.volatile_capacity, 0);
+    let index = ROUTES
+        .iter()
+        .position(|r| r.name == "content_document")
+        .expect("route content_document déclarée dans le manifeste réel");
+    let descriptor = ROUTE_DESCRIPTORS[index];
 
-        let segment = descriptor.segments[0];
-        assert_eq!(segment.source, SourceId(0));
-        assert_eq!(
-            segment.selection,
-            SegmentSelection::RequestSlot(RequestValueId(0))
-        );
-        assert_eq!(segment.flags, SegmentFlags::NONE);
-        assert!(!segment.flags.is_volatile());
+    assert_eq!(descriptor.segments.len(), 3, "K=3 : trois segments");
+    assert_eq!(descriptor.sources.len(), 3, "trois sources");
+    assert_eq!(
+        descriptor.volatile_capacity, 512,
+        "capacity du [[volatile_region]] du manifeste réel"
+    );
 
-        // La source du descripteur désigne, via le catalogue, l'artefact de
-        // la route.
-        let SourceSpec::StaticArtifact { key } = descriptor.sources[0] else {
-            panic!("source statique attendue pour la route «{}»", route.name);
-        };
-        let artifact = artifact_for_source(ARTIFACTS, key)
-            .expect("le SourceKey du descripteur doit être au catalogue");
-        assert_eq!(artifact.key, route.artifact);
+    // Segment 0 — StaticArtifact(head), RequestSlot(0).
+    let s0 = descriptor.segments[0];
+    assert_eq!(s0.source, SourceId(0));
+    assert_eq!(
+        s0.selection,
+        SegmentSelection::RequestSlot(RequestValueId(0))
+    );
+    assert_eq!(s0.flags, SegmentFlags::NONE);
+    assert!(!s0.flags.is_volatile());
+
+    // Segment 1 — VolatileSlot, NotApplicable, flag VOLATILE — jamais une
+    // sélection simulée (contrat P7).
+    let s1 = descriptor.segments[1];
+    assert_eq!(s1.source, SourceId(1));
+    assert_eq!(s1.selection, SegmentSelection::NotApplicable);
+    assert!(s1.flags.is_volatile());
+
+    // Segment 2 — StaticArtifact(tail), même RequestSlot(0) que le head :
+    // un seul paramètre HTTP alimente les deux artefacts statiques.
+    let s2 = descriptor.segments[2];
+    assert_eq!(s2.source, SourceId(2));
+    assert_eq!(
+        s2.selection,
+        SegmentSelection::RequestSlot(RequestValueId(0))
+    );
+    assert_eq!(s2.flags, SegmentFlags::NONE);
+
+    let SourceSpec::StaticArtifact { key: head_key } = descriptor.sources[0] else {
+        panic!("source 0 : StaticArtifact attendu (head)");
+    };
+    assert_eq!(head_key, CONTENT_CORE_HEAD_SOURCE_KEY);
+    assert_eq!(
+        artifact_for_source(ARTIFACTS, head_key)
+            .expect("head au catalogue")
+            .key
+            .as_str(),
+        "content_core_head"
+    );
+
+    match descriptor.sources[1] {
+        SourceSpec::VolatileSlot { capacity, .. } => assert_eq!(capacity, 512),
+        SourceSpec::StaticArtifact { .. } => panic!("source 1 : VolatileSlot attendu"),
     }
+
+    let SourceSpec::StaticArtifact { key: tail_key } = descriptor.sources[2] else {
+        panic!("source 2 : StaticArtifact attendu (tail)");
+    };
+    assert_eq!(tail_key, CONTENT_CORE_TAIL_SOURCE_KEY);
+    assert_eq!(
+        artifact_for_source(ARTIFACTS, tail_key)
+            .expect("tail au catalogue")
+            .key
+            .as_str(),
+        "content_core_tail"
+    );
+
+    // Le monolithique reste au catalogue, intact — non retiré par la
+    // segmentation T2A (« le monolithique reste valide »).
+    assert!(ARTIFACTS.iter().any(|a| a.key.as_str() == "content_core"));
 }

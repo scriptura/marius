@@ -49,6 +49,7 @@ use marius_db_forge::{
     write_from_impl, write_projection_stub, write_row_struct, write_section_header,
     write_store_struct, write_varlen_owned_struct,
 };
+use marius_db_forge::codegen::projection::VolatileSplitRender;
 use marius_fragment_forge::VarlenField;
 
 use crate::capabilities::validate_capabilities;
@@ -220,12 +221,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Échec de build explicite si un champ varlena entre en collision avec
         // un autre slot ou avec une colonne propre du composant — politique
         // DDL-driven arbitrée le 22/07/2026, aucune désambiguïsation automatique.
-        {
-            let component_id = format!("{}.{}", comp.schema, comp.table);
-            if let Err(msg) = check_no_name_collision(&component_id, &columns, &varlena) {
-                println!("cargo:error=DB-Forge [{component_id}] : {msg}");
-                std::process::exit(1);
-            }
+        //
+        // `component_id` hissé au niveau de l'itération (V2c) : réutilisé plus
+        // bas pour chercher une [[volatile_region]] couvrant ce component —
+        // même chaîne, jamais recalculée séparément.
+        let component_id = format!("{}.{}", comp.schema, comp.table);
+        if let Err(msg) = check_no_name_collision(&component_id, &columns, &varlena) {
+            println!("cargo:error=DB-Forge [{component_id}] : {msg}");
+            std::process::exit(1);
         }
 
         // ── Phase 2 : validation layout ───────────────────────────────────────
@@ -242,6 +245,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // ── Voie B : pipeline template .marius ────────────────────────────────
         // Toute l'I/O disque (lecture du template) vit ici. db-forge ne touche
         // jamais le système de fichiers — il reçoit le résultat déjà calculé.
+        //
+        // Région volatile (V2c) : au plus une [[volatile_region]] par
+        // component (déjà garanti par parse_publication — jamais une
+        // ambiguïté à résoudre ici), cherchée par `component_id` (hissé
+        // ci-dessus). `None` pour tout component non couvert — K=1,
+        // strictement inchangé.
+        let volatile_region = publication
+            .volatile_regions
+            .iter()
+            .find(|r| r.component == component_id);
+        let volatile_marker: Option<&str> = volatile_region.map(|r| r.marker.as_str());
+
         let field_specs = build_field_specs(&columns);
         let render = resolve_template(
             &manifest_dir,
@@ -251,6 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &field_specs,
             &varlena,
             &capabilities,
+            volatile_marker,
         )
         .unwrap_or_else(|()| {
             // cargo:error déjà émis par resolve_template — arrêt immédiat.
@@ -273,6 +289,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|j| (j.schema.as_str(), j.table.as_str(), j.fk_col.as_str()))
             .collect();
 
+        // V2c : `render.body`/`.metrics` (monolithique, toujours présent
+        // quand le template existe) alimente le paramètre `render` existant,
+        // inchangé pour tout component sans région volatile.
+        // `render.volatile_split` alimente le nouveau paramètre optionnel —
+        // converti vers le type de db-forge (`VolatileSplitRender`, distinct
+        // de `TemplateRender`/`VolatileSplitTemplateRender` du pipeline
+        // template : deux crates, deux types, jamais partagés directement).
+        let render_param = render.as_ref().map(|r| (r.body.as_str(), &r.metrics));
+        let volatile_split_param =
+            render
+                .as_ref()
+                .and_then(|r| r.volatile_split.as_ref())
+                .map(|split| VolatileSplitRender {
+                    head_body: split.head_body.as_str(),
+                    head_metrics: &split.head_metrics,
+                    tail_body: split.tail_body.as_str(),
+                    tail_metrics: &split.tail_metrics,
+                });
+
         write_projection_stub(
             &mut output,
             &comp.schema,
@@ -281,9 +316,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &pk,
             &varlena,
             &varlena_join_tuples,
-            render
-                .as_ref()
-                .map(|(body, metrics)| (body.as_str(), metrics)),
+            render_param,
+            volatile_split_param,
         );
     }
 

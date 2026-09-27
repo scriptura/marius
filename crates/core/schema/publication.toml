@@ -3,10 +3,11 @@
 # Manifeste AOT de publication/exposition — lu par build/main.rs (module
 # build/publication.rs), jamais au runtime.
 #
-# Deux relations distinctes, jointes par la clé d'artefact :
+# Trois relations distinctes, jointes par la clé d'artefact ou le component :
 #
-#   [[artifact]]  artefact → composant producteur     (publication)
-#   [[route]]     route    → artefact + sélection     (exposition)
+#   [[artifact]]         artefact → composant producteur     (publication)
+#   [[route]]            route    → artefact + sélection     (exposition)
+#   [[volatile_region]]  component → partition du template   (segmentation, V2c)
 #
 # Ce fichier est la SEULE définition de ces relations. Les représentations
 # propres à chaque crate en sont dérivées :
@@ -29,6 +30,11 @@
 # La position d'un artefact dans ce fichier est son SourceKey (handle
 # compact de catalogue) : non persistant, pouvant changer entre deux builds.
 #
+# Plusieurs [[artifact]] peuvent légitimement partager le même `component`
+# (V2c, micro-audit §1/§3) : chaque artefact reste sa propre identité
+# publiable, indépendamment du fait que plusieurs artefacts soient produits
+# à partir du même composant SQL (cas du vertical slice ci-dessous).
+#
 # ── [[route]] ───────────────────────────────────────────────────────────────
 #   name       identifiant de la route ([a-z][a-z0-9_]*) — nom des constantes
 #              générées (<NAME>_ROUTE).
@@ -39,9 +45,52 @@
 #              composant producteur de l'artefact. La colonne SQL de cette PK
 #              est résolue par le build (elle n'a aucun rapport de nom avec
 #              `parameter`). Exige un artefact avec composant, à PK simple.
+#
+# `[[route]].artifact` continue de désigner l'artefact MONOLITHIQUE (ici
+# "content_core") — RouteSpec/RouteEntry (voie serveur classique) n'est
+# jamais affecté par une région volatile : c'est `ROUTE_DESCRIPTORS` (T2A)
+# qui bascule en K=3 pour la route dont l'artefact appartient à un
+# `component` couvert par [[volatile_region]] (voir ci-dessous).
+#
+# ── [[volatile_region]] (V2c) ────────────────────────────────────────────────
+#   component      composant Forge dont le template est partitionné — doit
+#                  exister dans meta.containment_intent, exactement comme
+#                  [[artifact]].component.
+#   marker         identifiant du marqueur `<!-- MARIUS_VOLATILE_BEGIN/END
+#                  {marker} -->` dans le template du composant. Un seul
+#                  marqueur par région (pas de généralisation à N régions
+#                  dans cet incrément — vertical slice = une région).
+#   head_artifact  clé (déjà déclarée en [[artifact]]) de l'artefact AOT
+#                  produit par la partie du template AVANT le marqueur.
+#   tail_artifact  clé (déjà déclarée en [[artifact]]) de l'artefact AOT
+#                  produit par la partie du template APRÈS le marqueur.
+#   capacity       borne AOT (octets) du contenu volatile — devient à la
+#                  fois `SourceSpec::VolatileSlot.capacity` et
+#                  `RouteDescriptor.volatile_capacity` pour la route
+#                  concernée (contrat P2/P6). Champ ajouté par ce tour,
+#                  absent de la forme initialement validée — nécessaire
+#                  structurellement (P2 n'a pas de valeur par défaut
+#                  défendable) : voir rapport de session.
+#
+# `head_artifact`/`tail_artifact` doivent tous deux porter le même
+# `component` que la région elle-même — vérifié à la validation croisée
+# avec le registre de composants, pas seulement structurellement.
+#
+# Au plus une [[volatile_region]] par `component` (pas d'ambiguïté possible
+# sur "quelle région s'applique à ce composant"). Une route dont l'artefact
+# n'appartient à AUCUN `component` couvert par [[volatile_region]] reste en
+# K=1 — comportement par défaut, inchangé.
 
 [[artifact]]
 key = "content_core"
+component = "content.core"
+
+[[artifact]]
+key = "content_core_head"
+component = "content.core"
+
+[[artifact]]
+key = "content_core_tail"
 component = "content.core"
 
 [[route]]
@@ -50,3 +99,10 @@ pattern = "/content/{id}"
 artifact = "content_core"
 parameter = "id"
 selection = "primary_key"
+
+[[volatile_region]]
+component = "content.core"
+marker = "nav_profile"
+head_artifact = "content_core_head"
+tail_artifact = "content_core_tail"
+capacity = 512

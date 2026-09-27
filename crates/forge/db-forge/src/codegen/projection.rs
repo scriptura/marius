@@ -10,6 +10,26 @@ use crate::mapping::{Column, PrimaryKey, map_type};
 use crate::naming::{to_pascal, to_screaming};
 use marius_fragment_forge::{FieldSpec, TemplateMetrics, VarlenField};
 
+/// Rendu additionnel produit par une région volatile déclarée
+/// (`[[volatile_region]]`, `build/publication.rs`, V2c) — deux corps de
+/// rendu supplémentaires pour le MÊME composant, PAS deux `Projection`
+/// distinctes : `Record`/`VarlenOwned` restent ceux déjà émis pour ce
+/// composant, aucune seconde ingestion SQL n'est introduite par cette
+/// extension (le futur appelant, V2d, partage le même `fetch_batch`/la
+/// même ligne pour produire `render()`, `render_head()` et `render_tail()`).
+///
+/// `head_body`/`tail_body` : corps Rust déjà généré par
+/// `generate_aot_snippet` sur les deux moitiés du flux de tokens scindé
+/// (`split_static_at_region`, V2b) — jamais recalculé ici, seulement
+/// splicé, même discipline que `render` (le paramètre existant) pour le
+/// corps monolithique.
+pub struct VolatileSplitRender<'a> {
+    pub head_body: &'a str,
+    pub head_metrics: &'a TemplateMetrics,
+    pub tail_body: &'a str,
+    pub tail_metrics: &'a TemplateMetrics,
+}
+
 /// Construit l'expression SELECT pour une colonne fixed-length.
 ///
 /// Nom brut (qualifié ou non selon `qualifier`) dans l'immense majorité des
@@ -69,6 +89,7 @@ pub fn write_projection_stub(
     varlena: &[VarlenField],
     varlena_join: &[(&str, &str, &str)],
     render: Option<(&str, &TemplateMetrics)>,
+    volatile_split: Option<VolatileSplitRender<'_>>,
 ) {
     let name = to_pascal(&format!("{schema}_{table}"));
     let proj_name = format!("{name}Projection");
@@ -704,4 +725,97 @@ pub fn write_projection_stub(
     .unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}\n").unwrap();
+
+    // ── render_head() / render_tail() — région volatile (V2c) ────────────────
+    // Fonctions inhérentes (hors trait Projection, comme cold_start_store
+    // ci-dessus) : le trait Projection reste ce qu'il est aujourd'hui, lié au
+    // composant/table et au chemin monolithique existant (choix validé,
+    // rapport de session V2c §5) — pas de ContentCoreHeadProjection /
+    // ContentCoreTailProjection. `Record`/`VarlenOwned` sont ceux déjà émis
+    // plus haut pour {proj_name} — aucune seconde ingestion SQL, le futur
+    // appelant (V2d) partage le même `fetch_batch`/la même ligne pour
+    // produire les trois corps (render/render_head/render_tail).
+    if let Some(split) = &volatile_split {
+        // BUG corrigé (retour de build) : `varlena_param` (ci-dessus) encode
+        // "_varlena" dès que `has_segment` est vrai OU que `body_is_real` est
+        // faux — deux conditions propres au `render()` MONOLITHIQUE
+        // (`has_segment` : render() devient un stub jamais appelé, la
+        // voie réelle étant `render_chunks()`, CONTRAT-implementation-
+        // projection-segmentee.md). `render_head`/`render_tail` n'ont RIEN
+        // à voir avec cette condition : leur corps est TOUJOURS réel dès que
+        // `volatile_split` est `Some` (jamais un stub), qu'il y ait
+        // `has_segment` ou non sur le composant par ailleurs — `content.core`
+        // en est la preuve : segmenté (has_segment = true → `varlena_param`
+        // monolithique = "_varlena"), mais son template AOT référence bel et
+        // bien `description`/`content`/`headline` dans les moitiés
+        // head/tail. Paramètre recalculé, dédié, indépendant de
+        // `has_segment`/`body_is_real`.
+        let split_varlena_param = if varlena.is_empty() {
+            "_varlena: &()".to_string()
+        } else {
+            format!("varlena: &{name}VarlenOwned")
+        };
+
+        let head_total = split.head_metrics.total_static_bytes + split.head_metrics.total_dynamic_bytes;
+        let tail_total = split.tail_metrics.total_static_bytes + split.tail_metrics.total_dynamic_bytes;
+        writeln!(
+            out,
+            "pub const {screaming}_HEAD_STATIC_CAP:  usize = {};",
+            split.head_metrics.total_static_bytes
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "pub const {screaming}_HEAD_DYNAMIC_CAP: usize = {};",
+            split.head_metrics.total_dynamic_bytes
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "pub const {screaming}_HEAD_TOTAL_CAP:   usize = {head_total};"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "pub const {screaming}_TAIL_STATIC_CAP:  usize = {};",
+            split.tail_metrics.total_static_bytes
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "pub const {screaming}_TAIL_DYNAMIC_CAP: usize = {};",
+            split.tail_metrics.total_dynamic_bytes
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "pub const {screaming}_TAIL_TOTAL_CAP:   usize = {tail_total};"
+        )
+        .unwrap();
+        writeln!(out).unwrap();
+
+        writeln!(out, "impl {proj_name} {{").unwrap();
+        writeln!(
+            out,
+            "    pub fn render_head(record: &{name}StorageRow, {split_varlena_param}, buf: &mut String) {{"
+        )
+        .unwrap();
+        writeln!(out, "        buf.reserve({screaming}_HEAD_TOTAL_CAP);").unwrap();
+        for line in split.head_body.lines() {
+            writeln!(out, "    {line}").unwrap();
+        }
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+        writeln!(
+            out,
+            "    pub fn render_tail(record: &{name}StorageRow, {split_varlena_param}, buf: &mut String) {{"
+        )
+        .unwrap();
+        writeln!(out, "        buf.reserve({screaming}_TAIL_TOTAL_CAP);").unwrap();
+        for line in split.tail_body.lines() {
+            writeln!(out, "    {line}").unwrap();
+        }
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}\n").unwrap();
+    }
 }
