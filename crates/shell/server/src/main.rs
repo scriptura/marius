@@ -58,9 +58,15 @@ use hyper_util::server::conn::auto::Builder as HyperConnectionBuilder;
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 
-use marius_render::{Dispatcher, DispatcherConfig, IdSource, LiveRegistry, RouteEntry};
+use marius_render::{
+    Dispatcher, DispatcherConfig, IdSource, LiveRegistry, RouteEntry, SplitRenderTarget,
+};
 
-use marius_schema::{CONTENT_CORE_COLLECTOR, CONTENT_CORE_TOTAL_CAP, ContentCoreProjection};
+use marius_schema::{
+    CONTENT_CORE_COLLECTOR, CONTENT_CORE_HEAD_ARTIFACT, CONTENT_CORE_HEAD_TOTAL_CAP,
+    CONTENT_CORE_TAIL_ARTIFACT, CONTENT_CORE_TAIL_TOTAL_CAP, CONTENT_CORE_TOTAL_CAP,
+    ContentCoreProjection,
+};
 
 use marius_collector::InsertResult;
 
@@ -281,9 +287,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ROUTE_TABLE est introuvable — pas de dégradation silencieuse.
     // Arc construit une seule fois ici, jamais reconstruit au point d'appel
     // (handoff : registre partagé entre build_router et les Dispatcher).
-    let registry = Arc::new(LiveRegistry::cold_start(ROUTE_TABLE)?);
+    //
+    // V2d — artefacts statiques head/tail de la région volatile de
+    // content.core : PAS des routes HTTP (aucune RouteEntry, aucune route
+    // montée), mais des clés que la régénération doit pouvoir `store()` —
+    // provisionnées puis ouvertes via `cold_start_with_extra_keys`. Les
+    // clés suivent la convention réellement en vigueur (`ArtifactKey` →
+    // `packfile_path_for`), jamais `P::packfile_path()`.
+    let content_core_head_key: &'static str = CONTENT_CORE_HEAD_ARTIFACT.as_str();
+    let content_core_tail_key: &'static str = CONTENT_CORE_TAIL_ARTIFACT.as_str();
+    for key in [content_core_head_key, content_core_tail_key] {
+        match marius_render::ensure_provisioned(key).await? {
+            marius_render::ProvisionOutcome::Provisioned => eprintln!(
+                "[marius-server] espace de projection provisionné (vierge) — artefact \"{key}\""
+            ),
+            marius_render::ProvisionOutcome::AlreadyPresent => {}
+        }
+    }
+    let registry = Arc::new(LiveRegistry::cold_start_with_extra_keys(
+        ROUTE_TABLE,
+        &[content_core_head_key, content_core_tail_key],
+    )?);
     eprintln!(
-        "[marius-server] cold_start réussi — {} route(s) enregistrée(s)",
+        "[marius-server] cold_start réussi — {} route(s) enregistrée(s), 2 artefact(s) hors route",
         ROUTE_TABLE.len()
     );
 
@@ -331,6 +357,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         registry.clone(),
         SHARDS[0].packfile_key,
         io_semaphore,
+    )
+    // V2d — content.core est le seul composant couvert par une
+    // [[volatile_region]] : sa paire head/tail (render_head/render_tail,
+    // déjà générées, hors trait Projection) est configurée explicitement ici.
+    // Tout autre shard resterait sur `new()` seul (K=1 inchangé).
+    .with_volatile_split(
+        SplitRenderTarget {
+            packfile_key: content_core_head_key,
+            total_cap: CONTENT_CORE_HEAD_TOTAL_CAP,
+            render: ContentCoreProjection::render_head,
+        },
+        SplitRenderTarget {
+            packfile_key: content_core_tail_key,
+            total_cap: CONTENT_CORE_TAIL_TOTAL_CAP,
+            render: ContentCoreProjection::render_tail,
+        },
     );
     // ── Supervision fail-fast (spec §6, Phase 5.3) ──────────────────────────
     // La tâche ci-dessous (Dispatcher + PgListener) n'est jamais censée se

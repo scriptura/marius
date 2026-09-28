@@ -44,6 +44,11 @@ pub use dispatcher::render_batch_pure;
 // `crate::BatchRenderer` déjà en place pour batch_renderer.
 pub use regenerate::regenerate_and_swap;
 
+// SplitRenderTarget — paire (head, tail) d'une région volatile, V2d : nommée
+// par main.rs (marius-server) pour configurer le Dispatcher de content.core
+// via `Dispatcher::with_volatile_split`. Ré-export à plat, même convention.
+pub use regenerate::SplitRenderTarget;
+
 // ingest_and_swap — même convention que regenerate_and_swap/BatchRenderer
 // ci-dessus (fonction principale d'un module, ré-exportée à plat). Nouveau
 // cette session (Phase 1, réactivité CoW) : étage 1 du pipeline, appelé par

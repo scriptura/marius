@@ -159,6 +159,38 @@ impl LiveRegistry {
         Ok(Self { indices })
     }
 
+    /// Variante de [`Self::cold_start`] (V2d) : ouvre en plus les packfiles de
+    /// `extra_keys` — des clés qui ne sont PAS des routes HTTP (donc absentes
+    /// de `route_table`) mais que le pipeline de régénération doit pouvoir
+    /// `store()` (ex. `content_core_head`/`content_core_tail`, artefacts
+    /// statiques d'une région volatile). Aucune `RouteEntry` n'est créée :
+    /// aucune route n'est montée pour ces clés. `cold_start` lui-même reste
+    /// inchangé ; un `extra_keys` vide équivaut exactement à `cold_start`.
+    ///
+    /// Même discipline d'échec fatal (packfile introuvable/corrompu), même
+    /// déduplication : une clé déjà ouverte par `route_table` n'est pas
+    /// rouverte.
+    pub fn cold_start_with_extra_keys(
+        route_table: &'static [RouteEntry],
+        extra_keys: &[&'static str],
+    ) -> std::io::Result<Self> {
+        let mut registry = Self::cold_start(route_table)?;
+        for &key in extra_keys {
+            if let Entry::Vacant(slot) = registry.indices.entry(key) {
+                let path = packfile_path_for(key);
+                let index = PackHtmlIndex::open(&path).map_err(|e| {
+                    std::io::Error::other(format!(
+                        "cold_start_with_extra_keys: échec ouverture packfile \"{key}\" \
+                         (clé hors routes, chemin {}) : {e}",
+                        path.display()
+                    ))
+                })?;
+                slot.insert(ArcSwap::from_pointee(index));
+            }
+        }
+        Ok(registry)
+    }
+
     /// Lecture lock-free de l'Arc courant pour `key`. `None` si la clé n'a
     /// jamais été provisionnée à la construction — cas attendu (route
     /// malformée ou obsolète côté appelant), pas une violation d'invariant.

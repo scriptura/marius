@@ -34,7 +34,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::{LiveRegistry, ingest_and_swap, regenerate_and_swap};
+use crate::regenerate::{SplitRenderTarget, regenerate_stage};
+use crate::{LiveRegistry, ingest_and_swap};
 
 use tokio::sync::Notify;
 use tokio::time::interval;
@@ -100,6 +101,12 @@ pub struct Dispatcher<P: Projection, const MAX: usize, const WORDS: usize> {
     /// n'a aucun parallélisme interne, mais N shards en tick simultané
     /// saturent le même disque. Phase 4.3.
     io_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Paire (head, tail) d'artefacts statiques d'une région volatile
+    /// (V2c/V2d) — `None` pour tout shard non segmenté (K=1 inchangé :
+    /// `regenerate_stage` appelle alors `regenerate_and_swap` tel quel).
+    /// Jamais une liste : au plus une paire fixe, positionnée par
+    /// [`Self::with_volatile_split`].
+    volatile_split: Option<(SplitRenderTarget<P>, SplitRenderTarget<P>)>,
 }
 
 impl<P: Projection, const MAX: usize, const WORDS: usize> Dispatcher<P, MAX, WORDS>
@@ -130,7 +137,22 @@ where
             packfile_key,
             _phantom: std::marker::PhantomData,
             io_semaphore,
+            volatile_split: None,
         }
+    }
+
+    /// Associe à ce shard la paire (head, tail) d'une région volatile
+    /// (V2d). Sans cet appel, le Dispatcher se comporte exactement comme
+    /// avant (`new()` inchangé, aucun appelant K=1 à modifier) : à
+    /// invoquer uniquement pour le composant couvert par une
+    /// `[[volatile_region]]` (`content.core`, main.rs).
+    pub fn with_volatile_split(
+        mut self,
+        head: SplitRenderTarget<P>,
+        tail: SplitRenderTarget<P>,
+    ) -> Self {
+        self.volatile_split = Some((head, tail));
+        self
     }
 
     pub async fn run(self) {
@@ -183,11 +205,14 @@ where
                 continue; // étage 2 jamais exécuté sur un échec de l'étage 1
             }
 
-            if let Err(e) = regenerate_and_swap::<P>(
+            // Étage 2 : K=1 → regenerate_and_swap (inchangé) ; shard segmenté
+            // → une seule ingestion, trois artefacts (regenerate_stage).
+            if let Err(e) = regenerate_stage::<P>(
                 &self.pool,
                 &ids,
                 self.total_cap,
                 self.packfile_key,
+                self.volatile_split.as_ref(),
                 &self.registry,
                 &self.io_semaphore,
             )

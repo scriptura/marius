@@ -458,13 +458,13 @@ pub async fn regenerate_and_swap_with_volatile_split<P: Projection>(
     ids: &[i64],
     total_cap: usize,
     packfile_key: &'static str,
-    volatile_split: Option<(SplitRenderTarget<P>, SplitRenderTarget<P>)>,
+    volatile_split: Option<&(SplitRenderTarget<P>, SplitRenderTarget<P>)>,
     registry: &LiveRegistry,
     io_semaphore: &tokio::sync::Semaphore,
 ) -> io::Result<()> {
     // ---- Résolution des clés — avant tout fetch réseau (fail-fast) --------
     let mono_target = resolve_target(packfile_key, registry)?;
-    let split_targets = match &volatile_split {
+    let split_targets = match volatile_split {
         None => None,
         Some((head, tail)) => Some((
             resolve_target(head.packfile_key, registry)?,
@@ -479,7 +479,7 @@ pub async fn regenerate_and_swap_with_volatile_split<P: Projection>(
         pool,
         ids,
         total_cap,
-        volatile_split.as_ref(),
+        volatile_split,
     )
     .await?;
 
@@ -545,6 +545,47 @@ pub async fn regenerate_and_swap_with_volatile_split<P: Projection>(
     Ok(())
 }
 
+
+/// Étage 2 du tick `Dispatcher::run()` (V2d) — l'unique point d'appel de
+/// régénération du Dispatcher, extrait pour être testable sans `Collector`
+/// ni étage 1 (`ingest_and_swap`).
+///
+/// - `volatile_split == None` : appelle `regenerate_and_swap` — le chemin
+///   K=1 existant, littéralement inchangé (aucun passage par la variante
+///   segmentée).
+/// - `Some(paire)` : appelle `regenerate_and_swap_with_volatile_split` — un
+///   seul `fetch_batch` par chunk, trois artefacts (monolithique + head +
+///   tail).
+///
+/// Pas un moteur générique : le `match` est binaire (zéro ou une paire).
+pub(crate) async fn regenerate_stage<P: Projection>(
+    pool: &sqlx::PgPool,
+    ids: &[i64],
+    total_cap: usize,
+    packfile_key: &'static str,
+    volatile_split: Option<&(SplitRenderTarget<P>, SplitRenderTarget<P>)>,
+    registry: &LiveRegistry,
+    io_semaphore: &tokio::sync::Semaphore,
+) -> io::Result<()> {
+    match volatile_split {
+        None => {
+            regenerate_and_swap::<P>(pool, ids, total_cap, packfile_key, registry, io_semaphore)
+                .await
+        }
+        Some(_) => {
+            regenerate_and_swap_with_volatile_split::<P>(
+                pool,
+                ids,
+                total_cap,
+                packfile_key,
+                volatile_split,
+                registry,
+                io_semaphore,
+            )
+            .await
+        }
+    }
+}
 
 /// Noyau fusion + I/O physique — strictement synchrone et bloquant, zéro
 /// dépendance Tokio (résolution Blocage 1). Phase 4.3 encapsulera l'APPEL
@@ -1136,7 +1177,7 @@ mod tests {
             &[1, 2],
             STUB_TOTAL_CAP,
             mono_key,
-            split,
+            split.as_ref(),
             &registry,
             &io_sem,
         )
@@ -1264,7 +1305,7 @@ mod tests {
             &[1],
             STUB_TOTAL_CAP,
             mono_key,
-            split,
+            split.as_ref(),
             &registry,
             &io_sem,
         )
@@ -1279,6 +1320,119 @@ mod tests {
         cleanup(&packfile_path_for(mono_key));
         cleanup(&packfile_path_for(head_key));
         cleanup(&packfile_path_for(tail_key));
+    }
+
+    // =========================================================================
+    // V2d — `regenerate_stage` : l'étage 2 réellement appelé par
+    // `Dispatcher::run()` (chemin réel de régénération, moins le Collector
+    // et l'étage 1 ingest_and_swap, qui ne concernent pas le nombre de
+    // fetch_batch de l'étage 2).
+    // =========================================================================
+
+    /// Avec une paire de cibles : 1 fetch_batch → monolithique + head + tail.
+    #[tokio::test]
+    async fn regenerate_stage_with_split_produces_three_artifacts_from_one_fetch() {
+        let mono_key = unique_test_key("stage_mono");
+        let head_key = unique_test_key("stage_head");
+        let tail_key = unique_test_key("stage_tail");
+        let pool = stub_pool();
+
+        db_set(&[(1, 4), (2, 6)]);
+        for key in [mono_key, head_key, tail_key] {
+            write_initial_packfile(key, &[(1, ""), (2, "")]);
+        }
+        let mut indices = HashMap::new();
+        for key in [mono_key, head_key, tail_key] {
+            let idx = PackHtmlIndex::open(&packfile_path_for(key)).expect("ouverture amorce");
+            indices.insert(key, ArcSwap::from_pointee(idx));
+        }
+        let registry = LiveRegistry::with_indices(indices);
+        let io_sem = tokio::sync::Semaphore::new(1);
+
+        let split: (SplitRenderTarget<StubProjection>, SplitRenderTarget<StubProjection>) = (
+            SplitRenderTarget {
+                packfile_key: head_key,
+                total_cap: STUB_TOTAL_CAP,
+                render: stub_render_head,
+            },
+            SplitRenderTarget {
+                packfile_key: tail_key,
+                total_cap: STUB_TOTAL_CAP,
+                render: stub_render_tail,
+            },
+        );
+
+        FETCH_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        regenerate_stage::<StubProjection>(
+            &pool,
+            &[1, 2],
+            STUB_TOTAL_CAP,
+            mono_key,
+            Some(&split),
+            &registry,
+            &io_sem,
+        )
+        .await
+        .expect("le tick doit réussir");
+
+        assert_eq!(
+            FETCH_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "1 fetch_batch → monolithique + head + tail"
+        );
+        let (mono, head, tail) = (
+            registry.load(mono_key).unwrap(),
+            registry.load(head_key).unwrap(),
+            registry.load(tail_key).unwrap(),
+        );
+        assert_eq!(read_fragment(&mono, 2), Some("<g6>".to_string()));
+        assert_eq!(read_fragment(&head, 2), Some("<head6>".to_string()));
+        assert_eq!(read_fragment(&tail, 2), Some("<tail6>".to_string()));
+    }
+
+    /// Sans paire : chemin K=1 existant — 1 fetch_batch, seul l'artefact
+    /// monolithique est réécrit, les clés head/tail (présentes au registre
+    /// mais non ciblées) restent strictement intactes.
+    #[tokio::test]
+    async fn regenerate_stage_without_split_is_the_unchanged_k1_path() {
+        let mono_key = unique_test_key("stage_k1_mono");
+        let head_key = unique_test_key("stage_k1_head");
+        let pool = stub_pool();
+
+        db_set(&[(1, 8)]);
+        write_initial_packfile(mono_key, &[(1, "")]);
+        write_initial_packfile(head_key, &[(1, "H0")]);
+        let mut indices = HashMap::new();
+        for key in [mono_key, head_key] {
+            let idx = PackHtmlIndex::open(&packfile_path_for(key)).expect("ouverture amorce");
+            indices.insert(key, ArcSwap::from_pointee(idx));
+        }
+        let registry = LiveRegistry::with_indices(indices);
+        let io_sem = tokio::sync::Semaphore::new(1);
+
+        FETCH_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        regenerate_stage::<StubProjection>(
+            &pool,
+            &[1],
+            STUB_TOTAL_CAP,
+            mono_key,
+            None,
+            &registry,
+            &io_sem,
+        )
+        .await
+        .expect("le tick K=1 doit réussir");
+
+        assert_eq!(FETCH_CALLS.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            read_fragment(&registry.load(mono_key).unwrap(), 1),
+            Some("<g8>".to_string())
+        );
+        assert_eq!(
+            read_fragment(&registry.load(head_key).unwrap(), 1),
+            Some("H0".to_string()),
+            "sans paire, aucune clé annexe n'est touchée"
+        );
     }
 
 
