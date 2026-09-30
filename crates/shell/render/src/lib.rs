@@ -17,6 +17,7 @@ pub mod regenerate;
 pub mod registry;
 pub mod route_derive;
 pub mod store_provisioning;
+pub mod volatile_producers;
 
 // Ré-export pour la façade
 pub use batch_renderer::BatchRenderer;
@@ -48,6 +49,15 @@ pub use regenerate::regenerate_and_swap;
 // par main.rs (marius-server) pour configurer le Dispatcher de content.core
 // via `Dispatcher::with_volatile_split`. Ré-export à plat, même convention.
 pub use regenerate::SplitRenderTarget;
+
+// V3a — producteur Volatile réel du vertical slice (nav_profile). Ré-export
+// à plat, même convention que ci-dessus : le futur adaptateur HTTP (V3b)
+// nomme `marius_render::{materialize_volatile, VolatileContext, ...}`,
+// jamais `marius_render::volatile_producers::...`.
+pub use volatile_producers::{
+    NAV_PROFILE_PRODUCER, VolatileContext, VolatileProductionError, materialize_volatile,
+    produce_nav_profile,
+};
 
 // ingest_and_swap — même convention que regenerate_and_swap/BatchRenderer
 // ci-dessus (fonction principale d'un module, ré-exportée à plat). Nouveau
