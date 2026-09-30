@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-28 21:47:36
+**Généré le:** 2026-09-30 09:44:15
 
 ## Racine du Workspace
 
@@ -125,7 +125,8 @@
 │       │   │   ├── registry.rs
 │       │   │   ├── route_derive.rs
 │       │   │   ├── store_provisioning.rs
-│       │   │   └── sweep.rs
+│       │   │   ├── sweep.rs
+│       │   │   └── volatile_producers.rs
 │       │   ├── Cargo.toml
 │       │   └── README.md
 │       └── server
@@ -207,7 +208,7 @@
 ├── README.md
 └── biome.jsonc
 
-54 directories, 147 files
+54 directories, 148 files
 ```
 
 ## Documentation du projet
