@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-09-30 09:44:15
+**Généré le:** 2026-10-01 00:06:01
 
 ## Racine du Workspace
 
@@ -131,6 +131,7 @@
 │       │   └── README.md
 │       └── server
 │           ├── src
+│           │   ├── content_document.rs
 │           │   ├── experimental_t2a.rs
 │           │   ├── experimental_volatile_t2a.rs
 │           │   ├── handlers.rs
@@ -208,7 +209,7 @@
 ├── README.md
 └── biome.jsonc
 
-54 directories, 148 files
+54 directories, 149 files
 ```
 
 ## Documentation du projet
@@ -248,6 +249,7 @@
 │   ├── HANDOFF-commentaires-marius.md
 │   ├── HANDOFF-js-deps-capacites-frontend-v2.md
 │   ├── HANDOFF-mode-page-blocs-imbriques.md
+│   ├── HANDOFF-mode-page-brique-structurelle.md
 │   ├── HANDOFF-scripts-architecture-reprise.md
 │   ├── Handoff-introduction of-an-AOT-route-representation-context.md
 │   ├── analyse-emission-plan.md
@@ -256,9 +258,11 @@
 │   ├── handoff-cartographie-hyper(ADR-011).md
 │   ├── handoff-checkpoint-segment-resolution.md
 │   ├── handoff-implementation-t2a.md
+│   ├── handoff-provisioning-projection.md
 │   ├── handoff-t2a-experimental-integration-i1-i6.md
 │   ├── logical-data-model.pgsql
 │   ├── manifest-reactive-projection-OLD.md
+│   ├── specification-provisioning-projection.md
 │   ├── static-usage-driven-selection-pipeline-v0_2_1.md
 │   └── static-usage-driven-selection-pipeline-v3.md
 ├── benchs
@@ -337,6 +341,6 @@
     ├── provisioning-projection-specification.md
     └── specification-AOT-boundary-volatile-and-emission-plan-contract.md
 
-17 directories, 105 files
+17 directories, 108 files
 ```
 
