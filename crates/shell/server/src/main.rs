@@ -38,6 +38,7 @@ mod experimental_t2a;
 #[cfg(test)]
 mod experimental_volatile_t2a;
 mod handlers; // PROVISOIRE — EXPÉRIMENTAL, voir en-tête du module.
+mod content_document; // V3b — montage réel de /content/{id} sur T2A.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,18 +111,27 @@ include!(concat!(env!("OUT_DIR"), "/asset_routes.rs"));
 /// reviendra au périmètre, avec son propre dump.
 static ROUTE_TABLE: &[RouteEntry] = &[
     RouteEntry {
-        pattern: "/content/{id}",
-        packfile_key: "content_core",
-        id_source: IdSource::PathParam("id"),
-        content_type: "text/html; charset=utf-8",
-    },
-    RouteEntry {
         pattern: "/",
         packfile_key: "pages_homepage",
         id_source: IdSource::Fixed(1),
         content_type: "text/html; charset=utf-8",
     },
 ];
+
+/// V3b — `/content/{id}` bascule sur le pipeline runtime T2A
+/// (`content_document::mount`, ci-dessous) : retiré de `ROUTE_TABLE`
+/// (jamais deux handlers Axum sur le même motif). Le chemin monolithique
+/// (`content_core.bin`) reste disponible, à la fois pour la régénération
+/// (Dispatcher, shard `content_core`) et pour comparaison directe, monté
+/// manuellement à `/__monolithic/content/{id}` (voir `main()`), avec le
+/// même handler générique `handlers::serve_route` que `ROUTE_TABLE`
+/// ci-dessus — jamais une seconde implémentation de lecture.
+static MONOLITHIC_CONTENT_ROUTE: RouteEntry = RouteEntry {
+    pattern: "/__monolithic/content/{id}",
+    packfile_key: "content_core",
+    id_source: IdSource::PathParam("id"),
+    content_type: "text/html; charset=utf-8",
+};
 
 /// Configuration par défaut des Dispatcher — littéral explicite, pas
 /// `DispatcherConfig::default()` : `Default::default()` n'est pas garanti
@@ -294,9 +304,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // provisionnées puis ouvertes via `cold_start_with_extra_keys`. Les
     // clés suivent la convention réellement en vigueur (`ArtifactKey` →
     // `packfile_path_for`), jamais `P::packfile_path()`.
+    // Retirée de ROUTE_TABLE (V3b) : provisionnée/ouverte explicitement,
+    // comme head/tail, pour rester disponible au Dispatcher et à la route
+    // de comparaison /__monolithic/content/{id}.
+    let content_core_key: &'static str = SHARDS[0].packfile_key;
     let content_core_head_key: &'static str = CONTENT_CORE_HEAD_ARTIFACT.as_str();
     let content_core_tail_key: &'static str = CONTENT_CORE_TAIL_ARTIFACT.as_str();
-    for key in [content_core_head_key, content_core_tail_key] {
+    for key in [content_core_key, content_core_head_key, content_core_tail_key] {
         match marius_render::ensure_provisioned(key).await? {
             marius_render::ProvisionOutcome::Provisioned => eprintln!(
                 "[marius-server] espace de projection provisionné (vierge) — artefact \"{key}\""
@@ -306,10 +320,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let registry = Arc::new(LiveRegistry::cold_start_with_extra_keys(
         ROUTE_TABLE,
-        &[content_core_head_key, content_core_tail_key],
+        &[content_core_key, content_core_head_key, content_core_tail_key],
     )?);
     eprintln!(
-        "[marius-server] cold_start réussi — {} route(s) enregistrée(s), 2 artefact(s) hors route",
+        "[marius-server] cold_start réussi — {} route(s) enregistrée(s), 3 artefact(s) hors route",
         ROUTE_TABLE.len()
     );
 
@@ -399,6 +413,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // montage T2A expérimental ci-dessous, le binding d'origine reste le
     // dernier usage réel dans build_router().
     let app = build_router(ROUTE_TABLE, registry.clone());
+
+    // ── Comparaison monolithique (V3b) ──────────────────────────────────────
+    // Même handler générique que ROUTE_TABLE (handlers::serve_route),
+    // seulement monté à un motif distinct — jamais une seconde
+    // implémentation de lecture, jamais un changement de handlers.rs. Un
+    // mini-Router séparé (même patron que mount_experimental ci-dessous,
+    // état résolu localement) : `app` est déjà résolu par
+    // build_router()/.with_state(), on ne peut plus lui ajouter une route
+    // qui redemande cet état — seulement le merger.
+    let monolithic_comparison = Router::new()
+        .route(
+            MONOLITHIC_CONTENT_ROUTE.pattern,
+            get(handlers::serve_route).layer(Extension(&MONOLITHIC_CONTENT_ROUTE)),
+        )
+        .with_state(registry.clone());
+    let app = app.merge(monolithic_comparison);
+
+    // ── /content/{id} réel — pipeline runtime T2A (V3b) ─────────────────────
+    // RouteDescriptor K=3 généré par la Forge (V2c/V2d) : StaticArtifact(head)
+    // → VolatileSlot(nav_profile) → StaticArtifact(tail). Remplace, pour
+    // cette seule route, le montage ROUTE_TABLE historique — "le reste des
+    // routes" (pages_homepage, ci-dessus) n'est pas concerné.
+    let app = app.merge(content_document::mount(registry.clone()));
 
     // ── T2A expérimental (I1, PROVISOIRE) ───────────────────────────────────
     // Route isolée, mergée après coup — jamais à l'intérieur de
@@ -1154,5 +1191,178 @@ mod tests {
             "effective_len (300) > capacity (256) doit produire un 500 \
              contrôlé, jamais une troncature ni un panic"
         );
+    }
+
+    // =========================================================================
+    // V3b — /content/{id} réel, sur le pipeline runtime T2A
+    //
+    // Clés réelles (content_core_head/content_core_tail, pas unique_test_key) :
+    // la résolution SourceKey → packfile_key de content_document.rs passe par
+    // le vrai catalogue marius_schema::ARTIFACTS, qui ne connaît que ces deux
+    // chaînes littérales — même discipline que
+    // head_and_tail_packfiles_use_the_artifact_key_convention_not_the_pack_suffix
+    // (V2d, regenerate.rs) : seul test de ce fichier à les utiliser,
+    // nettoyage explicite en fin de test.
+    // =========================================================================
+    #[tokio::test]
+    async fn content_document_route_serves_head_volatile_tail_in_order() {
+        const HEAD: &[u8] = b"<html><body><ul><li>nav</li>";
+        const TAIL: &[u8] = b"</ul></body></html>";
+
+        write_fixture_packfile("content_core_head", &[(1, HEAD)]);
+        write_fixture_packfile("content_core_tail", &[(1, TAIL)]);
+
+        let registry = Arc::new(
+            LiveRegistry::cold_start_with_extra_keys(&[], &["content_core_head", "content_core_tail"])
+                .expect("cold_start_with_extra_keys doit réussir"),
+        );
+        let app = content_document::mount(registry);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind port éphémère");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            let conn_builder = HyperConnectionBuilder::new(TokioExecutor::new());
+            let graceful = GracefulShutdown::new();
+            loop {
+                let (stream, _peer_addr) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(e) => panic!("serveur de test — accept() échoué: {e}"),
+                };
+                let io = TokioIo::new(stream);
+                let hyper_service = TowerToHyperService::new(app.clone());
+                let conn = conn_builder.serve_connection(io, hyper_service);
+                let conn = graceful.watch(conn.into_owned());
+                tokio::spawn(async move {
+                    let _ = conn.await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+
+        // ── Cas anonyme : placeholder AOT, identique au monolithique ────
+        let resp = client
+            .get(format!("http://{addr}/content/1"))
+            .send()
+            .await
+            .expect("requête anonyme");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let content_length = resp.content_length().expect("Content-Length présent");
+        let body = resp.bytes().await.expect("corps");
+
+        let mut expected_anon = Vec::new();
+        expected_anon.extend_from_slice(HEAD);
+        expected_anon.extend_from_slice(b"<li class=\"nav-profile\"></li>");
+        expected_anon.extend_from_slice(TAIL);
+        assert_eq!(
+            content_length,
+            expected_anon.len() as u64,
+            "Content-Length = head + volatile effectif + tail, jamais la capacité"
+        );
+        assert_eq!(&body[..], &expected_anon[..], "ordre head → volatile → tail");
+
+        // ── requête HTTP → contexte → username → materialize_volatile ──
+        // (jamais un username injecté artificiellement au moment du Body)
+        let resp = client
+            .get(format!("http://{addr}/content/1?user=Olivier"))
+            .send()
+            .await
+            .expect("requête authentifiée");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body = resp.bytes().await.expect("corps");
+        let mut expected_auth = Vec::new();
+        expected_auth.extend_from_slice(HEAD);
+        expected_auth.extend_from_slice(b"<li class=\"nav-profile\">Olivier</li>");
+        expected_auth.extend_from_slice(TAIL);
+        assert_eq!(&body[..], &expected_auth[..]);
+
+        // ── échappement HTML (jamais une injection brute) ────────────────
+        let resp = client
+            .get(format!("http://{addr}/content/1"))
+            .query(&[("user", "<script>alert(1)</script>")])
+            .send()
+            .await
+            .expect("requête avec username hostile");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body = resp.bytes().await.expect("corps");
+        let html = String::from_utf8_lossy(&body);
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
+
+        // ── id absent du static → 404 contrôlé, jamais un panic ──────────
+        let resp = client
+            .get(format!("http://{addr}/content/999"))
+            .send()
+            .await
+            .expect("requête id absent");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_file(marius_render::packfile_path_for("content_core_head"));
+        let _ = std::fs::remove_file(marius_render::packfile_path_for("content_core_tail"));
+    }
+
+    /// Dépassement de capacité du slot volatile (producteur réel,
+    /// `materialize_volatile`) → 500 contrôlé — jamais un panic, jamais une
+    /// troncature. Démontré sur la route réelle, pas seulement sur
+    /// `volatile_producers.rs` en isolation (V3a).
+    #[tokio::test]
+    async fn content_document_route_controls_volatile_capacity_overflow() {
+        const HEAD: &[u8] = b"<html>";
+        const TAIL: &[u8] = b"</html>";
+
+        write_fixture_packfile("content_core_head", &[(1, HEAD)]);
+        write_fixture_packfile("content_core_tail", &[(1, TAIL)]);
+
+        let registry = Arc::new(
+            LiveRegistry::cold_start_with_extra_keys(&[], &["content_core_head", "content_core_tail"])
+                .expect("cold_start_with_extra_keys doit réussir"),
+        );
+        let app = content_document::mount(registry);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind port éphémère");
+        let addr = listener.local_addr().expect("local_addr");
+
+        tokio::spawn(async move {
+            let conn_builder = HyperConnectionBuilder::new(TokioExecutor::new());
+            let graceful = GracefulShutdown::new();
+            loop {
+                let (stream, _peer_addr) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(e) => panic!("serveur de test — accept() échoué: {e}"),
+                };
+                let io = TokioIo::new(stream);
+                let hyper_service = TowerToHyperService::new(app.clone());
+                let conn = conn_builder.serve_connection(io, hyper_service);
+                let conn = graceful.watch(conn.into_owned());
+                tokio::spawn(async move {
+                    let _ = conn.await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+
+        // capacité réelle du slot nav_profile (publication.toml) : 512.
+        // 600 'x' + balises dépasse largement.
+        let huge_username = "x".repeat(600);
+        let resp = client
+            .get(format!("http://{addr}/content/1"))
+            .query(&[("user", huge_username.as_str())])
+            .send()
+            .await
+            .expect("requête overflow");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "dépassement de capacité du producteur Volatile -> 500 contrôlé"
+        );
+
+        let _ = std::fs::remove_file(marius_render::packfile_path_for("content_core_head"));
+        let _ = std::fs::remove_file(marius_render::packfile_path_for("content_core_tail"));
     }
 }
