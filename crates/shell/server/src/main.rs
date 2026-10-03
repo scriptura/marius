@@ -1280,9 +1280,13 @@ mod tests {
         assert_eq!(&body[..], &expected_auth[..]);
 
         // ── échappement HTML (jamais une injection brute) ────────────────
+        // .query() indisponible sur la version de reqwest de ce workspace —
+        // URL construite directement, username pré-encodé (caractères non
+        // alphanumériques du seul cas de ce test).
         let resp = client
-            .get(format!("http://{addr}/content/1"))
-            .query(&[("user", "<script>alert(1)</script>")])
+            .get(format!(
+                "http://{addr}/content/1?user=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+            ))
             .send()
             .await
             .expect("requête avec username hostile");
@@ -1349,10 +1353,11 @@ mod tests {
 
         // capacité réelle du slot nav_profile (publication.toml) : 512.
         // 600 'x' + balises dépasse largement.
+        // Idem : URL construite directement — 'x' répété est déjà
+        // "URL-safe", aucun encodage supplémentaire nécessaire ici.
         let huge_username = "x".repeat(600);
         let resp = client
-            .get(format!("http://{addr}/content/1"))
-            .query(&[("user", huge_username.as_str())])
+            .get(format!("http://{addr}/content/1?user={huge_username}"))
             .send()
             .await
             .expect("requête overflow");

@@ -50,6 +50,13 @@ pub use regenerate::regenerate_and_swap;
 // via `Dispatcher::with_volatile_split`. Ré-export à plat, même convention.
 pub use regenerate::SplitRenderTarget;
 
+// regenerate_and_swap_with_volatile_split — V2d/V3b, même convention que
+// regenerate_and_swap ci-dessus. Oubli corrigé : le Dispatcher l'appelle en
+// interne via crate::regenerate::regenerate_stage (chemin de module, jamais
+// la façade), ce qui avait masqué l'absence de ce ré-export jusqu'à ce
+// qu'un appelant EXTERNE au crate (marius-dump) en ait besoin.
+pub use regenerate::regenerate_and_swap_with_volatile_split;
+
 // V3a — producteur Volatile réel du vertical slice (nav_profile). Ré-export
 // à plat, même convention que ci-dessus : le futur adaptateur HTTP (V3b)
 // nomme `marius_render::{materialize_volatile, VolatileContext, ...}`,
