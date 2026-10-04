@@ -141,6 +141,9 @@
 
   & .current {
     background-color: var(--color2);
+  }
+
+  &:not([popover]) .current {
 
     @media ($from-nav) {
       position: relative;
