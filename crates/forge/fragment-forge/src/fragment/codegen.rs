@@ -128,6 +128,18 @@ pub fn generate_aot_snippet<'src, 'r>(
 
             FlatPageToken::Field { field, .. } => {
                 if let Some(v) = schema.find_varlena(field) {
+                    // WARNING CONNU (clippy::collapsible_if sur le code généré) :
+                    // émettre `if let Some(s) = {field}_ref { ... }` à l'intérieur
+                    // d'un `if record.{field} != 0 {` dont c'est la seule
+                    // instruction déclenche `collapsible_if` dans
+                    // `generated_schema.rs`. Warning issu du code généré ;
+                    // suppression nécessitant une reconnaissance syntaxique
+                    // supplémentaire du flux `FlatPageToken` (bloc conditionnel
+                    // à instruction unique, sans `Else`) ; volontairement différée
+                    // afin de ne pas introduire une transformation structurelle
+                    // du générateur pour un gain purement stylistique. Les tests
+                    // figent aussi la forme textuelle `if record.X != 0 {`.
+                    // Même situation dans `generate_segmented_snippet`.
                     // CONTRAT-implementation-varlena-raw.md, Étape 4 : match
                     // exhaustif sur EscapePolicy — Raw ne passe JAMAIS par
                     // marius_html_escape (contenu HTML déjà constitué, à
@@ -327,6 +339,9 @@ pub fn generate_segmented_snippet<'src, 'r>(
 
             FlatPageToken::Field { field, .. } => {
                 if let Some(v) = schema.find_varlena(field) {
+                    // WARNING CONNU `clippy::collapsible_if` sur le code généré :
+                    // voir le commentaire homonyme dans `generate_aot_snippet`
+                    // (même motif d'émission, même différé volontaire).
                     if v.is_segment {
                         // Clôture du run courant — toujours valide même si
                         // ce token est le tout premier de la fonction
@@ -737,8 +752,7 @@ mod tests_phase_2_2 {
         // préfixe 4-espaces), après la fermeture du bloc if.
         let last_push_line = got
             .lines()
-            .filter(|l| l.trim_start().starts_with("segments.push"))
-            .next_back()
+            .rfind(|l| l.trim_start().starts_with("segments.push"))
             .expect("au moins un push attendu");
         assert!(
             !last_push_line.starts_with(' '),

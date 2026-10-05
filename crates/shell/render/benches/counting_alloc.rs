@@ -71,6 +71,12 @@ static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 /// ```
 pub struct CountingAlloc;
 
+impl Default for CountingAlloc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CountingAlloc {
     pub const fn new() -> Self {
         Self

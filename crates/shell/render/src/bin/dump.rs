@@ -64,7 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // fetch_batch panique (StoreRegistry non provisionné).
     ContentCoreProjection::cold_start_store()?;
 
-    // Pack HTML — monolithique (DUMP_ROUTE_TABLE, "content_core") ET,
+    // Pack HTML — monolithique (clé de DUMP_ROUTE_TABLE, dérivée de
+    // CONTENT_DOCUMENT_ROUTE, jamais redéclarée en dur ici) ET,
     // depuis V3b, head/tail (clés hors route, jamais montées en route HTTP
     // par ce binaire — même discipline que marius-server). Provisioning +
     // cold_start locaux à ce process, jetables : ce binaire ne sert aucune

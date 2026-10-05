@@ -1,4 +1,4 @@
-// marius-render · crates/shell/render/src/regenerate.rs
+// crates/shell/render/src/regenerate.rs
 
 //! Interface d'Écriture AOT & Régénération des Packfiles HTML (`regenerate_and_swap`).
 //!
@@ -1078,7 +1078,7 @@ mod tests {
                         .map(|&(rid, generation)| {
                             (
                                 StubRecord {
-                                    id: rid as i64,
+                                    id: rid,
                                     generation,
                                 },
                                 (),
@@ -1096,7 +1096,7 @@ mod tests {
 
         #[inline(always)]
         fn record_id(record: &StubRecord) -> i64 {
-            record.id as i64
+            record.id
         }
 
         fn packfile_path() -> PathBuf {
@@ -1442,16 +1442,13 @@ mod tests {
         type Record = StubRecord;
         type VarlenOwned = ();
 
-        fn fetch_batch(
+        async fn fetch_batch(
             _pool: &sqlx::PgPool,
             _ids: &[i64],
-        ) -> impl std::future::Future<Output = marius_projection::BatchResult<Self>> + Send
-        {
-            async {
-                Err(sqlx::Error::Io(std::io::Error::other(
-                    "échec PostgreSQL simulé",
-                )))
-            }
+        ) -> marius_projection::BatchResult<Self> {
+            Err(sqlx::Error::Io(std::io::Error::other(
+                "échec PostgreSQL simulé",
+            )))
         }
 
         fn render(record: &StubRecord, _varlena: &(), buf: &mut String) {
@@ -1461,7 +1458,7 @@ mod tests {
 
         #[inline(always)]
         fn record_id(record: &StubRecord) -> i64 {
-            record.id as i64
+            record.id
         }
 
         fn packfile_path() -> PathBuf {

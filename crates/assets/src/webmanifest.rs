@@ -266,7 +266,7 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(
-            manifest.get("manifest.webmanifest").is_none(),
+            !manifest.contains_key("manifest.webmanifest"),
             "aucune entrée ne doit être enregistrée si la résolution échoue"
         );
 

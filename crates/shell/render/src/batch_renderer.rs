@@ -209,12 +209,11 @@ mod tests {
         type Record = StubRecord;
         type VarlenOwned = ();
 
-        fn fetch_batch(
+        async fn fetch_batch(
             _pool: &sqlx::PgPool,
             _ids: &[i64],
-        ) -> impl std::future::Future<Output = marius_projection::BatchResult<Self>> + Send
-        {
-            async { Ok(vec![]) }
+        ) -> marius_projection::BatchResult<Self> {
+            Ok(vec![])
         }
 
         fn render(record: &StubRecord, _varlena: &(), buf: &mut String) {
@@ -228,7 +227,7 @@ mod tests {
 
         #[inline(always)]
         fn record_id(record: &StubRecord) -> i64 {
-            record.id as i64
+            record.id
         }
 
         fn packfile_path() -> PathBuf {
@@ -284,12 +283,11 @@ mod tests {
         type Record = StubRecord;
         type VarlenOwned = StubVarlenOwned;
 
-        fn fetch_batch(
+        async fn fetch_batch(
             _pool: &sqlx::PgPool,
             _ids: &[i64],
-        ) -> impl std::future::Future<Output = marius_projection::BatchResult<Self>> + Send
-        {
-            async { Ok(vec![]) }
+        ) -> marius_projection::BatchResult<Self> {
+            Ok(vec![])
         }
 
         // Jamais appelée : BatchRenderer::render_batch appelle toujours

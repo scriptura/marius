@@ -625,10 +625,12 @@ mod integration {
 
             let cols = fetch_columns(&pool, &comp.schema, &comp.table)
                 .await
-                .expect(&format!(
-                    "fetch_columns échoué pour {}.{}",
-                    comp.schema, comp.table
-                ));
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "fetch_columns échoué pour {}.{} : {e:?}",
+                        comp.schema, comp.table
+                    )
+                });
 
             validate_layout(&cols, comp.intent_density)
                 .unwrap_or_else(|msg| panic!("{}.{} : {}", comp.schema, comp.table, msg));

@@ -319,11 +319,10 @@ fn provisioning_on_empty_environment_starts_cleanly_and_serves_404() {
             );
         }
 
-        match http_get_status_code(&bind_addr, url_path) {
-            Ok(code) => break code,
-            // Connexion refusée : le serveur n'écoute pas encore — normal au
-            // tout début de la fenêtre de polling, pas une erreur en soi.
-            Err(_) => {}
+        // Connexion refusée (Err) : le serveur n'écoute pas encore — normal
+        // au tout début de la fenêtre de polling, pas une erreur en soi.
+        if let Ok(code) = http_get_status_code(&bind_addr, url_path) {
+            break code;
         }
 
         if start.elapsed() >= POLL_TIMEOUT {

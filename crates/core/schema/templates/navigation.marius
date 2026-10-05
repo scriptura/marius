@@ -172,7 +172,7 @@
             {% endif %}
         </li>
         <!-- MARIUS_VOLATILE_BEGIN nav_profile -->
-        <li class="nav-profile"></li>
+        <li><span class="nav-profile"></span></li>
         <!-- MARIUS_VOLATILE_END -->
         <li>
             <a href="//github.com/scriptura/marius">

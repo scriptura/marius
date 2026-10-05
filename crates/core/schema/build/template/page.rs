@@ -807,7 +807,19 @@ pub(crate) fn resolve_page_template<'src>(
             // périmètre de ce vertical slice (aucun des deux mécanismes ne
             // l'interdit structurellement, mais rien ne l'exerce ni ne le
             // teste ici).
-            let head_body = generate_aot_snippet(&head_tokens, &schema_index, resolve_asset_url, "");
+            // ModulesPlaceholder (MARIUS_MODULES) vit dans <head> (base.marius),
+            // donc dans head_tokens après la scission — jamais dans
+            // tail_tokens. modules_lowering.snippet (déjà résolu une seule
+            // fois, ci-dessus, pour le flux complet) doit donc être splicé
+            // UNIQUEMENT ici, jamais une seconde fois côté tail — un second
+            // bloc js_deps/imports y serait un doublon, pas une dépendance
+            // supplémentaire.
+            let head_body = generate_aot_snippet(
+                &head_tokens,
+                &schema_index,
+                resolve_asset_url,
+                &modules_lowering.snippet,
+            );
             let tail_body = generate_aot_snippet(&tail_tokens, &schema_index, resolve_asset_url, "");
 
             Some(VolatileSplitTemplateRender {
@@ -824,6 +836,102 @@ pub(crate) fn resolve_page_template<'src>(
         metrics,
         volatile_split,
     })
+}
+
+// =============================================================================
+// Test de non-régression — ModulesPlaceholder / split volatile (V3b)
+// =============================================================================
+//
+// Auto-contenu : construit directement un flux `FlatPageToken` portant un
+// `ModulesPlaceholder` (comme le <head> réel, via MARIUS_MODULES) suivi d'une
+// région volatile, plutôt que de passer par `resolve_template`/
+// `resolve_page_template` (fixtures sur disque, `modules_lowering.rs`,
+// capacités réelles) — isole exactement le mécanisme qui a régressé
+// (répartition de `modules_snippet` entre `generate_aot_snippet(head, ...)`
+// et `generate_aot_snippet(tail, ...)`), sans dépendre du reste du pipeline
+// Mode Page.
+#[cfg(test)]
+mod tests_modules_placeholder_split_regression {
+    use super::{SchemaIndex, generate_aot_snippet, split_static_at_region};
+    use marius_fragment_forge::FlatPageToken;
+
+    const BEGIN: &str = "<!-- MARIUS_VOLATILE_BEGIN nav_profile -->";
+    const END: &str = "<!-- MARIUS_VOLATILE_END -->";
+
+    /// `record.js_deps != 0` ⇒ `modules_lowering.snippet` est un bloc Rust
+    /// non vide (`if record.js_deps & BIT != 0 { ... }`) — simulé ici
+    /// directement par une chaîne non vide représentative, sans dépendre du
+    /// calcul réel de `lower_modules_for_template` (module distinct, hors
+    /// périmètre de ce test).
+    const JS_DEPS_SNIPPET: &str =
+        "if record.js_deps & 0b1 != 0 { buf.push_str(\"<script src=\\\"/a.js\\\"></script>\"); }";
+
+    fn schema() -> SchemaIndex<'static> {
+        SchemaIndex {
+            fixed: &[],
+            varlena: &[],
+        }
+    }
+
+    #[test]
+    fn head_receives_the_modules_snippet_tail_does_not_duplicate_it() {
+        // <head>…MARIUS_MODULES…</head><body>…BEGIN…volatile…END…</body>
+        let tokens = vec![
+            FlatPageToken::Static("<head>"),
+            FlatPageToken::ModulesPlaceholder,
+            FlatPageToken::Static(
+                "</head><body><!-- MARIUS_VOLATILE_BEGIN nav_profile -->x<!-- MARIUS_VOLATILE_END --></body>",
+            ),
+        ];
+
+        let (head_tokens, tail_tokens) =
+            split_static_at_region(tokens, BEGIN, END).expect("split doit réussir");
+
+        // Le ModulesPlaceholder précède la région volatile dans ce flux —
+        // il doit donc se retrouver dans head_tokens, jamais tail_tokens.
+        assert!(
+            head_tokens.contains(&FlatPageToken::ModulesPlaceholder),
+            "ModulesPlaceholder doit rester dans la moitié head"
+        );
+        assert!(
+            !tail_tokens.contains(&FlatPageToken::ModulesPlaceholder),
+            "ModulesPlaceholder ne doit jamais apparaître dans la moitié tail"
+        );
+
+        let resolve_asset_url = |_key: &str| -> &str { "" };
+
+        // Correctif : head reçoit modules_lowering.snippet, tail reçoit "".
+        let head_body =
+            generate_aot_snippet(&head_tokens, &schema(), resolve_asset_url, JS_DEPS_SNIPPET);
+        let tail_body = generate_aot_snippet(&tail_tokens, &schema(), resolve_asset_url, "");
+
+        assert!(
+            head_body.contains(JS_DEPS_SNIPPET),
+            "render_head() doit porter le bloc js_deps/imports : {head_body}"
+        );
+        assert!(
+            !tail_body.contains(JS_DEPS_SNIPPET),
+            "render_tail() ne doit jamais dupliquer le bloc js_deps/imports : {tail_body}"
+        );
+
+        // Même dépendances frontend que le rendu monolithique : le
+        // monolithique (flux complet, non scindé) porte le même
+        // ModulesPlaceholder et recevrait le même modules_snippet — la
+        // scission ne doit ni le perdre, ni le dupliquer, seulement le
+        // répartir du bon côté.
+        let monolithic_tokens = vec![
+            FlatPageToken::Static("<head>"),
+            FlatPageToken::ModulesPlaceholder,
+            FlatPageToken::Static("</head><body>x</body>"),
+        ];
+        let monolithic_body = generate_aot_snippet(
+            &monolithic_tokens,
+            &schema(),
+            resolve_asset_url,
+            JS_DEPS_SNIPPET,
+        );
+        assert!(monolithic_body.contains(JS_DEPS_SNIPPET));
+    }
 }
 
 // =============================================================================

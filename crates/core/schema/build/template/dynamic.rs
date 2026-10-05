@@ -63,6 +63,12 @@ use crate::template::page::resolve_page_template;
 ///                       `static`, calcul du `LinkPlan` ; Phase 6.6 :
 ///                       Lowering, jonction avec le pipeline gelé).
 ///                       cargo:error déjà émis ; l'appelant doit exit(1).
+// 8 arguments : `volatile_marker` (V2c) est une entrée indépendante et
+// légitime du pipeline, au même titre que les autres (identité de table,
+// schéma, capacités). Les regrouper dans une structure ne ferait que
+// déplacer le compte sans clarifier le contrat — suppression locale, jamais
+// globale.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_template(
     manifest_dir: &str,
     assets: &HashMap<String, AssetEntry>,
