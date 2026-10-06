@@ -795,6 +795,13 @@ pub fn write_projection_stub(
         writeln!(out).unwrap();
 
         writeln!(out, "impl {proj_name} {{").unwrap();
+        // Même tolérance que render()/render_chunks() ci-dessus : la forme
+        // imbriquée `if record.X != 0 { if let Some(s) = … }` est
+        // volontairement conservée (le corps vient de generate_aot_snippet) ;
+        // la réécrire en `&& let` exigerait une analyse supplémentaire du
+        // flux FlatPageToken pour un gain purement stylistique. Lint toléré
+        // sur le code généré, au niveau de la fonction uniquement.
+        writeln!(out, "    #[allow(clippy::collapsible_if)]").unwrap();
         writeln!(
             out,
             "    pub fn render_head(record: &{name}StorageRow, {split_varlena_param}, buf: &mut String) {{"
@@ -806,6 +813,8 @@ pub fn write_projection_stub(
         }
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
+        // Même tolérance que render_head() ci-dessus (collapsible_if).
+        writeln!(out, "    #[allow(clippy::collapsible_if)]").unwrap();
         writeln!(
             out,
             "    pub fn render_tail(record: &{name}StorageRow, {split_varlena_param}, buf: &mut String) {{"
