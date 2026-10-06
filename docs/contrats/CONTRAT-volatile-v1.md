@@ -1,177 +1,243 @@
-# Note normative — Contrat Volatile V1
+# Contrat Volatile V1
 
-**Statut :** normative pour le pipeline runtime T2A des segments volatils. Ne
-modifie ni ADR-011 ni `SPECIFICATION-transport-segmente-t2a.md` (v2) —
-**étend** ce que la SPEC v2 §8 laisse explicitement hors périmètre (« Le
-Volatile (production, cycle de vie, `VolatileSlot`) »), sans les contredire.
-Toute contradiction découverte avec l'un de ces deux documents doit faire
-l'objet d'un audit séparé, pas d'une résolution silencieuse via cette note
-(même clause que SPEC v2 §10).
+**Statut :** normatif pour le pipeline runtime T2A des segments volatils.
+Ne modifie ni ADR-011 ni `SPECIFICATION-transport-segmente-t2a.md` (v2) :
+**étend** ce que la SPEC v2 §8 laisse hors périmètre (« Le Volatile : production,
+cycle de vie, `VolatileSlot` »), sans les contredire. Toute contradiction
+découverte avec l'un de ces documents fait l'objet d'un audit séparé, jamais
+d'une résolution silencieuse via ce contrat (même clause que SPEC v2 §10).
 
-**Source :** `handoff-volatile-vertical-slice.md` §6. Cette note n'introduit
-aucune propriété nouvelle — elle fixe par écrit, comme référence normative
-indépendante du handoff (document de transition, pas une spécification), les
-huit propriétés déjà actées.
+Ce document décrit l'architecture retenue et son état d'application dans le code.
+Il ne retrace pas l'historique de son élaboration.
 
 ---
 
-## Propriétés (P1–P8)
+## 1. Modèle
+
+Un segment volatile est une plage mémoire **produite à la requête**, par opposition
+à un segment statique **sélectionné** dans un artefact AOT.
+
+```text
+producteur (clé opaque)
+  → stockage possédé
+  → longueur effective
+  → ResolvedRange
+  → owner conservé jusqu'au drop du Body
+```
+
+Le runtime reste ignorant de `.marius`, du DOM, de HTMX et du SQL. Toute
+connaissance de domaine est confinée à l'implémentation du producteur ;
+`emission.rs` ne manipule que des clés opaques.
+
+```text
+StaticArtifact                      VolatileSlot
+    → sélection (RequestSlot)           → ProducerKey
+    → lookup                            → SegmentSelection::NotApplicable
+                                        → matérialisation directe
+```
+
+Un segment volatile n'a **aucune** sélection par clé primaire. `Constant(0)` et
+`RequestSlot(0)` ne sont jamais des valeurs fictives pour `NotApplicable`.
+
+## 2. Propriétés P1–P8
 
 - **P1** — Aucun raw pointer dans `MaterializedSource::Volatile`.
-- **P2** — La longueur effective est portée par le stockage ; `ResolvedRange`
-  = (ptr, longueur effective). `longueur > capacité` au moment de la
-  matérialisation :
-  ```
+- **P2** — La longueur effective est portée par le stockage ; `ResolvedRange` est
+  (pointeur, longueur effective). `longueur > capacité` à la matérialisation donne :
+
+  ```text
   → erreur contrôlée
   → HTTP 500 dans l'adaptateur
   → aucune troncature
   ```
-  Jamais une lecture ou une écriture hors bornes.
-- **P3** — `MaterializedSource::Volatile` porte un handle **possédé et
-  partageable**. `marius-render` n'a aucune dépendance `bytes`/`axum`/`hyper` :
-  types `std` uniquement.
-- **P4** — L'adaptateur côté server (ex. `MmapOwner`) clone ce handle dans un
-  owner passé à `Bytes::from_owner` : le stockage vit jusqu'au drop de la
-  frame.
-- **P5** — Production **avant** la construction du `Body` ; les octets sont
-  un instantané ; aucune lecture après libération de l'owner. Le point
-  d'appel du producteur est dans le handler asynchrone, **avant** la
-  résolution synchrone des plages statiques, afin qu'aucune référence
-  empruntée ne traverse un `await` (pertinent dès V3 : lecture SQL
-  asynchrone).
-- **P6** — Capacité dérivée de la Forge (`SourceSpec::VolatileSlot.capacity`) ;
-  le total `RouteDescriptor.volatile_capacity` est une somme dérivée et
-  vérifiée, jamais choisie par le runtime.
-- **P7** — `SegmentSelection::NotApplicable` : invariant
-  `SourceSpec::VolatileSlot ⇔ SegmentSelection::NotApplicable`, vérifié par
-  le générateur (erreur de build, V2) et par le runtime (500, jamais de
-  panic, V1c). V1a fournit uniquement le prédicat pur commun aux deux
-  futurs appelants (`marius_projection::segment_matches_source`) — ni l'un
-  ni l'autre mécanisme de vérification n'est câblé à ce stade.
-- **P8** — `SourceSpec::VolatileSlot` porte une `ProducerKey` opaque ; le
-  runtime ne connaît que cette clé. Le dispatch vers l'implémentation du
-  producteur vit **hors** de `emission.rs`.
 
-## État couvert par V1a (ce livrable)
+  Jamais de lecture ni d'écriture hors bornes.
+- **P3** — `MaterializedSource::Volatile` porte un handle **possédé et partageable**
+  (`Arc<VolatileStorage>`). `marius-render` n'a aucune dépendance `bytes`, `axum` ou
+  `hyper` : types `std` uniquement.
+- **P4** — L'adaptateur côté `marius-server` clone ce handle dans un owner
+  (`VolatileOwner`) passé à `Bytes::from_owner` : le stockage vit jusqu'au drop de
+  la frame.
+- **P5** — Production **avant** la construction du `Body` ; les octets sont un
+  instantané ; aucune lecture après libération de l'owner. Aucune référence
+  empruntée ne traverse un point de suspension (`await`). *État actuel :* la
+  production est synchrone et a lieu dans la boucle de résolution des segments,
+  dans l'ordre du descripteur ; rien ne suspend. Si un producteur devient
+  asynchrone (lecture SQL), sa production devra précéder la résolution synchrone
+  des plages statiques.
+- **P6** — La capacité vient de la Forge (`SourceSpec::VolatileSlot.capacity`) ;
+  le total `RouteDescriptor.volatile_capacity` est une somme dérivée, jamais
+  choisie par le runtime.
+- **P7** — Invariant :
+  `SourceSpec::VolatileSlot ⇔ SegmentSelection::NotApplicable ⇔ SegmentFlags::VOLATILE`.
+  `marius_projection::segment_matches_source` en est le prédicat pur. *État
+  d'application :* la Forge émet la forme cohérente par construction (elle ne
+  consulte pas le prédicat) ; le runtime (`content_document.rs`) n'accepte que les
+  deux combinaisons attendues (statique + `RequestSlot`, volatile + `NotApplicable`)
+  et répond 500 pour toute autre, sans passer par le prédicat ; le prédicat est
+  exercé par les tests.
+- **P8** — `SourceSpec::VolatileSlot` porte une `ProducerKey` opaque ; le runtime ne
+  connaît que cette clé. Le dispatch vers l'implémentation du producteur vit
+  **hors** de `emission.rs`.
 
-Types et invariants purs, dans `marius-projection` uniquement :
+## 3. Types et responsabilités
 
-- `SegmentSelection::NotApplicable` (nouvelle variante).
-- `ProducerKey` (identité opaque, même convention que `SourceKey`).
-- `SourceSpec::VolatileSlot { capacity: u32, producer: ProducerKey }` (P8).
-- `segment_matches_source(&SegmentDescriptor, &SourceSpec) -> bool` : prédicat
-  de cohérence P7, couvrant à la fois `NotApplicable ⇔ VolatileSlot` et
-  `SegmentFlags::VOLATILE ⇔ VolatileSlot`.
+| Élément | Crate / module | Rôle |
+| --- | --- | --- |
+| `ProducerKey(u16)` | `marius-projection` | identité opaque d'un producteur ; catalogue distinct de `SourceKey` |
+| `SegmentSelection::NotApplicable` | `marius-projection` | sélection d'un segment volatile |
+| `SourceSpec::VolatileSlot { capacity: u32, producer: ProducerKey }` | `marius-projection` | source volatile : capacité AOT et producteur |
+| `segment_matches_source` | `marius-projection` | prédicat de cohérence P7 |
+| `VolatileStorage` | `marius-render::emission` | stockage possédé : `capacity` (borne AOT) et `effective_len()` (longueur produite) |
+| `VolatileCapacityExceeded` | `marius-render::emission` | erreur contrôlée de P2 |
+| `resolve_volatile_generation` / `resolve_volatile_range` | `marius-render::emission` | pendants volatils de `resolve_generation` / `resolve_range` |
+| `VolatileContext`, `materialize_volatile`, `produce_nav_profile`, `NAV_PROFILE_PRODUCER` | `marius-render::volatile_producers` | producteur `nav_profile` et sélection par `ProducerKey` |
+| `VolatileOwner`, `MmapOwner` | `marius-server::content_document` | adaptation vers `Bytes::from_owner` |
 
-**Explicitement non traité par V1a** (P4, P5 restent des propriétés à
-satisfaire par le code de V1c ; P1, P3 sont couverts depuis **V1b**, voir
-section suivante) :
+`resolve_volatile_generation` et `resolve_volatile_range` sont délibérément
+distincts de `resolve_generation` et `resolve_range` : un volatile est *produit*,
+jamais *récupéré* par sélection ; on ne détourne pas le mécanisme
+`StaticArtifact → lookup(selection)`.
 
-- `MaterializedSource::Volatile` reste, dans l'état actuel du dépôt fourni,
-  `{ arena_ptr: *const u8 }` — raw pointer, `!Send`, sans longueur. Sa mise en
-  conformité avec P1/P2/P3 est le travail de **V1b**.
-- `resolve_generation`/`resolve_range` continuent de renvoyer `None` pour
-  `Volatile` — inchangé par V1a.
-- Aucun producteur, réel ou expérimental, n'existe encore.
-- L'adaptateur `Bytes::from_owner`/le handler HTTP (P4/P5) sont V1c.
+## 4. Capacité, longueur effective, ownership
 
-## État couvert par V1b
+- `VolatileStorage::from_produced(payload, capacity)` prend possession du `Vec<u8>`
+  du producteur (`into_boxed_slice()`) et vérifie `effective_len <= capacity` **une
+  seule fois**, à la construction. Le buffer est dimensionné à ce qui a été produit,
+  jamais à la capacité.
+- `ResolvedRange` emprunte directement le buffer de `VolatileStorage` : aucune copie
+  entre le stockage et la plage résolue (vérifié par égalité de pointeur).
+- `VolatileStorage` ne dérive ni `PartialEq` ni `Debug`. Le `Debug` de
+  `MaterializedSource` est écrit à la main et n'expose que la variante, la
+  longueur effective et la capacité : aucune fuite de contenu par un trait de
+  diagnostic.
+- Le `Content-Length` d'une réponse est la somme des longueurs **effectives** des
+  frames ; jamais la capacité d'un segment volatile.
 
-Contrat mémoire/runtime, dans `marius-render::emission` (`marius-projection`
-inchangé depuis V1a) :
+Le modèle « arène par worker réutilisée avec reset à l'acquisition » n'est pas un
+invariant : il est incompatible avec `Bytes::from_owner`, Hyper écrivant le corps
+après le retour du handler.
 
-- `MaterializedSource::Volatile` porte désormais `storage: Arc<VolatileStorage>`
-  — plus de raw pointer (P1), handle possédé et partageable via `Arc::clone`
-  (P3). Toujours zéro dépendance `bytes`/`axum`/`hyper` dans `marius-render`
-  (vérifié : `Cargo.toml` du crate inchangé).
-- `VolatileStorage` — stockage possédé, `capacity` (borne AOT) distincte
-  d'`effective_len()` (= longueur réellement produite). `from_produced`
-  vérifie `effective_len <= capacity` une seule fois, à la construction ;
-  dépassement → `VolatileCapacityExceeded` (erreur contrôlée, P2 —
-  traduction en HTTP 500 toujours différée à l'adaptateur, V1c).
-- `resolve_volatile_generation` / `resolve_volatile_range` — pendants de
-  `resolve_generation`/`resolve_range` pour le chemin volatile, délibérément
-  **distincts** (pas un paramètre supplémentaire sur les fonctions
-  existantes) : un Volatile est *produit*, jamais *récupéré* par sélection
-  (contrainte V1b §5 — ne pas détourner le mécanisme `StaticArtifact →
-  lookup(selection)`). `resolve_generation`/`resolve_range` restent inchangés
-  pour `StaticArtifact`.
-- Producteur toujours **injecté** (closure `FnOnce(ProducerKey) -> Vec<u8>`)
-  — aucun catalogue réel, aucun SQL, aucune Forge (V3).
+## 5. Allocations et copies
 
-**Allocations et copies observées** (cf. commentaire de section
-`VolatileStorage` dans `emission.rs`) :
+Une allocation par requête n'est **pas** une violation du contrat Marius lorsqu'elle
+est nécessaire à la propriété sûre du chemin volatile. Coût d'un segment volatile :
 
-- Une allocation par production est acceptable et effectivement présente :
-  celle du `Vec<u8>` que le producteur construit lui-même (hors du contrôle
-  de ce module).
-- `VolatileStorage::from_produced` ne recopie jamais ce contenu dans un
-  second buffer dimensionné à `capacity` — il prend possession du `Vec<u8>`
-  produit (`into_boxed_slice()`). Réserve honnête : si le `Vec` du
-  producteur a une capacité excédentaire au moment de l'appel,
-  `into_boxed_slice()` peut réallouer en interne (`shrink_to_fit`) — détail
-  de la bibliothèque standard, pas une copie introduite par ce module ; un
-  producteur qui alloue exactement `payload.len()` (ex. `String::with_capacity`
-  puis aucun `push` supplémentaire) rend ce cas inexistant en pratique.
-- `resolve_volatile_range` ne copie jamais : `ResolvedRange` emprunte
-  directement le buffer de `VolatileStorage` — vérifié par égalité de
-  pointeur (test E, même méthode que l'invariant I5 du T2A démontré en
-  session précédente).
+- le `Vec<u8>` construit par le producteur (hors du contrôle de `emission.rs`), au
+  plus la capacité AOT ;
+- un `Arc<VolatileStorage>` ;
+- l'owner de `Bytes::from_owner` (bookkeeping de la crate `bytes`).
 
-**Toujours non traité** (P4, P5, V1c) : aucun adaptateur HTTP, aucun
-`Bytes::from_owner`, aucun point d'appel dans un handler asynchrone.
+Ce coût est borné par la capacité AOT, jamais par un payload arbitraire, et conforme
+à la SPEC T2A v2 §4 (le zéro-allocation n'est pas une propriété de la famille
+segmentée). Aucune copie du contenu n'est introduite après la production ;
+`into_boxed_slice()` peut, si le `Vec` du producteur a une capacité excédentaire,
+réallouer en interne (`shrink_to_fit`, détail de la bibliothèque standard) — un
+producteur qui alloue exactement la longueur produite l'évite. Pas de pool, pas
+d'optimisation prématurée.
 
-## État couvert par V1c (clôture de V1)
+## 6. Producteur `nav_profile` et contexte
 
-Frontière HTTP réelle, dans `crates/shell/server/src/experimental_volatile_t2a.rs`
-(nouveau module, **test-only** — voir réserve ci-dessous) + un ajout mécanique
-oublié en V1b dans la façade `crates/shell/render/src/lib.rs` :
+- Un seul producteur, sélectionné par un `match` sur la `ProducerKey` de la source
+  (`NAV_PROFILE_PRODUCER = ProducerKey(0)`) : pas de registre, pas de trait de
+  producteur. Un second producteur ajoute un bras au `match`.
+- `VolatileContext { username: Option<String> }` est **possédé**, sans lifetime. Il est
+  construit par l'adaptateur à partir de la requête, avant toute matérialisation.
+  `materialize_volatile` est synchrone ; le résultat est un `MaterializedSource` possédé.
+- Sortie : `<li class="nav-profile">{username échappé}</li>`. Contexte anonyme :
+  `<li class="nav-profile"></li>`.
+- Le nom d'utilisateur est une donnée externe : `& < > " '` sont échappés, et
+  l'échappement compte dans la capacité.
+- Erreurs contrôlées (`VolatileProductionError`) : source non volatile, producteur
+  inconnu, capacité dépassée. Jamais un `panic`.
+- Le producteur ne lit aucune base de données.
 
-- `VolatileOwner { storage: Arc<VolatileStorage> }` — pendant de `MmapOwner`
-  (`experimental_t2a.rs`, inchangé) pour le chemin volatile. `Bytes::from_owner`
-  conserve ce owner vivant jusqu'au drop de tous les `Bytes`/`Body` qui en
-  dérivent (P4) — garantie de la crate `bytes` elle-même, pas un mécanisme
-  ajouté par ce module.
-- Fixture K=3 réelle : `StaticArtifact(prefix) → VolatileSlot → StaticArtifact(suffix)`,
-  ordre d'émission = ordre de déclaration (volatile jamais déplacé en fin de
-  réponse).
-- Producteur toujours **injecté** (`std::sync::RwLock<Vec<u8>>` mutable par
-  les tests) — aucun catalogue réel, aucun SQL, aucune Forge (V3, inchangé).
-- Chemin de résolution entièrement synchrone (aucun `.await` dans
-  `resolve_volatile_route_to_response`) — P5 (ordre producteur → statiques,
-  aucun emprunt en vol à travers un point de suspension) est donc
-  **trivialement** satisfaite ici : rien ne suspend. La discipline
-  d'ordonnancement réelle (emprunt à travers une I/O `.await` véritable)
-  reste à démontrer en V3, quand le producteur deviendra une lecture SQL
-  asynchrone.
+**Contexte expérimental.** Dans l'adaptateur actuel, `username` provient du paramètre
+de requête `?user=…`. C'est un contexte de démonstration, **pas** l'architecture
+d'identité définitive : l'authentification et la session réelles sont hors périmètre.
+Ce que le contrat fixe, c'est la chaîne `requête → VolatileContext → producteur`, pas
+la provenance du nom.
 
-**Réserve explicite — non monté en production (`main()`)** : contrairement à
-`experimental_t2a::mount_experimental` (mergé dans `main()`, réutilisant un
-packfile déjà provisionné par `ROUTE_TABLE`), ce module est déclaré
-`#[cfg(test)]` de bout en bout. Le monter en production exigerait de
-provisionner/cold-start un nouvel artefact au démarrage — explicitement exclu
-du périmètre V1c (« production réelle »). La démonstration reste réelle (vrai
-`TcpListener`, vrai `reqwest::Client`, vrai `Bytes::from_owner`/`Body`/Hyper)
-mais uniquement au travers de `cargo test`. Décision prise et signalée dans
-cette note, pas arbitrée silencieusement — à confirmer ou infirmer par
-l'utilisateur avant V2.
+## 7. Déclaration côté Forge
 
-**Garanties réellement démontrées par les tests** (voir rapport de session
-pour le détail par test) :
-- round-trip HTTP K=3 mixte, octets exacts, `Content-Length` = somme des
-  longueurs réelles (jamais la capacité) ;
-- snapshot : une requête en vol garde sa propre matérialisation statique ET
-  volatile après une rotation `ArcSwap` et un changement de producteur
-  survenus pendant qu'elle est en vol ;
-- dépassement de capacité → 500 contrôlé, jamais de panic, jamais de
-  troncature ;
-- absence de copie entre `VolatileStorage::as_slice()` et ce que
-  `VolatileOwner` remet à `Bytes::from_owner` (égalité de pointeur — ne
-  couvre pas le pointeur interne du `Bytes` construit, non garanti par la
-  crate `bytes`) ;
-- non-régression : `experimental_t2a.rs`/`t2a_experimental_regression_suite`
-  non modifiés.
+Déclarée dans `crates/core/schema/publication.toml` (`[[volatile_region]]` :
+`component`, `marker`, `head_artifact`, `tail_artifact`, `capacity`), traitée par
+`build/publication.rs`.
 
-**Non démontré, explicitement reporté à V2/V3** : catalogue `ProducerKey →
-implémentation` réel, producteur asynchrone (SQL), Forge/`publication.toml`,
-route volatile en production, mesure d'allocations en couches séparées.
+- Au plus une région par composant ; `head_artifact` et `tail_artifact` sont déclarés
+  en `[[artifact]]`, distincts, et portent le même composant.
+- Une route dont l'artefact appartient à un composant couvert par une région est
+  générée en **K=3** dans `ROUTE_DESCRIPTORS` ; toute autre route reste en K=1.
+
+```text
+segment 0  StaticArtifact(content_core_head)  RequestSlot(0)   ← paramètre de route
+segment 1  VolatileSlot(ProducerKey(0))       NotApplicable    flags = VOLATILE
+segment 2  StaticArtifact(content_core_tail)  RequestSlot(0)   ← même paramètre
+```
+
+- `capacity` (valeur actuelle : 512 octets, provisoire) devient
+  `SourceSpec::VolatileSlot.capacity` et `RouteDescriptor.volatile_capacity` (P6) ;
+  la `ProducerKey` du slot est fixée par le générateur à `ProducerKey(0)`.
+- K=3 n'est pas une borne globale ni une constante architecturale : le nombre de
+  segments est une propriété de la représentation AOT réellement produite.
+- Le monolithique (`content_core`) est conservé : voie de non-régression et de
+  comparaison (`/__monolithic/content/{id}`), pas du code à éliminer.
+- `content_core_head` et `content_core_tail` sont des noms propres à ce cas, jamais
+  une convention obligatoire. Représentation segmentée ≠ « chaque page produit trois
+  artefacts ».
+
+Identités : `component_id ≠ ArtifactKey ≠ SourceKey(u16)`, auxquelles s'ajoute
+`ProducerKey(u16)` ; aucune n'est dérivée d'une autre.
+
+## 8. Adaptateur HTTP
+
+Dans `crates/shell/server/src/content_document.rs` (`marius-server` ; `marius-render`
+n'importe ni `axum`, ni `hyper`, ni `bytes`) :
+
+```text
+HTTP → ROUTE_DESCRIPTORS["content_document"]
+     → segments statiques : resolve_generation → resolve_range → MmapOwner → Bytes::from_owner
+     → segment volatile   : VolatileContext → materialize_volatile → VolatileOwner → Bytes::from_owner
+     → somme des longueurs effectives → Content-Length
+     → Body → Hyper
+```
+
+Toute incohérence répond par un statut contrôlé : 400 (paramètre invalide), 404 (id
+absent du pack statique), 500 (incohérence source/sélection, producteur inconnu,
+capacité dépassée). Aucun `unwrap` ni `expect` sur la production volatile.
+
+## 9. Garanties démontrées par les tests
+
+- Longueur effective distincte de la capacité ; dépassement de capacité → erreur
+  contrôlée sans troncature, y compris lorsque l'échappement HTML provoque le
+  dépassement ; capacité exacte acceptée, un octet de moins refusée.
+- Ownership : le stockage survit au `MaterializedSource` d'origine via un handle
+  cloné ; un instantané n'est pas affecté par une production ultérieure ni par le drop
+  du contexte.
+- Absence de copie : égalité de pointeur entre le buffer possédé et la plage résolue.
+  Ne couvre pas le pointeur interne du `Bytes` construit, que la crate `bytes` ne
+  garantit pas.
+- Route de bout en bout (`content_document`) : ordre tête → volatile → queue,
+  `Content-Length` exact, échappement HTML, 404 sur id absent, 500 sur dépassement
+  de capacité.
+- Instantané sous rotation : une requête en vol garde sa matérialisation statique et
+  volatile après une rotation `ArcSwap` et un changement de producteur (suite de
+  fixtures `experimental_volatile_t2a`, `#[cfg(test)]`).
+- Le slot généré par la Forge (`ROUTE_DESCRIPTORS`) est matérialisable par le
+  producteur `ProducerKey(0)`.
+
+**Portée honnête.** Ces tests établissent que le volatile est matérialisé **avant**
+l'envoi des en-têtes et **possédé** par la réponse jusqu'à son drop : une mutation
+ultérieure de la source ne change pas les octets de cette réponse. Ils ne prouvent
+ni l'entrelacement de requêtes concurrentes, ni le moment où Hyper, Tokio ou l'OS
+lisent les frames, ni un comportement de backpressure.
+
+## 10. Hors périmètre
+
+Authentification, session, cookies ; producteur lisant PostgreSQL ; plusieurs
+régions ou plusieurs producteurs génériques ; catalogue de producteurs ; stratégie
+de notification ou d'invalidation d'un volatile ; pool ou zéro-allocation ;
+politique de cache d'une réponse contenant un volatile (elle n'est pas cacheable
+comme un pack statique) ; combinaison d'une région volatile avec un champ
+`marius:large_content` ; `EmissionPlan`, `IoSlice[]`, `writev`/`sendmsg`,
+`MSG_ZEROCOPY` (transport : SPEC T2A v2) ; contrat navigateur.

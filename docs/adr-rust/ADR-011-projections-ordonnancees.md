@@ -130,7 +130,6 @@ Les pages sont désormais une conséquence de l'ordonnancement de domaines de do
 
 Cette évolution permet simultanément :
 
-- de supprimer les explosions combinatoires liées aux états réellement indépendants ;
 - de supprimer les explosions combinatoires liées aux états réellement indépendants, sans remettre en cause la doctrine de pré-composition du document minimal définie par ADR-008 ;
 - de préserver un chemin chaud déterministe ;
 - de maintenir une architecture sans calcul de rendu au runtime ;
@@ -144,7 +143,7 @@ Explicitement non traités ici — relèvent du DESIGN Runtime à venir :
 - Mécanisme de résolution d'origine d'un segment (`SourceId`/`SourceRuntime`) et sa durée de vie.
 - Transition de l'implémentation d'émission réseau actuelle vers une émission sans copie (`writev`/`sendmsg`/équivalent).
 - Devenir du trait `Projection` existant dans le code (fusion actuelle des niveaux 1 et 2, cf. §3).
-- Sources de segments non adressables par artefact statique (buffer PostgreSQL live, JSON généré, composants volatils) — angle mort assumé de la Phase 1, à rouvrir lors du premier cas réel.
+- Sources de segments non adressables par artefact statique : le premier cas réel est traité (segment volatile `nav_profile`, produit à la requête à partir d'un contexte de requête ; contrat dans `CONTRAT-volatile-v1.md`, état d'implémentation en §12). Restent hors périmètre : une source lisant un buffer PostgreSQL live, un JSON généré, d'autres composants volatils.
 - Mécanisme d'obtention du zéro-copie réseau (`MSG_ZEROCOPY` ou équivalent) — cf. §7, invariant distinct non couvert par cette ADR.
 - Formule fermée de calcul du budget de segments : aucune formule n'est normative. Le §8 reste la seule règle — la Forge calcule le budget exact depuis le graphe réel du template. Une formule peut apparaître dans le DESIGN à titre pédagogique, jamais ici.
 
@@ -152,3 +151,14 @@ Explicitement non traités ici — relèvent du DESIGN Runtime à venir :
 
 - **ADR-006** (sendfile, chemin de lecture) : statut historique pour le cas général. Reste la description exacte du chemin de lecture pour toute réponse composée uniquement de contenu ADR-008 (aucune projection volatile) — cas encore majoritaire. Pour toute réponse comportant une projection volatile, cette ADR (011) devient la référence du read path ; ADR-006 doit porter une mention de statut renvoyant ici (action de documentation distincte, hors du présent texte).
 - **ADR-008/ADR-009** : non remises en cause. Le Minimum Viable Document et l'adressage par PK restent la doctrine pour tout contenu non volatil.
+
+## 12. État d'implémentation (6 octobre 2026)
+
+Cette section constate ce que le code réalise ; elle ne modifie aucune décision de ce document.
+
+- **Niveaux 1 et 2 (Forge).** `publication.toml` déclare les artefacts, les routes et les régions volatiles (`[[artifact]]`, `[[route]]`, `[[volatile_region]]`). Le build en génère `ARTIFACTS` et `ROUTE_DESCRIPTORS`. La route `/content/{id}` est aplatie à la compilation en trois segments : artefact `content_core_head`, source volatile `nav_profile`, artefact `content_core_tail`. Un même composant (`content.core`) produit plusieurs artefacts à partir d'une seule ingestion.
+- **Niveau 3 (Segment).** Deux provenances existent : un packfile mmap (`MaterializedSource::Mmap`, `PackfileEntry` en étant l'indexation) et un stockage volatile possédé (`MaterializedSource::Volatile`). Le runtime ne manipule que des plages mémoire (`ResolvedRange`).
+- **Niveau 4 (Réponse HTTP).** `content_document.rs` ordonnance les segments dans l'ordre du descripteur et remet le résultat à Hyper (`Bytes::from_owner` → `Body`) ; le chemin monolithique reste monté à `/__monolithic/content/{id}` comme voie de comparaison.
+- **Contexte de requête.** Le contenu volatile dépend aujourd'hui d'un paramètre de requête expérimental (`?user=`), pas d'une authentification ou d'une session ; ce n'est pas une décision d'identité.
+- **Budget de segments (§8).** Le nombre de segments est une propriété de la représentation générée (K=3 pour cette route) ; aucune formule n'est normative (§11).
+- **Invariants de capacité (§7).** Ils ne sont pas satisfaits par l'implémentation actuelle, ni sur le chemin monolithique (lecture par `read_at`, `Vec<u8>` par requête), ni sur le chemin segmenté (collecte de frames, `Arc` et buffer du producteur volatile, bookkeeping de `Bytes`). `SPECIFICATION-transport-segmente-t2a.md` §4 délimite le zéro-allocation par famille d'émission ; ce document ne tranche pas l'écart entre ce §7 et cette portée, qui relève d'un audit séparé (SPEC T2A v2, §10).

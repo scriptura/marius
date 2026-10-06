@@ -1,6 +1,6 @@
 # Contrat d'augmentation d'une page Marius
 
-> **Statut : Proposed — post-ADR-011**
+> **Statut : Proposed — post-ADR-011** (mis à jour le 6 octobre 2026 pour refléter le pipeline segmenté stabilisé : §10, §12, §16, §23, §27 et §28)
 >
 > Ce document formalise le rapport entre une page AOT complète, sa contextualisation par la représentation demandée et l'augmentation éventuelle de cette page par des projections possédant un cycle de production ou de mutation indépendant.
 >
@@ -301,8 +301,8 @@ Le Runtime ne connaît pas sa provenance sémantique.
 Description AOT d'un segment :
 
 ```rust
-##[repr(C)]
-##[derive(Clone, Copy)]
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct SegmentDescriptor {
     pub source: SourceId,
     pub offset: u64,
@@ -318,6 +318,10 @@ Identité locale à une route permettant de résoudre un `SegmentDescriptor` ver
 #### SourceKey
 
 Identité globale d'un artefact/source nommé dans le registre.
+
+#### ProducerKey
+
+Identité opaque d'un producteur de contenu volatile, portée par `SourceSpec::VolatileSlot`. Catalogue distinct de `SourceKey` : elle désigne un producteur, pas un artefact.
 
 #### DOM Target
 
@@ -366,14 +370,12 @@ SourceSpec
       ↓
 MaterializedSource[]
       ↓
-EmissionPlan
+ResolvedRange[]          ← dernier niveau de représentation Marius
       ↓
-IoSlice[]
-      ↓
-backend d'émission
+frontière transport (Bytes → Body → Hyper)
 ```
 
-Le Runtime ne connaît pas la signification métier de la source.
+`EmissionPlan` n'est pas une étape d'exécution de ce chemin, et `IoSlice[]` est un détail interne du transport, jamais construit ni possédé par Marius (SPECIFICATION-transport-segmente-t2a.md v2, §2 et §9). Le Runtime ne connaît pas la signification métier de la source.
 
 Il ne sait pas si un segment contient :
 
@@ -469,20 +471,16 @@ Ce sont deux dimensions différentes.
 Le Runtime définit le chemin mémoire permettant de matérialiser une source volatile :
 
 ```text
-VolatileSlot
+SourceSpec::VolatileSlot { capacity, producer: ProducerKey }
       ↓
-RequestArena
+producteur (clé opaque)  →  stockage possédé
       ↓
-MaterializedSource::Volatile
+MaterializedSource::Volatile  →  ResolvedRange
 ```
 
-La capacité est bornée par la Forge.
+La capacité est bornée par la Forge. La production, l'ownership, la longueur effective et le traitement du dépassement de capacité sont définis par le contrat séparé `CONTRAT-volatile-v1.md` (propriétés P1–P8). Le premier producteur réel est `nav_profile` : un `<li>` produit côté serveur à partir d'un `VolatileContext` possédé.
 
-En revanche, **le mécanisme de production du contenu du `VolatileSlot` n'est pas défini par le présent contrat**.
-
-Cette question constitue un chantier séparé.
-
-Le contrat ne doit donc pas inventer de mécanisme de rendu runtime, de requête SQL ou de composition dynamique pour résoudre cette lacune.
+Ce contrat d'augmentation n'introduit toujours aucun mécanisme de rendu runtime, de requête SQL ou de composition dynamique : le producteur ne manipule que du contenu déjà borné par la Forge. La provenance du contexte (aujourd'hui un paramètre de requête expérimental, demain une session) est hors du périmètre de ce contrat.
 
 ## 17. Une génération du monde par requête
 
@@ -603,10 +601,9 @@ Ils ne doivent pas contaminer :
 * SegmentDescriptor ;
 * SourceId ;
 * SourceKey ;
-* MaterializedSource ;
-* EmissionPlan.
+* MaterializedSource.
 
-La question de la propagation effective des `IoSlice`, de `writev`/`sendmsg`, des short writes et des éventuels mécanismes de zero-copy réseau relève du chantier d'intégration HTTP.
+La propagation effective des octets vers le socket (écritures partielles, backpressure, écriture vectorisée) appartient à Hyper ; les éventuels mécanismes de zero-copy réseau restent hors du contrat Marius (SPECIFICATION-transport-segmente-t2a.md v2, §6).
 
 Le contrat d'augmentation reste indépendant de cette implémentation.
 
@@ -724,7 +721,7 @@ Le contrat impose les invariants suivants.
 
 14. **Une source volatile doit avoir une capacité bornée par la Forge.**
 
-15. **La production effective du contenu volatile doit être définie par un contrat séparé.**
+15. **La production effective du contenu volatile est définie par un contrat séparé** (`CONTRAT-volatile-v1.md`), jamais par ce contrat d'augmentation.
 
 16. **Une requête doit observer une génération cohérente des sources statiques.**
 
@@ -740,17 +737,17 @@ Le contrat impose les invariants suivants.
 
 Le présent contrat ne clôt pas les sujets suivants :
 
-#### 28.1 Production des `VolatileSlot`
+#### 28.1 Producteurs de `VolatileSlot`
 
-Le chemin mémoire est défini, mais pas encore le producteur concret du contenu.
+Le contrat de production est défini (`CONTRAT-volatile-v1.md`) et un premier producteur existe (`nav_profile`, alimenté par un contexte de requête expérimental). Restent à spécifier : la source réelle du contexte (authentification, session), un éventuel producteur lisant PostgreSQL, plusieurs producteurs ou plusieurs régions.
 
 #### 28.2 Contrat navigateur
 
 Le mécanisme permettant de cibler et mettre à jour une projection indépendante reste à choisir.
 
-#### 28.3 Intégration Hyper/Axum
+#### 28.3 Transport HTTP
 
-La propagation de `EmissionPlan` vers le chemin HTTP concret doit être cartographiée.
+La frontière `ResolvedRange → Bytes → Body → Hyper` est actée (SPECIFICATION-transport-segmente-t2a.md v2). Restent hors périmètre : HTTP/2 et toute optimisation du transport.
 
 #### 28.4 Destin de l'ancien `Projection`
 
@@ -825,3 +822,4 @@ sans réintroduire de moteur de composition dynamique.
 ---
 
 _Document rédigé le 3 septembre 2026_
+_Mis à jour le 6 octobre 2026 — §12 aligné sur la SPEC T2A v2 (suppression d'`EmissionPlan`/`IoSlice[]` du chemin), §16 réécrit (production volatile définie par `CONTRAT-volatile-v1.md`), §27.15 et §28 mis à jour, `ProducerKey` ajouté au §10._

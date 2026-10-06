@@ -11,8 +11,9 @@
 | --- | --- | --- |
 | **Partie 1** | Mode fragment : `{{ }}`, `{% if %}`, `{% include %}` | Implémenté — pipeline câblé dans `crates/core/schema/build/template/dynamic.rs` |
 | **Partie 2** | Mode page : `{% extends %}` (chaîne N-aire), `{% block %}`, `{% import %}`, `{% static %}`, `{% asset %}`, `{% script %}` | Implémenté — pipeline câblé dans `crates/core/schema/build/template/page.rs` et `static_page.rs` |
+| **Extension** | Région volatile : `MARIUS_VOLATILE_BEGIN` / `MARIUS_VOLATILE_END`, `render_head()`/`render_tail()` (§4.10) | Implémenté — `split_static_at_region` (`build/template/common.rs`), câblé dans `page.rs` et `dynamic.rs` |
 
-**Hors périmètre de ce document** : ce guide couvre la compilation `.marius` → `render()`/HTML statique. Il ne couvre pas ce qui se passe *après* — comment `render()` est invoqué, à quelle fréquence, ni ce qui invalide le HTML déjà servi, ni comment un artefact déjà produit est ensuite transporté au runtime (chemin AOT monolithique ou chemin T2A expérimental segmenté, statut PROVISOIRE). Un `.marius` correct est une condition nécessaire, jamais suffisante, pour qu'un changement atteigne le navigateur (voir `runtime-lifecycle-guide.md`, en particulier §11 pour le chemin T2A — qui ne fait jamais que transporter des `Segment`s déjà tranchés par ce que ce document décrit ci-dessous, en particulier §4.8ter).
+**Hors périmètre de ce document** : ce guide couvre la compilation `.marius` → `render()`/HTML statique. Il ne couvre pas ce qui se passe *après* — comment `render()` est invoqué, à quelle fréquence, ni ce qui invalide le HTML déjà servi, ni comment un artefact déjà produit est ensuite transporté au runtime (émission AOT monolithique, ou émission AOT segmentée T2A). Un `.marius` correct est une condition nécessaire, jamais suffisante, pour qu'un changement atteigne le navigateur (voir `runtime-lifecycle-guide.md`, en particulier §11 pour le chemin T2A — qui ne fait jamais que transporter des `Segment`s déjà tranchés par ce que ce document décrit ci-dessous, en particulier §4.8ter et §4.10).
 
 ---
 
@@ -241,6 +242,7 @@ Pour chaque table, le fichier généré contient :
 - `{Name}VarlenOwned` : `Option<String>` par champ varlena, `Send + 'static`.
 - `impl Projection` : `fetch_batch()`, `render()`.
 - Constantes : `{NAME}_STATIC_CAP`, `{NAME}_DYNAMIC_CAP`, `{NAME}_TOTAL_CAP`.
+- Pour un composant couvert par une région volatile (§4.10) : `render_head()` et `render_tail()` (fonctions inhérentes, hors trait) et les constantes `{NAME}_HEAD_TOTAL_CAP` / `{NAME}_TAIL_TOTAL_CAP`.
 
 `{NAME}_TOTAL_CAP` est l'unique borne utilisée dans le hot path : `buf.reserve({NAME}_TOTAL_CAP)` est la première instruction de `render()`.
 
@@ -253,6 +255,8 @@ assert_eq!(buf.capacity(), CONTENT_CORE_TOTAL_CAP); // doit tenir, toujours
 ```
 
 C'est le contrat que `fragment-forge` vous garantit en échange des restrictions du §2.3 : si ce test échoue, ce n'est jamais une marge insuffisante à corriger à la main — c'est `max_display_width()` ou `max_escaped_len()` qui sous-estime un type. La capacité n'a délibérément aucune marge arbitraire : toute marge masquerait une sous-estimation réelle.
+
+**Note sur Clippy.** Le corps généré pour un champ varlena conditionné par un bit de présence prend la forme `if record.X != 0 { if let Some(s) = … { … } }`. Cette forme imbriquée est conservée volontairement : la réécrire en `&& let` exigerait une reconnaissance syntaxique supplémentaire du flux `FlatPageToken` (bloc conditionnel à instruction unique, sans `else`) pour un gain purement stylistique, et plusieurs tests figent la forme textuelle `if record.X != 0 {`. Le lint `clippy::collapsible_if` est donc toléré sur le code généré, par un `#[allow(clippy::collapsible_if)]` posé fonction par fonction (`render`, `render_chunks`, `render_head`, `render_tail`) dans `db-forge/src/codegen/projection.rs` — jamais globalement, jamais dans `marius-schema/src/lib.rs`.
 
 ---
 
@@ -451,7 +455,7 @@ Le scanner ne connaît pas la syntaxe `<!-- -->` — il cherche `{{`/`{%`/`{#` n
 10. Résolution de schéma (resolve_and_measure) : entité/champs, type entier
     des conditions == N / != N, mesure de capacité
 → Vec<FlatPageToken> : Static | Field | IfBool | IfEq | IfNeq | Else | EndIf |
-  StaticInclude | AssetRef | ScriptStart | ScriptEnd
+  StaticInclude | AssetRef | ScriptStart | ScriptEnd | ModulesPlaceholder
   (ScriptStart/ScriptEnd retirés du flux par hoist_and_dedupe_scripts avant l'étape 9 ci-dessus ;
   IfBool/IfEq/IfNeq/Else/EndIf retirés du flux par l'étape 9 elle-même, pour une unité sans Record)
 ```
@@ -559,6 +563,71 @@ Un même Root (`base.marius`), et les fragments qu'il importe (`navigation.mariu
 - Zéro allocation intermédiaire : `buf.reserve(PAGE_TOTAL_CAP)` reste la première instruction.
 - L'entité unique par spécification : une page composée référence toujours une seule entité porteuse de données dynamiques ; les données d'entités secondaires doivent être pré-agrégées côté PostgreSQL — jamais un second `fetch_batch` au moment du rendu.
 
+### 4.10 Région volatile — `MARIUS_VOLATILE_BEGIN` / `MARIUS_VOLATILE_END`
+
+Une région volatile est un emplacement du template dont le contenu n'est **pas** compilé : il est produit à la requête par le runtime (voir `runtime-lifecycle-guide.md` §11.8). La Forge n'en compile que ce qui l'entoure : elle retire la région du flux et produit **deux moitiés AOT**, avant et après.
+
+**Marqueurs.** Même principe que `<!-- MARIUS_SCRIPTS -->` et `<!-- MARIUS_MODULES -->` (§4.5ter) : des sous-chaînes littérales cherchées dans le contenu des tokens `Static`, sans nouveau token, sans nouvelle syntaxe, sans délimiteur `{{`/`{%`/`{#` :
+
+```html
+<!-- MARIUS_VOLATILE_BEGIN nav_profile -->
+<!-- MARIUS_VOLATILE_END -->
+```
+
+L'identifiant (`nav_profile`) est porté par le marqueur de début ; il doit être celui que `publication.toml` déclare dans `[[volatile_region]]` pour le composant (`marker`). Sans déclaration, les deux lignes ne sont que des commentaires HTML : elles restent dans la sortie telle quelle, la région n'est pas traitée.
+
+**Contrainte sur le contenu entre marqueurs.** Il ne peut contenir que du HTML statique inconditionnel : aucun `{{ }}`, `{% if %}`, `{% asset %}`, `{% script %}` ni autre token non `Static` entre les deux marqueurs. En pratique, la région reste vide dans le template : son contenu est produit au runtime, jamais par `.marius`. Les marqueurs peuvent être répartis sur plusieurs tokens `Static` consécutifs (un commentaire `{# … #}` scinde déjà un run HTML en deux `Static`) ; la recherche les traverse.
+
+**Pipeline.** Dans `resolve_page_template` (Mode Page) comme dans `resolve_template` (Mode Fragment) :
+
+```
+… → hoist_and_dedupe_scripts → split MARIUS_SCRIPTS + splice
+  → split MARIUS_MODULES (ModulesPlaceholder)
+  → resolve_and_measure(flux complet) → generate_aot_snippet   → render()      (monolithique)
+  → split_static_at_region(clone du flux, BEGIN, END)           → (head, tail)
+  → resolve_and_measure(head) / resolve_and_measure(tail)       → capacités propres à chaque moitié
+  → generate_aot_snippet(head) / generate_aot_snippet(tail)     → render_head() / render_tail()
+```
+
+La scission intervient **après** le hissage des scripts et les deux découpes de marqueurs : ces passes sont exécutées une seule fois, sur le flux complet. Le rendu monolithique est mesuré et généré avant la scission et reste identique à ce qu'il serait sans région. `FlatPageToken` est `Copy` : le clone ne recopie aucun contenu source.
+
+**Sortie.** Pour un composant couvert par une région volatile, le fichier généré contient, en plus de `render()` :
+
+- `render_head(record, varlena, buf)` et `render_tail(record, varlena, buf)` : des **fonctions inhérentes** de `{Name}Projection`, hors du trait `Projection`. Elles partagent `{Name}StorageRow` et `{Name}VarlenOwned` avec `render()` : aucune seconde ingestion, aucune projection `head`/`tail` distincte.
+- Les constantes `{NAME}_HEAD_TOTAL_CAP` et `{NAME}_TAIL_TOTAL_CAP`.
+
+`render_head` suivi de la région puis de `render_tail` redonne la page complète sans les marqueurs ni la région. Les deux moitiés sont toujours générées par `generate_aot_snippet`, jamais par `generate_segmented_snippet` : combiner une région volatile et un champ `marius:large_content` (§4.8bis) sur le même composant n'est pas couvert.
+
+**Erreurs de build.** Toute région mal formée est un `cargo:error` nommé (jamais une troncature silencieuse) :
+
+| Variante (`SplitRegionError`) | Déclencheur |
+| --- | --- |
+| `BeginMarkerNotFound` | marqueur de début absent des `Static` du flux |
+| `EndMarkerNotFound` | marqueur de fin absent après le début |
+| `DuplicateBeginMarker` | marqueur de début présent plusieurs fois |
+| `DuplicateEndMarker` | marqueur de fin présent plusieurs fois après le début |
+| `NonStaticTokenInRegion` | un token non `Static` (condition, champ, asset, script…) entre les deux marqueurs |
+
+**Capacité du contenu volatile.** Elle n'est pas calculée par `.marius` : elle est déclarée (`capacity`, en octets) dans `[[volatile_region]]` de `publication.toml` et devient la capacité du `VolatileSlot` côté runtime.
+
+#### JavaScript : `MARIUS_SCRIPTS` ≠ `MARIUS_MODULES`
+
+Le système JavaScript reste AOT, et la région volatile n'y change rien : le runtime ne décide jamais quelles capacités JS charger.
+
+| Marqueur | Rôle | Mécanisme |
+| --- | --- | --- |
+| `<!-- MARIUS_SCRIPTS -->` | point d'injection des blocs `{% script %}` hissés et dédupliqués | `hoist_and_dedupe_scripts` + `splice_hoisted_scripts` (§4.5bis) |
+| `<!-- MARIUS_MODULES -->` | point d'injection des modules/capacités JS du template | `ModulesPlaceholder` + `modules_lowering.snippet` : lowering AOT par template, croisant les faits statiques du flux avec `record.js_deps` |
+
+Ce sont deux mécanismes distincts, qui ne se remplacent pas. Interaction avec la scission :
+
+- `MARIUS_MODULES` vit dans le `<head>` du Root (`base.marius`) : le `ModulesPlaceholder` se retrouve dans la moitié **head**, jamais dans la moitié tail.
+- `modules_lowering.snippet`, calculé une seule fois pour le flux complet, est donc passé à `generate_aot_snippet` pour **`render_head` uniquement**. `render_tail` n'en reçoit aucun : un second bloc `js_deps`/imports serait un doublon, pas une dépendance supplémentaire.
+- Les scripts hissés sont résolus avant la scission : ils ne peuvent pas être dupliqués par elle.
+- Le contenu `nav_profile` est du HTML produit côté serveur : il n'a besoin d'aucun JavaScript pour être fonctionnel.
+
+Un test de `page.rs` fige le comportement (`head_receives_the_modules_snippet_tail_does_not_duplicate_it`).
+
 ---
 
 ## 5. Référence rapide
@@ -581,6 +650,9 @@ Mode page :
   {% static chemin %}             ← contenu opaque, jamais reparsé, dédupliqué
   {% asset clé %}                 ← résolu contre manifest.toml (marius-assets)
   {% script %} … {% endscript %}  ← hissé + déduplié, réinjecté sur <!-- MARIUS_SCRIPTS -->
+  <!-- MARIUS_MODULES -->             ← point d'injection du lowering des modules/capacités JS (≠ MARIUS_SCRIPTS)
+  <!-- MARIUS_VOLATILE_BEGIN id --> … <!-- MARIUS_VOLATILE_END -->
+                                    ← région produite au runtime ; render_head()/render_tail() (§4.10)
 
 Interdit, dans les deux modes :
   {% for … %}
@@ -599,3 +671,4 @@ Toute violation est une erreur de compilation (`cargo build` échoue), jamais un
 
 _Document mis à jour le 18 septembre 2026 — extension `{% else %}`/`== N`/`!= N`, mécanisme `eliminate_recordless_conditions` (§4.8ter)._
 _Mis à jour le 19 septembre 2026 — renvoi croisé ajouté (§0/§1) vers `runtime-lifecycle-guide.md` §11 (chemin T2A expérimental, statut PROVISOIRE) ; aucun contenu de compilation modifié, ce guide reste exact et complet tel quel pour tout ce qui concerne `.marius`/`render()`._
+_Mis à jour le 6 octobre 2026 — ajout §4.10 (région volatile, `split_static_at_region`, `render_head`/`render_tail`, répartition de `MARIUS_MODULES` entre head et tail, `MARIUS_SCRIPTS` ≠ `MARIUS_MODULES` conservés) ; §0, §3.3, §3.4 (tolérance `collapsible_if` sur le code généré), §4.6 et §5 complétés. Aucune syntaxe `.marius` nouvelle._

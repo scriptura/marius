@@ -20,6 +20,12 @@
 > §1, §3, §4, §4bis, §5bis, §6, §7, §8, §9, §10, §11) ont été corrigées en
 > conséquence. Le format du pack HTML et la fusion incrémentale (`merge_sweep`)
 > sont inchangés.
+>
+> **Mis à jour le 6 octobre 2026 — chemin T2A segmenté.** Le §11 décrit désormais
+> l'état stabilisé du pipeline T2A (route `/content/{id}` en K=3, segment volatile
+> `nav_profile`, régénération à trois artefacts) et non plus un prototype I1→I6.
+> Les §6, §7 et §10 portent les compléments correspondants ; les autres sections
+> décrivent le chemin monolithique et sont inchangées.
 
 
 ## Schéma global — deux pipelines de nature différente et leur jonction runtime
@@ -680,10 +686,12 @@ dumper::dump_table()  ──▶  {schema}_{table}_store.bin
 P::cold_start_store()        (monte le StoreRegistry local au process)
     │
     ▼
-ensure_provisioned(clé) + LiveRegistry::cold_start(topologie locale)
+ensure_provisioned(clé) pour chaque artefact + LiveRegistry::cold_start_with_extra_keys
     │
     ▼
-regenerate_and_swap()        (lit le store via fetch_batch, écrit {key}.bin)
+regenerate_and_swap_with_volatile_split()
+                             (une ingestion fetch_batch ; écrit {content_core}.bin,
+                              {content_core_head}.bin et {content_core_tail}.bin)
 ```
 
 Le `cold_start_store()` est **obligatoire** entre les deux : sans lui,
@@ -698,8 +706,16 @@ environnement, le store et le pack sont donc produits **dans cet ordre**, par le
 même binaire ; ils restent deux fichiers distincts (§1).
 
 La topologie locale de `marius-dump` est dérivée de la déclaration de publication
-(§11.8), sans réutiliser la `ROUTE_TABLE` de `marius-server` (couplage inverse
-`render → server` proscrit).
+(§11.9) : `DUMP_ROUTE_TABLE` provient de `route_entry_from_spec`, et les clés
+`content_core_head`/`content_core_tail` (aucune route) s'y ajoutent comme clés
+supplémentaires. Elle ne réutilise pas la `ROUTE_TABLE` de `marius-server`
+(couplage inverse `render → server` proscrit).
+
+`marius-dump` est aussi le seul mécanisme de **première population** : le
+`Dispatcher` ne régénère que les ids signalés par le `Collector` après son propre
+démarrage, jamais un rattrapage des lignes déjà présentes. Depuis l'introduction
+de la région volatile, il peuple les artefacts `head` et `tail` en plus de
+l'artefact monolithique (§11.10).
 
 
 ## 7. Provisioning initial — pack HTML et store
@@ -756,6 +772,10 @@ La topologie du `LiveRegistry` est **figée à sa construction** :
 
 * `cold_start(&'static [RouteEntry])` ouvre le pack de chaque `packfile_key` (une
   seule fois par clé) et échoue si un pack est absent ;
+* `cold_start_with_extra_keys(&'static [RouteEntry], &[&'static str])` ouvre en
+  plus des clés qu'aucune route ne porte — les artefacts `content_core_head` et
+  `content_core_tail`, que la régénération doit pouvoir `store()` ; `main.rs` y
+  ajoute aussi `content_core`, retiré de `ROUTE_TABLE` mais toujours régénéré ;
 * `with_indices(HashMap<…>)` construit un registre depuis une table de clés, sans
   passer par des `RouteEntry` ;
 * `load(clé)` renvoie `None` pour une clé inconnue ; `store(clé, …)` **panique**
@@ -1036,174 +1056,96 @@ marius-dump / dumper::dump_table
 store.bin
     │
     ▼
-regenerate_and_swap
+regenerate_and_swap            (composant sans région volatile)
     │
     ▼
 {key}.bin
 ```
 
+Pour un composant couvert par une région volatile (`content.core`), l'Étage 2
+devient `regenerate_and_swap_with_volatile_split` : une seule ingestion, trois
+packs (§11.10).
 
-## 11. Chemin T2A expérimental (I1→I6) — segment ordonnancé, statut PROVISOIRE
 
-> **Ce qui suit situe un prototype expérimental
-> (`crates/shell/server/src/experimental_t2a.rs`) par rapport au reste de ce
-> guide — ce n'est pas une spécification.** Pour la décision architecturale
-> normative, voir `ADR-011-projections-ordonnancees.md` et
-> `SPECIFICATION-transport-segmente-t2a.md` (v2). Pour l'état
-> d'implémentation détaillé et les écarts restants, voir
-> `handoff-t2a-experimental-integration-i1-i6.md`.
+## 11. Chemin T2A — émission AOT segmentée
 
-### 11.1 Une frontière distincte, pas un remplacement
+> Ce chapitre situe la seconde famille d'émission par rapport au reste du guide.
+> Il ne se substitue pas aux textes normatifs : ADR-011
+> (`ADR-011-projections-ordonnancees.md`), la frontière de transport
+> (`SPECIFICATION-transport-segmente-t2a.md`, v2), le contrat Volatile
+> (`docs/contrats/CONTRAT-volatile-v1.md`) et le contrat d'augmentation
+> (`docs/contrats/CONTRAT-marius-one-page-extension.md`).
 
-Le chemin décrit par les sections 1 à 10 de ce guide (Forge → `render()` →
-`regenerate_and_swap` → `LiveRegistry` → HTTP → `pread()`) reste
-intégralement la doctrine **AOT monolithique** — une page = une source mmap
-contiguë, servie par `read_at`/`spawn_blocking` (`handlers.rs::deliver`).
-Ce chemin n'a pas été modifié par le prototype T2A. Il reste légitime
-lorsqu'**une représentation unique suffit** et qu'aucun cycle indépendant ne
-doit être isolé dans la réponse ; il n'est pas pour autant la cible de toute
-route (une réponse qui doit réunir des projections à cycles indépendants relève
-de la représentation segmentée).
+### 11.1 Deux familles d'émission, une règle de choix
 
-Le prototype ajoute, à titre expérimental, une **seconde famille
-d'émission**, pour des réponses composées de plusieurs segments
-(éventuellement multi-sources) : `SourceKey`/`SourceId`/`SourceSpec`/
-`SegmentDescriptor`/`RouteDescriptor` (`crates/core/projection/src/lib.rs`),
-et `MaterializedSource`/`ResolvedRange`/`resolve_generation`/`resolve_range`
-(`crates/shell/render/src/emission.rs`, non modifié par le prototype). Ces
-deux chemins coexistent ; le second n'est aujourd'hui exposé que par des routes
-**expérimentales non publiques** — voir §11.7 et §11.8.
+Le chemin décrit par les sections 1 à 10 (Forge → `render()` →
+`regenerate_and_swap` → `LiveRegistry` → HTTP → `pread()`) est l'émission **AOT
+monolithique** : une page = une source mmap contiguë, servie par
+`read_at`/`spawn_blocking` (`handlers.rs::deliver`). Il n'a pas été modifié par
+le chemin segmenté.
+
+Le chemin **AOT segmenté (T2A)** compose une réponse de plusieurs segments,
+éventuellement issus de plusieurs sources (`SegmentDescriptor[]`, nombre de
+segments fixé AOT par route). Les deux coexistent :
+
+```text
+Représentation monolithique
+    = légitime lorsqu'une représentation unique suffit
+      et qu'aucun cycle indépendant ne doit être isolé.
+
+Représentation segmentée
+    = produite lorsqu'il existe des projections / cycles
+      indépendants qui doivent être réunis dans la réponse
+      sans explosion combinatoire.
+```
+
+Ce n'est pas la règle « chaque page → trois artefacts ». Aujourd'hui une seule
+route est segmentée.
+
+| Route | Famille | Source |
+| --- | --- | --- |
+| `/content/{id}` | segmentée, K=3 | `content_document.rs` (`marius-server`), `ROUTE_DESCRIPTORS` généré |
+| `/__monolithic/content/{id}` | monolithique | artefact `content_core`, `handlers::serve_route` ; voie de comparaison et de non-régression |
+| `/` | monolithique | `ROUTE_TABLE` (artefact `pages_homepage`) |
+| `/__experimental/t2a…` | segmentée, fixtures | `experimental_t2a.rs`, PROVISOIRE (§11.11) |
+
+`ROUTE_TABLE` ne contient plus que la route `/` : `/content/{id}` en a été
+retirée (un même motif ne se monte pas deux fois dans un `Router` Axum), et le
+chemin monolithique du contenu est monté séparément à `/__monolithic/content/{id}`
+(`MONOLITHIC_CONTENT_ROUTE`, même handler `serve_route`, aucune seconde
+implémentation de lecture). L'artefact `content_core` reste provisionné, ouvert
+dans le registre et régénéré par le `Dispatcher`.
 
 ### 11.2 Contextualisation de route : résolue en amont, jamais au runtime
 
-Le garde-fou déjà documenté en §1bis (`if`/`else`, `==`/`!=`,
-`eliminate_recordless_conditions` — voir `fragment-forge-guide.md` §2.3bis
-et §4.8ter pour le détail) s'applique ici directement : la
-contextualisation d'une page (menu courant, fil d'Ariane, toute condition
-`record.*`) est intégralement résolue à la compilation, avant même que
-`RouteDescriptor`/`SegmentDescriptor` n'existent. Le runtime T2A ne
-manipule que des `Segment`s déjà tranchés (ADR-011 §3 : « le runtime ne
-connaît que le niveau 3 et 4 »). Il n'interprète jamais `.marius`, ni
-`route.*`, ni `record.*`, ni les nœuds `IfEq`/`IfNeq`/`Else` de l'AST —
-ces derniers n'existent plus une fois `render()` compilé.
+Le garde-fou documenté en §1bis (`if`/`else`, `==`/`!=`,
+`eliminate_recordless_conditions` — voir `fragment-forge-guide.md` §2.3bis et
+§4.8ter) s'applique directement : la contextualisation d'une page (menu courant,
+fil d'Ariane, toute condition `record.*`) est intégralement résolue à la
+compilation. Le runtime T2A ne manipule que des segments déjà tranchés
+(ADR-011 §3 : il ne connaît que les niveaux Segment et Réponse). Il n'interprète
+jamais `.marius`, ni `record.*`, ni les nœuds `IfEq`/`IfNeq`/`Else`.
 
-### 11.3 `MaterializedSource`, `ResolvedRange` et conservation de génération
+### 11.3 Sources, matérialisation et résolution
 
-`resolve_generation` transforme un `SourceSpec` en `MaterializedSource`
-(seule variante résolue aujourd'hui : `MaterializedSource::Mmap { handle:
-Arc<PackHtmlIndex> }` ; la variante `Volatile` existe mais n'est pas exploitable :
-son contrat est en cours de définition),
-par injection d'une fonction `fetch` — jamais par appel direct à
-`LiveRegistry` depuis `emission.rs`, qui reste ainsi agnostique du
-transport et du mécanisme de résolution (voir §11.5).
+Deux sortes de sources (`SourceSpec`, `marius-projection`) :
 
-`resolve_range` produit un `ResolvedRange<'a>` — une tranche empruntée
-(`&'a [u8]`), liée à la durée de vie du `MaterializedSource` qui l'a
-produite. Elle n'expose que `ptr()`/`len()`, jamais l'offset d'origine.
+| `SourceSpec` | Sélection du segment | Matérialisation (`marius-render::emission`) |
+| --- | --- | --- |
+| `StaticArtifact { key: SourceKey }` | `RequestSlot(n)` : valeur du paramètre de requête | `resolve_generation` → `MaterializedSource::Mmap { handle: Arc<PackHtmlIndex> }` ; `resolve_range` → `ResolvedRange` |
+| `VolatileSlot { capacity, producer: ProducerKey }` | `NotApplicable` (jamais `Constant(0)` ni `RequestSlot(0)`) | production hors `emission.rs` ; `resolve_volatile_generation` → `MaterializedSource::Volatile { storage: Arc<VolatileStorage> }` ; `resolve_volatile_range` → `ResolvedRange` |
 
-La cohérence de génération reste une propriété du `SourceKey`, jamais du
-`SourceId` : plusieurs segments peuvent référencer le même `SourceKey` sans
-provoquer plusieurs résolutions — c'est le rôle de
-`SourceResolutionContext<N>`, qui résout chaque `SourceKey` distinct une
-seule fois par requête.
+Les deux chemins de résolution sont distincts par construction : un segment
+statique est *sélectionné* dans un artefact, un segment volatile est *produit*.
+`resolve_generation` reçoit sa source de vérité par injection d'une fonction
+`fetch` — jamais d'appel direct à `LiveRegistry` depuis `emission.rs`, qui reste
+agnostique du transport.
 
-### 11.4 Rotation `ArcSwap` — la génération vit tant qu'une requête la détient
-
-`LiveRegistry::store()` (§5 de ce guide) ne mute jamais l'instance déjà
-chargée : il republie uniquement le pointeur que verront les *prochaines*
-résolutions (`load()`). Un `Arc<PackHtmlIndex>` déjà cloné par une requête
-en cours reste valide indépendamment de toute rotation survenue après ce
-clonage — propriété standard du comptage de références, pas un mécanisme
-propre à T2A, mais dont le prototype dépend directement pour garantir
-qu'une requête T2A en vol ne peut jamais observer une génération
-partiellement remplacée. Démontré expérimentalement (I4) par un scénario
-où une requête déjà en vol continue de produire l'ancienne génération
-après une rotation, tandis qu'une requête ultérieure observe la nouvelle —
-voir le handoff pour le détail exact du test.
-
-### 11.5 La frontière expérimentale : `marius-render` s'arrête à `ResolvedRange`
-
-`marius-render` (et donc `emission.rs`) ne dépend d'aucun de `axum`/
-`hyper`/`bytes` — vérifié sur son `Cargo.toml`, pas seulement énoncé comme
-discipline. La construction `Bytes`/`Body` n'existe donc pas dans
-`marius-render` : elle est entièrement portée par le module expérimental
-`experimental_t2a.rs`, dans `marius-server`, qui adapte chaque
-`ResolvedRange` en un petit type local (`MmapOwner` : un `Arc` cloné +
-offset/len, jamais une nouvelle primitive Marius) consommé par
-`Bytes::from_owner`, puis assemblé en `Body` avant d'être remis à Hyper.
-
-```text
-ResolvedRange[]                     (dernier IR Marius — emission.rs, marius-render)
-    │
-    ▼  (marius-server uniquement, à partir d'ici)
-MmapOwner (Arc cloné + offset/len)
-    │
-    ▼
-Bytes::from_owner
-    │
-    ▼
-Body (Hyper, boucle Phase 5 — inchangée)
-    │
-    ▼
-HTTP
-```
-
-### 11.6 Ce que Marius garantit, ce qui reste hors de son contrat
-
-**Démontré, à la frontière `marius-render`/`marius-server` :** aucune
-copie du payload mmap n'est introduite par Marius ou par l'adaptateur T2A
-entre `ResolvedRange` et `Bytes` — vérifié par égalité de *pointeur*
-(`owner.as_ref().as_ptr() == range.ptr()`), pas seulement de contenu.
-
-**Hors du contrat Marius, jamais mesuré ici :** les éventuelles copies
-internes que Hyper, Tokio ou le noyau pourraient effectuer en aval (mise
-en file, buffers d'écriture, vectorisation) ; le comportement interne
-exact de `Bytes::from_owner` (allocation de bookkeeping propre à la crate
-`bytes`) ; toute allocation propre à Hyper. Ces couches ne sont ni bornées
-ni auditées par ce prototype — voir SPEC v2 §4/§6.
-
-### 11.7 Statut
-
-`experimental_t2a.rs` reste un module **PROVISOIRE** : ses routes sont montées
-sous le préfixe non public `/__experimental/t2a`, hors `ROUTE_TABLE`. Deux
-familles y coexistent :
-
-* les **fixtures historiques K=1/K=3** (statiques, écrites à la main) — elles ne
-  sont pas une sortie de la Forge et ne démontrent aucune segmentation de
-  production ;
-* **une route par entrée de la déclaration de publication** (§11.8), dont le
-  `RouteDescriptor` K=1 est généré par le build, résolue par le catalogue réel
-  `SourceKey → artefact` (plus aucun mapping écrit en dur).
-
-Cette dernière route prouve la chaîne de production Forge → T2A sur
-`/content/{id}` (mêmes octets que le chemin monolithique, mêmes statuts 404/400) ;
-elle **ne démontre pas** une segmentation : K=1 n'a qu'un segment. Voir le handoff
-pour les écarts restants.
-
-### 11.8 Déclaration de publication — `publication.toml`
-
-Depuis l'intégration Forge → T2A K=1, la relation *route → artefact → paramètre*
-n'est plus écrite à la main dans chaque crate. Elle est déclarée **une seule
-fois** dans `crates/core/schema/publication.toml`, lu par le build de
-`core/schema` (`build/publication.rs`) :
-
-* `[[artifact]]` : `key` (l'`ArtifactKey`, ex. `content_core`) et `component`
-  optionnel (`content.core`) ;
-* `[[route]]` : `name`, `pattern` (`/content/{id}`), `artifact`, `parameter`
-  (`id`), `selection = "primary_key"`.
-
-Le build valide le manifeste (structure, existence du composant, PK simple) et
-génère dans `generated_schema.rs` : `ARTIFACTS`, `<KEY>_ARTIFACT`,
-`<KEY>_SOURCE_KEY`, `<NAME>_ROUTE` (un `RouteSpec` neutre), `ROUTES` et
-`ROUTE_DESCRIPTORS`. Les représentations propres à chaque crate en sont
-**dérivées** :
-
-```text
-RouteSpec (marius-projection, neutre)
-  ├─ RouteEntry      (marius-render — `route_entry_from_spec`, const)
-  │     → ROUTE_TABLE, DUMP_ROUTE_TABLE, topologie du LiveRegistry
-  └─ RouteDescriptor (généré par le build — représentation T2A, K=1)
-```
+`ResolvedRange<'a>` est une tranche empruntée, liée à la durée de vie du
+`MaterializedSource` qui l'a produite ; elle n'expose que `ptr()` et `len()`.
+La cohérence de génération est une propriété du `SourceKey`, jamais du `SourceId` :
+`SourceResolutionContext<N>` résout chaque `SourceKey` distinct une seule fois
+par requête (`N = 2` dans `content_document.rs`).
 
 Trois identités à ne pas confondre :
 
@@ -1213,18 +1155,243 @@ component_id  ≠  ArtifactKey  ≠  SourceKey(u16)
 
 * `component_id` : identité logique du composant Forge (`content.core`) ;
 * `ArtifactKey` : identité de l'artefact publiable ; son `as_str()` **est** le
-  `packfile_key` du runtime (nom du pack : `{racine}/{clé}.bin`, §8) ;
+  `packfile_key` du runtime (`{racine}/{clé}.bin`, §8) ;
 * `SourceKey(n)` : position de l'artefact dans `ARTIFACTS`, handle de catalogue
-  **non persistant** (peut changer entre deux builds).
+  **non persistant** (peut changer entre deux builds) ; la résolution
+  `SourceKey → packfile_key` passe par `artifact_for_source(ARTIFACTS, key)`.
 
-Un artefact peut exister sans composant, et un composant peut produire plusieurs
-artefacts : la déclaration ne suppose ni l'un ni l'autre. Le paramètre HTTP (`id`)
-et la colonne SQL de la clé primaire (`document_id`) sont deux identités
-distinctes, jamais renommées pour coïncider ; la politique de parsing du
-paramètre et le code 400 restent côté serveur.
+Un composant peut produire plusieurs artefacts (cas de `content.core` :
+`content_core`, `content_core_head`, `content_core_tail`) ; un artefact peut
+exister sans composant (`pages_homepage`). `ProducerKey` est une troisième
+identité de catalogue, distincte de `SourceKey` : elle désigne un producteur de
+contenu volatile, pas un artefact.
 
-Contrainte de topologie (§7) : une clé d'artefact servie par T2A doit figurer dans
-la topologie du `LiveRegistry`, sans quoi son pack n'est jamais ouvert.
+### 11.4 Rotation `ArcSwap` — la génération vit tant qu'une requête la détient
+
+`LiveRegistry::store()` ne mute jamais l'instance déjà chargée : il republie le
+pointeur que verront les *prochaines* résolutions (`load()`). Un
+`Arc<PackHtmlIndex>` déjà cloné par une requête en cours reste valide quelle que
+soit la rotation survenue ensuite : une requête T2A en vol ne peut jamais observer
+une génération partiellement remplacée. C'est une propriété standard du comptage
+de références, dont le chemin segmenté dépend directement. Les artefacts `head` et
+`tail` d'une même réponse sont résolus par deux `SourceKey` distincts : la
+cohérence de génération est garantie *par source*. Le régénérateur (§11.10)
+écrit les trois packs dans un même `spawn_blocking`, puis publie leurs générations
+par des appels `registry.store()` **successifs** : aucun mécanisme du code actuel
+ne rend ces publications atomiques entre elles.
+
+### 11.5 La frontière : `marius-render` s'arrête à `ResolvedRange`
+
+`marius-render` ne dépend d'aucun de `axum`/`hyper`/`bytes` — vérifié sur son
+`Cargo.toml`. La construction de `Bytes`/`Body` est portée par `marius-server`
+(`content_document.rs`), qui adapte chaque `ResolvedRange` en un type local :
+
+```text
+ResolvedRange[]                 (dernier niveau Marius — emission.rs)
+    │
+    ▼  (marius-server uniquement, à partir d'ici)
+MmapOwner (Arc<PackHtmlIndex> cloné + offset/len)     segment statique
+VolatileOwner (Arc<VolatileStorage> cloné)            segment volatile
+    │
+    ▼
+Bytes::from_owner
+    │
+    ▼
+Body (flux de frames) → Hyper → HTTP
+```
+
+L'owner est conservé vivant par `Bytes::from_owner` jusqu'au drop de la frame :
+le stockage volatile vit tant que le `Body` n'est pas consommé ou abandonné. Le
+`Content-Length` est la somme des longueurs *effectives* de toutes les frames —
+jamais la capacité maximale du segment volatile. Socket, framing, écritures
+partielles, backpressure et écriture vectorisée appartiennent à Hyper ; `IoSlice[]`
+n'est pas une étape du pipeline Marius.
+
+### 11.6 Ce que Marius garantit, ce qui reste hors de son contrat
+
+**Démontré à la frontière `marius-render`/`marius-server` :** aucune copie du
+payload n'est introduite entre `ResolvedRange` et `Bytes`, que la source soit un
+mmap ou un `VolatileStorage` — vérifié par égalité de *pointeur*, pas seulement de
+contenu.
+
+**Coût accepté, borné par le nombre de segments :** la matérialisation
+(`ResolvedRange → Bytes`, un `Vec<Bytes>` par réponse, un `Arc` par segment
+volatile, le buffer du producteur). Pour le volatile : une allocation du buffer du
+producteur (au plus la capacité AOT), un `Arc`, un owner de `Bytes::from_owner`.
+Ce n'est pas une violation du contrat Marius : le zéro-allocation reste un objectif
+de la famille monolithique, pas de la famille segmentée (SPEC T2A v2 §4).
+
+**Hors du contrat Marius, jamais mesuré ici :** les copies et allocations internes
+de Hyper, Tokio, du noyau, et le bookkeeping de la crate `bytes`.
+
+### 11.7 La route `/content/{id}` (`content_document.rs`)
+
+La route est montée par `content_document::mount(registry)`, mergée dans le
+`Router` principal. Elle lit le `RouteDescriptor` généré `content_document`
+(K=3) :
+
+```text
+segment 0  StaticArtifact(content_core_head)  RequestSlot(0)   ← id
+segment 1  VolatileSlot(ProducerKey(0))       NotApplicable
+segment 2  StaticArtifact(content_core_tail)  RequestSlot(0)   ← id
+```
+
+Les deux segments statiques sont sélectionnés par le **même** paramètre `id` :
+c'est le même contexte de route. Le segment volatile est le `<li>` entier
+(`<li class="nav-profile">…</li>`), pas une interpolation dans un segment AOT.
+
+Ordre des opérations dans le handler : paramètre `id` (400 si non numérique) →
+`VolatileContext` construit depuis la requête → pour chaque segment, dans l'ordre
+du descripteur : résolution statique (404 si l'id est absent du pack) ou
+production volatile → somme des longueurs → `Body`. Toute incohérence (source ou
+sélection incompatibles, producteur inconnu, capacité dépassée) répond par un
+statut contrôlé (500), jamais par un `panic`, jamais par une troncature.
+La production volatile est synchrone dans l'implémentation actuelle : aucune
+référence empruntée ne traverse un point de suspension.
+
+**Contexte expérimental.** Le nom d'utilisateur provient aujourd'hui du paramètre
+de requête `?user=…`. C'est un contexte de démonstration, déterministe et sans
+authentification : ce n'est **pas** l'architecture d'identité définitive.
+L'authentification et la session réelles sont hors périmètre ; le chemin
+`requête → VolatileContext → producteur` est, lui, réel, et la source de
+`VolatileContext.username` pourra changer sans toucher au producteur.
+
+```text
+GET /content/16                    → <li class="nav-profile"></li>
+GET /content/16?user=Olivier       → <li class="nav-profile">Olivier</li>
+GET /content/16?user=<script>…     → nom d'utilisateur échappé HTML
+```
+
+### 11.8 Producteur volatile `nav_profile`
+
+`marius-render::volatile_producers` expose un producteur unique, sélectionné par
+un `match` sur la `ProducerKey` de la source (pas de registre, pas de trait de
+producteur ; un second producteur ajouterait un bras au `match`) :
+
+```text
+VolatileContext { username: Option<String> }     possédé, sans lifetime
+        ↓
+materialize_volatile(spec, &ctx)
+        ↓  match sur ProducerKey (NAV_PROFILE_PRODUCER = ProducerKey(0))
+produce_nav_profile(&ctx) → Vec<u8>              nom échappé HTML
+        ↓
+resolve_volatile_generation → VolatileStorage::from_produced
+        ↓                      (effective_len ≤ capacity, sinon erreur contrôlée)
+MaterializedSource::Volatile
+```
+
+Le nom d'utilisateur est une donnée externe : `& < > " '` sont échappés avant
+écriture, et l'échappement compte dans la capacité. La capacité vient de la Forge
+(`SourceSpec::VolatileSlot.capacity`, déclarée dans `publication.toml`), jamais du
+runtime ; un dépassement est une erreur contrôlée (500), pas une troncature. Le
+producteur ne lit aucune base de données : il ne consomme que le
+`VolatileContext`.
+
+Le contenu `nav_profile` est produit côté serveur : il n'a besoin d'aucun
+JavaScript pour être fonctionnel.
+
+Le contrat complet (propriétés P1–P8, ownership, capacité) est dans
+`docs/contrats/CONTRAT-volatile-v1.md`.
+
+### 11.9 Déclaration de publication — `publication.toml`
+
+La relation *route → artefact → paramètre*, et la partition d'un template en
+(head, volatile, tail), sont déclarées **une seule fois** dans
+`crates/core/schema/publication.toml`, lu par le build de `core/schema`
+(`build/publication.rs`) :
+
+* `[[artifact]]` : `key` (l'`ArtifactKey`) et `component` optionnel. Plusieurs
+  artefacts peuvent partager un même composant.
+* `[[route]]` : `name`, `pattern`, `artifact`, `parameter`, `selection =
+  "primary_key"`. `artifact` désigne l'artefact **monolithique**.
+* `[[volatile_region]]` : `component`, `marker`, `head_artifact`, `tail_artifact`,
+  `capacity`. Au plus une région par composant ; `head_artifact` et
+  `tail_artifact` doivent être déclarés, distincts, et porter le même composant.
+  `capacity` est la borne AOT du contenu volatile (valeur actuelle : 512 octets,
+  provisoire).
+
+Le build valide le manifeste (structure, existence du composant, PK simple) et
+génère dans `generated_schema.rs` : `ARTIFACTS`, `<KEY>_ARTIFACT`,
+`<KEY>_SOURCE_KEY`, `<n>_ROUTE` (`RouteSpec` neutre), `ROUTES` et
+`ROUTE_DESCRIPTORS`. Une route dont l'artefact appartient à un composant couvert
+par une `[[volatile_region]]` est générée en **K=3** ; toute autre route reste en
+K=1. Les capacités de `render_head`/`render_tail` sont émises sous la forme
+`{NAME}_HEAD_TOTAL_CAP` et `{NAME}_TAIL_TOTAL_CAP` ; la `ProducerKey` du slot est
+fixée par le générateur à `ProducerKey(0)`.
+
+```text
+RouteSpec (marius-projection, neutre)
+  ├─ RouteEntry      (marius-render — route_entry_from_spec, const)
+  │     → DUMP_ROUTE_TABLE (marius-dump)
+  └─ RouteDescriptor (généré par le build — représentation T2A, K=1 ou K=3)
+```
+
+Le paramètre HTTP (`id`) et la colonne SQL de la clé primaire (`document_id`) sont
+deux identités distinctes, jamais renommées pour coïncider ; la politique de
+parsing du paramètre et le code 400 restent côté serveur.
+
+Côté template, la région est bornée par une paire de commentaires HTML
+`<!-- MARIUS_VOLATILE_BEGIN {marker} -->` / `<!-- MARIUS_VOLATILE_END -->`
+(`navigation.marius`) ; leur traitement est décrit dans `fragment-forge-guide.md`
+§4.10.
+
+### 11.10 Régénération : une ingestion, trois artefacts
+
+Un composant couvert par une région volatile produit trois artefacts à partir
+d'**une seule** ingestion :
+
+```text
+Étage 1 — ingest_and_swap          (inchangé : store.bin)
+Étage 2 — regenerate_stage
+            ├─ sans région : regenerate_and_swap              (K=1, inchangé)
+            └─ avec région : regenerate_and_swap_with_volatile_split
+                 fetch_batch (une fois par chunk)
+                   ├─ rendu monolithique   → {content_core}.bin
+                   ├─ render_head          → {content_core_head}.bin
+                   └─ render_tail          → {content_core_tail}.bin
+```
+
+* `Dispatcher::with_volatile_split(head, tail)` configure la paire
+  `SplitRenderTarget { packfile_key, total_cap, render }` pour le seul shard
+  concerné (`main.rs`) ; `Dispatcher::new` seul garde le comportement K=1.
+* `render_head` et `render_tail` sont des fonctions inhérentes émises par
+  `db-forge`, **hors** du trait `Projection` : aucune projection `head`/`tail`
+  distincte n'existe.
+* Les trois rendus partagent le même batch emprunté : jamais une seconde
+  ingestion, jamais deux `Dispatcher` sur le même canal.
+* Une mutation du volatile (le nom d'utilisateur) ne passe par aucun de ces
+  étages : le producteur lit son contexte à la requête, aucun événement
+  `NOTIFY`, aucune régénération, aucun `Arc` de génération statique touché.
+
+**Population initiale.** Le `Dispatcher` ne régénère que les ids signalés par le
+`Collector` après son démarrage ; `marius-dump` reste le seul mécanisme de
+première population. Il régénère les trois artefacts (store, pack monolithique,
+head, tail), faute de quoi `/content/{id}` répond 404 tant qu'aucune écriture n'a
+eu lieu en base.
+
+**Topologie.** Les clés `content_core_head` et `content_core_tail` ne sont portées
+par aucune `RouteEntry` : elles sont provisionnées (`ensure_provisioned`) puis
+ouvertes par `LiveRegistry::cold_start_with_extra_keys`, dans `main.rs` comme dans
+`dump.rs`. La clé du pack suit la convention `packfile_path_for(ArtifactKey::as_str())`
+(`{racine}/{clé}.bin`) ; `P::packfile_path()` n'est appelé par aucun code de
+production (§8).
+
+### 11.11 Statut et périmètre
+
+* **Réel :** `content_document.rs` (route `/content/{id}`), le producteur
+  `nav_profile`, le catalogue `SourceKey → artefact`, la régénération à trois
+  artefacts, `marius-dump`.
+* **PROVISOIRE :** `experimental_t2a.rs`, monté sous `/__experimental/t2a` : des
+  fixtures statiques K=1/K=3 écrites à la main (pas une sortie de la Forge) et une
+  route par entrée de `ROUTES`. `experimental_volatile_t2a.rs` est
+  `#[cfg(test)]` : il ne sert que la suite de tests du contrat Volatile.
+* **Non couvert :** authentification et session ; producteur lisant PostgreSQL
+  (`identity.account_core` n'est pas un composant Forge) ; plusieurs régions ou
+  plusieurs producteurs ; combinaison d'une région volatile avec un champ
+  `marius:large_content` (`render_head`/`render_tail` sont générés par
+  `generate_aot_snippet`, jamais `generate_segmented_snippet`) ; politique de cache
+  d'une réponse contenant un volatile (elle n'est pas cacheable comme un pack
+  statique) ; HTTP/2.
 
 ---
 
@@ -1233,3 +1400,4 @@ _Mis à jour le 25 août 2026_
 _Mis à jour le 18 septembre 2026 — corrections de nommage (renvois croisés vers `fragment-forge-guide.md`) et précision sur le garde-fou §4.8/§4.8ter (conditions `record.*` désormais éliminées, pas seulement rejetées)._
 _Mis à jour le 19 septembre 2026 — ajout §11 (chemin T2A expérimental I1→I6, statut PROVISOIRE) ; sections 1→10 inchangées, chemin AOT monolithique non affecté._
 _Corrigé le 21 septembre 2026 — pipeline réactif à deux étages (`ingest_and_swap` puis `regenerate_and_swap` : le `fetch_batch` généré lit le `store.bin`, il n'interroge pas PostgreSQL) ; résolution des chemins d'artefacts (`MARIUS_ARTIFACTS_DIR`) ; provisioning du store ; topologie du `LiveRegistry` ; `marius-dump` ; §11.7 mis à jour et §11.8 ajouté (déclaration de publication `publication.toml`, `ArtifactKey`/`SourceKey`). Aucun changement au format du pack ni à la fusion `merge_sweep`._
+_Mis à jour le 6 octobre 2026 — §11 réécrit pour l'état stabilisé du pipeline T2A segmenté (vertical slice Volatile `content + username`, K=3) : sources statiques et volatiles, frontière `VolatileOwner`, route `/content/{id}` et `/__monolithic/content/{id}`, `?user=` présenté comme contexte expérimental, `[[volatile_region]]`, régénération à trois artefacts. §6, §7, §10 complétés._
