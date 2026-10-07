@@ -375,7 +375,7 @@ ResolvedRange[]          ← dernier niveau de représentation Marius
 frontière transport (Bytes → Body → Hyper)
 ```
 
-`EmissionPlan` n'est pas une étape d'exécution de ce chemin, et `IoSlice[]` est un détail interne du transport, jamais construit ni possédé par Marius (SPECIFICATION-transport-segmente-t2a.md v2, §2 et §9). Le Runtime ne connaît pas la signification métier de la source.
+`EmissionPlan` n'est pas une étape d'exécution de ce chemin, et `IoSlice[]` est un détail interne du transport, jamais construit ni possédé par Marius (docs/archived/SPECIFICATION-transport-segmente-t2a.md v2, §2 et §9). Le Runtime ne connaît pas la signification métier de la source.
 
 Il ne sait pas si un segment contient :
 
@@ -603,7 +603,7 @@ Ils ne doivent pas contaminer :
 * SourceKey ;
 * MaterializedSource.
 
-La propagation effective des octets vers le socket (écritures partielles, backpressure, écriture vectorisée) appartient à Hyper ; les éventuels mécanismes de zero-copy réseau restent hors du contrat Marius (SPECIFICATION-transport-segmente-t2a.md v2, §6).
+La propagation effective des octets vers le socket (écritures partielles, backpressure, écriture vectorisée) appartient à Hyper ; les éventuels mécanismes de zero-copy réseau restent hors du contrat Marius (docs/archived/SPECIFICATION-transport-segmente-t2a.md v2, §6).
 
 Le contrat d'augmentation reste indépendant de cette implémentation.
 
@@ -747,7 +747,7 @@ Le mécanisme permettant de cibler et mettre à jour une projection indépendant
 
 #### 28.3 Transport HTTP
 
-La frontière `ResolvedRange → Bytes → Body → Hyper` est actée (SPECIFICATION-transport-segmente-t2a.md v2). Restent hors périmètre : HTTP/2 et toute optimisation du transport.
+La frontière `ResolvedRange → Bytes → Body → Hyper` est actée (docs/archived/SPECIFICATION-transport-segmente-t2a.md v2). Restent hors périmètre : HTTP/2 et toute optimisation du transport.
 
 #### 28.4 Destin de l'ancien `Projection`
 

@@ -1,7 +1,10 @@
 // crates/shell/render/src/emission.rs
 
-//! Résolution runtime des Sources et planification d'émission — Phase 4
-//! (GO 2026-09), DESIGN-runtime-segment-pipeline.md §3, §3.2, §4, §11.
+//! Résolution runtime des Sources — Phase 4 (GO 2026-09),
+//! DESIGN-runtime-segment-pipeline.md §3, §3.2, §11. Le dernier niveau de
+//! représentation Marius est `ResolvedRange` : `EmissionPlan` n'est pas
+//! conservé comme IR d'exécution (SPECIFICATION-transport-segmente-t2a.md
+//! v2, §9).
 //!
 //! Matérialise la descente :
 //!
@@ -9,7 +12,7 @@
 //! SourceKey / SourceSpec
 //!     → résolution runtime d'une génération   → MaterializedSource
 //!     → résolution d'une sélection             → ResolvedRange { ptr, len }
-//! RouteDescriptor → résolution des Sources → résolution des ranges → EmissionPlan
+//! RouteDescriptor → résolution des Sources → résolution des ranges → ResolvedRange[]
 //! ```
 //!
 //! ## Ce que ce module n'est PAS (périmètre strict de cette phase)
@@ -94,7 +97,7 @@ impl std::fmt::Debug for MaterializedSource {
 // VolatileStorage — contrat Volatile P1/P2/P3, V1b
 // =============================================================================
 //
-// handoff-volatile-vertical-slice.md §6 (repris par NOTE-contrat-volatile-v1.md) :
+// CONTRAT-volatile-v1.md (P1–P3) :
 //   P1 — aucun raw pointer dans MaterializedSource::Volatile ;
 //   P2 — longueur effective portée par le stockage, effective_len > capacity
 //        = erreur contrôlée (jamais de lecture/écriture hors bornes) ;
@@ -125,7 +128,7 @@ pub struct VolatileStorage {
 /// Erreur contrôlée — P2 : `effective_len > capacity` au moment de la
 /// matérialisation. Seule issue de ce cas : jamais de troncature, jamais de
 /// panic, jamais d'accès hors bornes. La traduction en réponse HTTP 500
-/// (NOTE-contrat-volatile-v1.md, P2) reste à la charge de l'appelant — ce
+/// (CONTRAT-volatile-v1.md, P2) reste à la charge de l'appelant — ce
 /// type ne fait que porter les deux valeurs nécessaires à ce diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VolatileCapacityExceeded {
@@ -490,76 +493,6 @@ impl RequestArena {
 }
 
 // =============================================================================
-// EmissionPlan — DESIGN §4
-// =============================================================================
-
-/// Combine, pour une requête donnée, le plan fixe (`RouteDescriptor`) et le
-/// résultat de la résolution runtime des plages (§3.2) — DESIGN §4, GO §6.
-///
-/// `K` (budget de segments de la route, `route.segments.len()`) est porté
-/// comme paramètre const générique plutôt qu'un `Vec` : cohérent avec
-/// l'exigence zéro allocation du chemin chaud (ADR-011 §7), même si ce
-/// type n'est pas encore branché sur ce chemin dans cette phase. **Forme
-/// provisoire, non figée par le DESIGN** (§4 : « aucune forme Rust
-/// définitive n'est figée ») — le futur point d'intégration HTTP peut
-/// retenir une représentation différente.
-///
-/// Ne construit aucun `IoSlice`, ne connaît ni `writev`/`sendmsg`, ni
-/// Axum/Hyper/Tokio (GO §6) — s'arrête au niveau `ResolvedRange`.
-pub struct EmissionPlan<'req, const K: usize> {
-    route: &'req RouteDescriptor,
-    ranges: [Option<ResolvedRange<'req>>; K],
-}
-
-impl<'req, const K: usize> EmissionPlan<'req, K> {
-    /// `route.segments.len()` doit être égal à `K` — vérifié par
-    /// `debug_assert!`, jamais silencieusement toléré : un écart signale
-    /// une route mal générée (Forge), pas un cas runtime à absorber (même
-    /// discipline que `is_single_file_compatible` pour le cas 0 segment,
-    /// DESIGN §9.1).
-    pub fn new(route: &'req RouteDescriptor) -> Self {
-        debug_assert_eq!(
-            route.segments.len(),
-            K,
-            "EmissionPlan::new : K doit correspondre exactement au nombre \
-             de segments de la route — un écart signale une route mal \
-             générée (Forge), jamais un cas runtime"
-        );
-        Self {
-            route,
-            ranges: std::array::from_fn(|_| None),
-        }
-    }
-
-    pub fn route(&self) -> &'req RouteDescriptor {
-        self.route
-    }
-
-    /// Enregistre la plage résolue pour le segment d'indice `i` —
-    /// correspondance stricte 1:1 avec `route.segments` (§3.2). Retourne
-    /// `false` si `i` est hors bornes.
-    pub fn set_range(&mut self, i: usize, range: ResolvedRange<'req>) -> bool {
-        if i >= K {
-            return false;
-        }
-        self.ranges[i] = Some(range);
-        true
-    }
-
-    /// `None` tant que le segment `i` n'a pas encore été résolu.
-    pub fn range(&self, i: usize) -> Option<&ResolvedRange<'req>> {
-        self.ranges.get(i)?.as_ref()
-    }
-
-    /// Tous les segments ont-ils une plage résolue ? Condition nécessaire
-    /// avant toute construction future d'`IoSlice[]` (§7, hors périmètre
-    /// de cette phase).
-    pub fn is_fully_resolved(&self) -> bool {
-        self.ranges.iter().all(Option::is_some)
-    }
-}
-
-// =============================================================================
 // Tests
 // =============================================================================
 
@@ -919,7 +852,7 @@ mod tests {
         // d'implémentation du producteur, cf. commentaire de section
         // VolatileStorage) : ResolvedRange emprunte directement le buffer
         // possédé par VolatileStorage — égalité de POINTEUR, pas seulement
-        // de contenu, même méthode que I5 (handoff-t2a-experimental-integration).
+        // de contenu, même méthode que I5 (invariant I5 de la démonstration T2A).
         let spec = volatile_spec(64, 1);
         let resolved = resolve_volatile_generation(&spec, |_| b"pas de copie ici".to_vec())
             .unwrap()
@@ -982,62 +915,5 @@ mod tests {
         // via le curseur avancé.
         second[0] = 0xBB;
         assert_eq!(arena.used(), 8);
-    }
-
-    // ── EmissionPlan ─────────────────────────────────────────────────────
-
-    #[test]
-    fn emission_plan_tracks_resolution_per_segment() {
-        static SEGMENTS: &[marius_projection::SegmentDescriptor] =
-            &[marius_projection::SegmentDescriptor {
-                source: SourceId(0),
-                selection: marius_projection::SegmentSelection::Constant(1),
-                flags: marius_projection::SegmentFlags::NONE,
-            }];
-        static SOURCES: &[SourceSpec] = &[SourceSpec::StaticArtifact { key: SourceKey(1) }];
-        let route = RouteDescriptor {
-            segments: SEGMENTS,
-            sources: SOURCES,
-            backend_kind: marius_projection::EmissionBackendKind::SingleFile,
-            volatile_capacity: 0,
-        };
-
-        let index = open_synthetic(
-            "plan",
-            b"payload",
-            &[PackfileEntry {
-                id: 1,
-                offset: 0,
-                len: 7,
-                _pad: [0; 4],
-            }],
-        );
-        let source = MaterializedSource::Mmap { handle: index };
-        let range = resolve_range(&source, 1).unwrap();
-
-        let mut plan = EmissionPlan::<1>::new(&route);
-        assert!(!plan.is_fully_resolved());
-        assert!(plan.set_range(0, range));
-        assert!(plan.is_fully_resolved());
-        assert_eq!(plan.range(0).unwrap().as_slice(), b"payload");
-        assert_eq!(
-            plan.route().backend_kind,
-            marius_projection::EmissionBackendKind::SingleFile
-        );
-    }
-
-    #[test]
-    fn emission_plan_out_of_bounds_index_is_rejected() {
-        let route = RouteDescriptor {
-            segments: &[],
-            sources: &[],
-            backend_kind: marius_projection::EmissionBackendKind::Scatter,
-            volatile_capacity: 0,
-        };
-        let mut plan = EmissionPlan::<0>::new(&route);
-        // K=0 : toute tentative d'enregistrer une plage, quel que soit
-        // l'indice, doit être rejetée — bornes vérifiées, jamais un panic
-        // ni une écriture hors tableau.
-        assert!(!plan.set_range(0, ResolvedRange { bytes: b"" }));
     }
 }

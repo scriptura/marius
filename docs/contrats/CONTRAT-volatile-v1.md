@@ -1,7 +1,7 @@
 # Contrat Volatile V1
 
 **Statut :** normatif pour le pipeline runtime T2A des segments volatils.
-Ne modifie ni ADR-011 ni `SPECIFICATION-transport-segmente-t2a.md` (v2) :
+Ne modifie ni ADR-011 ni `docs/archived/SPECIFICATION-transport-segmente-t2a.md` (v2) :
 **étend** ce que la SPEC v2 §8 laisse hors périmètre (« Le Volatile : production,
 cycle de vie, `VolatileSlot` »), sans les contredire. Toute contradiction
 découverte avec l'un de ces documents fait l'objet d'un audit séparé, jamais

@@ -9,7 +9,11 @@ Références :
   réactif PostgreSQL) dont dépend directement tout ce qui touche à la
   branche dynamique des capacités (§6.2.2, §7, §8 de ce guide). À lire en
   cas de doute sur « pourquoi mon changement n'apparaît pas alors que le
-  build est vert ».
+  build est vert ». Son §11 décrit le chemin d'émission segmenté (route
+  `/content/{id}`).
+- `fragment-forge-guide.md` §4.10 — région volatile
+  (`MARIUS_VOLATILE_BEGIN`/`END`) et répartition de `MARIUS_MODULES` entre
+  les moitiés head et tail (§6.2.5 de ce guide).
 
 Ce guide en est la version d'usage courant — pas d'historique de décisions,
 juste : comprendre le système, l'étendre, le compiler.
@@ -574,6 +578,34 @@ capacité (§6.2.1-§6.2.3) n'y participent pas et n'en sont pas affectés** :
   la balise `<script>` elle-même change de granularité, jamais la logique
   par capacité.
 
+#### 6.2.5 Pages segmentées (région volatile) — où va le bloc modules
+
+Le système reste **entièrement AOT**, et `MARIUS_SCRIPTS` ≠ `MARIUS_MODULES`
+(deux mécanismes distincts, `fragment-forge-guide.md` §4.10). Pour un composant
+couvert par une région volatile (aujourd'hui `content.core`, route
+`/content/{id}`), la page est servie en trois segments : head AOT, contenu
+volatile produit à la requête, tail AOT. Conséquences pour les capacités :
+
+- Le lowering des capacités (`lower_modules_for_template`) est calculé **une
+  seule fois**, sur le flux complet du template, avant la scission. Le bloc
+  produit (`<script>` de `deps`, puis le `<script type="module">` regroupé du
+  §6.2.4) est émis par **`render_head` uniquement** — à la position de
+  `<!-- MARIUS_MODULES -->`, dans le `<head>` ; `render_tail` n'en reçoit
+  jamais un second. Le rendu monolithique (`render()`) émet le même bloc :
+  les deux représentations portent les mêmes dépendances frontend.
+- Le test `if record.js_deps & BIT != 0 { … }` (branche dynamique) est évalué
+  par `render_head`, sur le même `record` que le rendu monolithique.
+- **Le runtime ne décide jamais quelles capacités charger.** Aucune capacité
+  n'est choisie, ajoutée ou retirée à la requête : tout est tranché à la
+  compilation (statique) ou à l'écriture/au rendu AOT (`js_deps`).
+- Le contenu produit à la requête par un producteur volatile n'est **jamais
+  analysé** par la détection de capacités : un producteur ne peut pas
+  déclencher une capacité. Si un fragment volatile a besoin d'une capacité,
+  elle doit être déclenchée par la structure du template.
+- Le segment volatile `nav_profile` est du HTML produit côté serveur : il
+  n'a besoin d'aucun JavaScript pour être fonctionnel, et la page reste
+  complète sans JavaScript.
+
 ### 6.3 Ajouter une nouvelle capacité
 
 Exemple fil rouge : ajouter une capacité `carousel`, déclenchée soit par la
@@ -776,9 +808,10 @@ une bibliothèque seuls n'en ont jamais besoin.
 
 **L'Étape 5 est la plus souvent oubliée, et son absence ne produit aucune
 erreur.** Voir `runtime-lifecycle-guide.md` pour le détail complet — le
-résumé nécessaire ici : `cargo build` recompile `render()` dans le
-binaire, mais **ne régénère jamais** un pack HTML déjà servi
-(`{table}.bin`). Tant qu'aucun événement runtime (`NOTIFY`) n'a
+résumé nécessaire ici : `cargo build` recompile `render()` — et, pour
+`content.core`, `render_head()`/`render_tail()` — dans le binaire, mais
+**ne régénère jamais** un pack HTML déjà servi (`{artefact}.bin` : pour
+`content.core`, `content_core`, `content_core_head` et `content_core_tail`). Tant qu'aucun événement runtime (`NOTIFY`) n'a
 effectivement déclenché une régénération pour les enregistrements
 concernés, le HTML servi reste celui produit par l'**ancien** `render()` —
 build vert, serveur relancé, et pourtant rien ne change à l'écran. Seules
@@ -871,23 +904,29 @@ référencée directement par un template) est également figée à cette étape
   déclarée, `root` incorrect, faute de frappe dans le chemin — même classe
   d'erreur que pour `entry`, jamais un repli silencieux, §4.2).
 
-### Étape 4 — `marius-dump` (transport de données, **sans rapport avec le rendu HTML**)
+### Étape 4 — `marius-dump` (première population)
 
 ```bash
 cargo run --bin marius-dump
 ```
 
-`marius-dump` peut produire `{table}_store.bin` (dump brut, transport) et,
-séparément, provisionner un pack HTML initial — mais `regenerate_and_swap`
-(le chemin qui sert réellement le HTML) **ne lit jamais** `store.bin` ; il
-récupère les données depuis PostgreSQL directement
-(`runtime-lifecycle-guide.md` §6). Concrètement, l'ajout ou la
-modification d'une capacité — qui n'ajoute jamais de colonne à
-`content.core`, `js_deps` étant un `BIGINT` déjà existant — **ne rend pas
-cette étape nécessaire pour que le bit soit correctement rendu en HTML.**
-Cette étape reste utile uniquement si un autre consommateur du dump
-(hors périmètre de ce guide) dépend de `store.bin` à jour, ou après un
-véritable `ALTER TABLE` (colonne ajoutée/retirée) sur `content.core`.
+`marius-dump` écrit le store brut (`{table}_store.bin`), puis régénère les
+packs HTML à partir de ce store : pour `content.core`, le pack monolithique
+**et** les packs `content_core_head`/`content_core_tail`. Le chemin qui sert
+réellement le HTML (`regenerate_and_swap`, ou sa variante segmentée
+`regenerate_and_swap_with_volatile_split`) lit le **store** (`store.bin`) via
+`fetch_batch` ; il n'interroge pas PostgreSQL pendant la régénération
+(`runtime-lifecycle-guide.md` §6, §11.10). PostgreSQL n'intervient qu'à
+l'étage d'ingestion, qui alimente ce store après un `NOTIFY`.
+
+L'ajout ou la modification d'une capacité n'ajoute jamais de colonne à
+`content.core` (`js_deps` est un `BIGINT` déjà existant) : cette étape n'est
+donc **pas nécessaire** pour que le bit soit rendu en HTML. Elle sert à la
+**première population** : le `Dispatcher` ne régénère que les ids signalés
+après son démarrage, jamais les lignes déjà présentes — sans `marius-dump`,
+`/content/{id}` répond 404 tant qu'aucune écriture n'a eu lieu. Elle est
+aussi utile après un véritable `ALTER TABLE` (colonne ajoutée ou retirée) sur
+`content.core`.
 
 **Limitation actuelle : `marius-dump` ne couvre que `content_core`.**
 Aucune autre table n'a de mécanisme de dump à ce jour (cf.
@@ -921,7 +960,9 @@ un marqueur déjà présent dans un vieux document, qu'à une capacité ou un
 component nouvellement rendus **inconditionnels** par un marqueur ajouté
 dans un `.marius` (§6.2.1/§6.3.5), qu'à une `deps` nouvellement ajoutée à
 une capacité déjà active : dans tous les cas, c'est le pack existant de
-l'enregistrement qui doit être régénéré, jamais seulement le binaire.
+l'enregistrement qui doit être régénéré, jamais seulement le binaire. Pour
+`content.core`, une seule ingestion régénère les trois packs (monolithique,
+head, tail) : le bloc modules est porté par le pack head.
 
 Prérequis souvent oublié en local : le serveur doit être en écoute
 (`PgListener` abonné) **avant** l'écriture SQL — un `NOTIFY` émis pendant
@@ -1009,6 +1050,15 @@ différente selon le type de page :
      `<script type="module">` : la présence vient du template, jamais du
      contenu.
 
+### Route segmentée `/content/{id}` (§6.2.5)
+
+Le bloc de modules apparaît dans le `<head>` de `/content/{id}` (segment
+head) comme dans celui de `/__monolithic/content/{id}` (rendu monolithique de
+comparaison) : les deux doivent porter les mêmes balises `<script>` pour un
+même document. Un bloc présent sur la seconde route et absent de la première
+signale un défaut de scission. Un bloc dupliqué en fin de page signalerait
+que le tail a reçu un second bloc.
+
 ## 9. Pièges déjà rencontrés
 
 - **Un `.js` dans `[static.verbatim].files` échoue au build, volontairement**
@@ -1034,12 +1084,14 @@ différente selon le type de page :
   n'apparaît toujours pas après un déploiement propre, vérifier en
   priorité si un `NOTIFY` a réellement été déclenché pour la page testée
   avant de chercher une erreur dans le template ou dans `theme.toml`.
-- **`store.bin`/`marius-dump` n'a aucune incidence sur le rendu HTML d'une
-  capacité.** Une confusion héritée d'une ancienne version de ce guide,
-  antérieure à l'introduction du Sweep Merge (`runtime-lifecycle-guide.md`
-  §6) : `regenerate_and_swap` lit PostgreSQL directement, jamais
-  `store.bin`. Ne pas chercher de ce côté si un bit `js_deps` ne semble
-  pas pris en compte.
+- **La régénération lit `store.bin`, pas PostgreSQL.** Le `fetch_batch`
+  généré lit le store ; un changement de `js_deps` en base n'atteint le HTML
+  qu'après l'étage d'ingestion (`ingest_and_swap`, déclenché par `NOTIFY`) qui
+  met le store à jour, puis la régénération (`runtime-lifecycle-guide.md` §6).
+  Si un bit `js_deps` ne semble pas pris en compte, vérifier d'abord que le
+  `NOTIFY` a bien été traité (serveur en écoute) avant de chercher dans le
+  template ou dans `theme.toml`. `marius-dump` n'est qu'une première
+  population (Étape 4), pas un mécanisme de mise à jour d'une capacité.
 - **`meta.containment_intent.intent_density_bytes`** (registre de taille
   DOD, `db/10_meta_seed/01_manifest.sql`) doit rester synchronisé
   manuellement avec la taille réelle du `StorageRow` généré à chaque
@@ -1245,4 +1297,4 @@ ce jour.
 
 ---
 
-_Document révisé le 2 septembre 2026_
+_Document révisé le 2 septembre 2026 ; mis à jour le 7 octobre 2026 — ajout §6.2.5 (pages segmentées : bloc modules porté par `render_head`, `MARIUS_SCRIPTS` ≠ `MARIUS_MODULES` conservés, aucune décision JS au runtime), Étape 4 et piège `store.bin` corrigés (la régénération lit le store, `marius-dump` fait la première population de trois packs), vérification de la route `/content/{id}`._

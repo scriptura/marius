@@ -100,13 +100,11 @@ Son rôle consiste uniquement à résoudre une `RequestEntity`, récupérer les 
 
 Le runtime devient ainsi un ordonnanceur de mémoire plutôt qu'un moteur de rendu.
 
-**Invariants de capacité — trois propriétés distinctes, à ne jamais fusionner :**
+**Invariants de capacité — dépréciés (décision du 7 octobre 2026).** La rédaction initiale posait trois propriétés distinctes — zéro allocation, zéro reconstruction, zéro copie au sens transfert réseau — comme invariants de tout chemin chaud. Tenir cette intention pour toute réponse aurait exigé de réécrire la pile HTTP (Axum/Hyper) : elle est abandonnée. Ce qui est retenu :
 
-- **Zéro allocation** : aucune construction de `Vec`/`String`/buffer intermédiaire sur le chemin chaud pour composer la réponse. Invariant fondamental de cette ADR.
-- **Zéro reconstruction** : les segments existants sont uniquement ordonnancés — aucune concaténation, aucune réécriture de leur contenu. Invariant fondamental de cette ADR.
-- **Zéro copie (au sens transfert réseau)** : propriété distincte, plus forte, qui ne découle pas automatiquement des deux précédentes. `sendfile(2)` (ADR-006) l'obtient nativement (transfert kernel-to-kernel). Une émission par ordonnancement de segments multiples (`writev`/`sendmsg` ou équivalent) ne l'obtient pas par défaut — le noyau peut copier le contenu des pages utilisateur vers le buffer socket. L'obtenir exige un mécanisme distinct (ex. `MSG_ZEROCOPY`) dont la conception et le coût relèvent du DESIGN Runtime, jamais présumés acquis par cette ADR.
-
-Les deux premiers invariants ne sont pas satisfaits par l'implémentation de référence actuelle, y compris pour N = 1 (le chemin de lecture actuel alloue un `Vec<u8>` par requête). Leur mise en conformité relève du DESIGN Runtime, pas de la présente décision.
+- le runtime n'effectue ni rendu, ni concaténation, ni interprétation de template (liste ci-dessus) : il ordonnance des segments déjà compilés ;
+- la garantie de **zéro copie au sens transfert réseau** (`sendfile(2)`, ADR-006) est circonscrite à l'émission **monolithique** ;
+- pour l'émission **segmentée**, `docs/archived/SPECIFICATION-transport-segmente-t2a.md` (§3 à §6) fait foi : aucun payload n'est copié par Marius à la frontière `ResolvedRange → Bytes`, le coût de matérialisation est borné par le nombre de segments, et les coûts internes du transport (Hyper, Tokio, noyau) n'appartiennent pas au contrat Marius.
 
 ## 8. Budget de Segments
 
@@ -144,7 +142,7 @@ Explicitement non traités ici — relèvent du DESIGN Runtime à venir :
 - Transition de l'implémentation d'émission réseau actuelle vers une émission sans copie (`writev`/`sendmsg`/équivalent).
 - Devenir du trait `Projection` existant dans le code (fusion actuelle des niveaux 1 et 2, cf. §3).
 - Sources de segments non adressables par artefact statique : le premier cas réel est traité (segment volatile `nav_profile`, produit à la requête à partir d'un contexte de requête ; contrat dans `CONTRAT-volatile-v1.md`, état d'implémentation en §12). Restent hors périmètre : une source lisant un buffer PostgreSQL live, un JSON généré, d'autres composants volatils.
-- Mécanisme d'obtention du zéro-copie réseau (`MSG_ZEROCOPY` ou équivalent) — cf. §7, invariant distinct non couvert par cette ADR.
+- Mécanisme d'obtention du zéro-copie réseau (`MSG_ZEROCOPY` ou équivalent) — hors contrat Marius pour l'émission segmentée (§7).
 - Formule fermée de calcul du budget de segments : aucune formule n'est normative. Le §8 reste la seule règle — la Forge calcule le budget exact depuis le graphe réel du template. Une formule peut apparaître dans le DESIGN à titre pédagogique, jamais ici.
 
 **Relation avec les ADR existants :**
@@ -161,4 +159,4 @@ Cette section constate ce que le code réalise ; elle ne modifie aucune décisio
 - **Niveau 4 (Réponse HTTP).** `content_document.rs` ordonnance les segments dans l'ordre du descripteur et remet le résultat à Hyper (`Bytes::from_owner` → `Body`) ; le chemin monolithique reste monté à `/__monolithic/content/{id}` comme voie de comparaison.
 - **Contexte de requête.** Le contenu volatile dépend aujourd'hui d'un paramètre de requête expérimental (`?user=`), pas d'une authentification ou d'une session ; ce n'est pas une décision d'identité.
 - **Budget de segments (§8).** Le nombre de segments est une propriété de la représentation générée (K=3 pour cette route) ; aucune formule n'est normative (§11).
-- **Invariants de capacité (§7).** Ils ne sont pas satisfaits par l'implémentation actuelle, ni sur le chemin monolithique (lecture par `read_at`, `Vec<u8>` par requête), ni sur le chemin segmenté (collecte de frames, `Arc` et buffer du producteur volatile, bookkeeping de `Bytes`). `SPECIFICATION-transport-segmente-t2a.md` §4 délimite le zéro-allocation par famille d'émission ; ce document ne tranche pas l'écart entre ce §7 et cette portée, qui relève d'un audit séparé (SPEC T2A v2, §10).
+- **Invariants de capacité (§7).** Dépréciés : le zéro-copie réseau est circonscrit à l'émission monolithique ; l'émission segmentée relève de la SPEC T2A v2 (voir §7 ci-dessus).

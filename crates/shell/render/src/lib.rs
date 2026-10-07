@@ -114,7 +114,7 @@ pub use route_derive::route_entry_from_spec;
 // matérialise ce besoin — pas une extension anticipée par confort.
 pub use pack_html_index::PackHtmlIndex;
 
-// MaterializedSource, ResolvedRange, RequestArena, EmissionPlan,
+// MaterializedSource, ResolvedRange, RequestArena,
 // SourceResolutionContext, resolve_generation, resolve_range,
 // source_spec_for — même convention que ci-dessus (types/fonctions
 // principaux d'un module, ré-exportés à plat). Phase 4 (GO 2026-09) :
@@ -129,7 +129,7 @@ pub use pack_html_index::PackHtmlIndex;
 // cette phase (Volatile, IoSlice, writev/sendmsg, Axum/Hyper/Tokio).
 // VolatileCapacityExceeded, VolatileStorage, resolve_volatile_generation,
 // resolve_volatile_range — contrat Volatile V1b/V1c
-// (handoff-volatile-vertical-slice.md §6, NOTE-contrat-volatile-v1.md).
+// (CONTRAT-volatile-v1.md).
 // Correction : ces éléments existent dans emission.rs depuis V1b mais
 // n'avaient pas été ajoutés à cette façade à cette occasion — oubli
 // symétrique à celui déjà documenté plus haut pour render_batch_pure,
@@ -137,7 +137,7 @@ pub use pack_html_index::PackHtmlIndex;
 // emission.rs (crates/shell/server/src/experimental_volatile_t2a.rs, V1c)
 // de nommer `marius_render::resolve_volatile_generation`.
 pub use emission::{
-    EmissionPlan, MaterializedSource, RequestArena, ResolvedRange, SourceResolutionContext,
+    MaterializedSource, RequestArena, ResolvedRange, SourceResolutionContext,
     VolatileCapacityExceeded, VolatileStorage, resolve_generation, resolve_range,
     resolve_volatile_generation, resolve_volatile_range, source_spec_for,
 };

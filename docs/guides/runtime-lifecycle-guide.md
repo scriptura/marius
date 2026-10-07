@@ -1072,7 +1072,7 @@ packs (§11.10).
 > Ce chapitre situe la seconde famille d'émission par rapport au reste du guide.
 > Il ne se substitue pas aux textes normatifs : ADR-011
 > (`ADR-011-projections-ordonnancees.md`), la frontière de transport
-> (`SPECIFICATION-transport-segmente-t2a.md`, v2), le contrat Volatile
+> (`docs/archived/SPECIFICATION-transport-segmente-t2a.md`, v2), le contrat Volatile
 > (`docs/contrats/CONTRAT-volatile-v1.md`) et le contrat d'augmentation
 > (`docs/contrats/CONTRAT-marius-one-page-extension.md`).
 
@@ -1142,7 +1142,7 @@ statique est *sélectionné* dans un artefact, un segment volatile est *produit*
 agnostique du transport.
 
 `ResolvedRange<'a>` est une tranche empruntée, liée à la durée de vie du
-`MaterializedSource` qui l'a produite ; elle n'expose que `ptr()` et `len()`.
+`MaterializedSource` qui l'a produite (`ptr()`, `len()`, `is_empty()`, `as_slice()`).
 La cohérence de génération est une propriété du `SourceKey`, jamais du `SourceId` :
 `SourceResolutionContext<N>` résout chaque `SourceKey` distinct une seule fois
 par requête (`N = 2` dans `content_document.rs`).
@@ -1182,8 +1182,8 @@ ne rend ces publications atomiques entre elles.
 
 ### 11.5 La frontière : `marius-render` s'arrête à `ResolvedRange`
 
-`marius-render` ne dépend d'aucun de `axum`/`hyper`/`bytes` — vérifié sur son
-`Cargo.toml`. La construction de `Bytes`/`Body` est portée par `marius-server`
+`marius-render` ne dépend d'aucun de `axum`/`hyper`/`bytes` (contrat Volatile P3 ;
+types `std` uniquement). La construction de `Bytes`/`Body` est portée par `marius-server`
 (`content_document.rs`), qui adapte chaque `ResolvedRange` en un type local :
 
 ```text
@@ -1312,7 +1312,7 @@ La relation *route → artefact → paramètre*, et la partition d'un template e
 
 Le build valide le manifeste (structure, existence du composant, PK simple) et
 génère dans `generated_schema.rs` : `ARTIFACTS`, `<KEY>_ARTIFACT`,
-`<KEY>_SOURCE_KEY`, `<n>_ROUTE` (`RouteSpec` neutre), `ROUTES` et
+`<KEY>_SOURCE_KEY`, `<NAME>_ROUTE` (`RouteSpec` neutre), `ROUTES` et
 `ROUTE_DESCRIPTORS`. Une route dont l'artefact appartient à un composant couvert
 par une `[[volatile_region]]` est générée en **K=3** ; toute autre route reste en
 K=1. Les capacités de `render_head`/`render_tail` sont émises sous la forme
@@ -1381,9 +1381,11 @@ production (§8).
 * **Réel :** `content_document.rs` (route `/content/{id}`), le producteur
   `nav_profile`, le catalogue `SourceKey → artefact`, la régénération à trois
   artefacts, `marius-dump`.
-* **PROVISOIRE :** `experimental_t2a.rs`, monté sous `/__experimental/t2a` : des
-  fixtures statiques K=1/K=3 écrites à la main (pas une sortie de la Forge) et une
-  route par entrée de `ROUTES`. `experimental_volatile_t2a.rs` est
+* **PROVISOIRE :** `experimental_t2a.rs`, monté sous `/__experimental/t2a`, hors
+  `ROUTE_TABLE` : des fixtures statiques K=1/K=3 écrites à la main (pas une sortie
+  de la Forge) et une route par entrée de `ROUTES`. Le comportement de ces routes
+  face au descripteur K=3 de `content_document` n'a pas été revérifié pour cette
+  mise à jour. `experimental_volatile_t2a.rs` est
   `#[cfg(test)]` : il ne sert que la suite de tests du contrat Volatile.
 * **Non couvert :** authentification et session ; producteur lisant PostgreSQL
   (`identity.account_core` n'est pas un composant Forge) ; plusieurs régions ou
