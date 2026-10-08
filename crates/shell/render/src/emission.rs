@@ -1,10 +1,9 @@
 // crates/shell/render/src/emission.rs
 
 //! Résolution runtime des Sources — Phase 4 (GO 2026-09),
-//! DESIGN-runtime-segment-pipeline.md §3, §3.2, §11. Le dernier niveau de
-//! représentation Marius est `ResolvedRange` : `EmissionPlan` n'est pas
-//! conservé comme IR d'exécution (SPECIFICATION-transport-segmente-t2a.md
-//! v2, §9).
+//! DESIGN-runtime-segment-pipeline.md §3, §3.2, §6. Le dernier niveau de
+//! représentation Marius est `ResolvedRange` (docs/archived/
+//! SPECIFICATION-transport-segmente-t2a.md v2, §2).
 //!
 //! Matérialise la descente :
 //!
@@ -27,18 +26,16 @@
 //!   protocole de publication pour les Sources `Volatile` — le contrat
 //!   d'ownership/longueur effective (P1/P2/P3, V1b) est implémenté
 //!   (`VolatileStorage`, `resolve_volatile_generation`,
-//!   `resolve_volatile_range`), mais le producteur reste **injecté** par
-//!   l'appelant (closure), jamais résolu depuis un vrai catalogue
-//!   `ProducerKey → implémentation` (V3 : SQL/`account_core`).
+//!   `resolve_volatile_range`). Le producteur est **injecté** par l'appelant
+//!   (closure) : la sélection par `ProducerKey` n'est jamais dans ce module
+//!   (P8) — elle vit dans `volatile_producers.rs`.
 //! - Il ne construit aucun `IoSlice`, ne connaît ni `writev`/`sendmsg`, ni
 //!   Axum, ni Hyper, ni Tokio. Aucune dépendance vers `bytes` — l'adaptation
 //!   `Bytes::from_owner` reste côté `marius-server` (V1c).
-//! - `RequestArena` ne fixe aucun mécanisme d'acquisition, pool, stratégie
-//!   de recyclage, ni unité d'exécution propriétaire — seuls les
-//!   invariants verrouillés par DESIGN §11.1 sont implémentés. `VolatileStorage`
-//!   (ci-dessous) est un stockage possédé **distinct** de `RequestArena` —
-//!   ce n'est pas une réintroduction de l'arène worker réutilisée (contrat
-//!   Volatile V1b, contrainte 1).
+//! - Le support mémoire d'un segment volatil est `VolatileStorage`
+//!   (ci-dessous) : un stockage **possédé**, partagé par `Arc`. Aucune arène
+//!   de requête réinitialisée n'existe (CONTRAT-volatile-v1.md, §4 :
+//!   incompatible avec `Bytes::from_owner`).
 
 use std::sync::Arc;
 
@@ -414,81 +411,6 @@ pub fn resolve_volatile_range(source: &MaterializedSource) -> Option<ResolvedRan
             bytes: storage.as_slice(),
         }),
         MaterializedSource::Mmap { .. } => None,
-    }
-}
-
-// =============================================================================
-// RequestArena — DESIGN §11.1 (invariants verrouillés uniquement)
-// =============================================================================
-
-/// Support mémoire des segments volatils — DESIGN §11, invariants
-/// verrouillés uniquement (§11.1). Forme minimale (GO §7) : mécanisme
-/// d'acquisition, pool, stratégie de recyclage, unité d'exécution
-/// propriétaire — **non décidés ici**, et ce type ne les présuppose pas.
-///
-/// - **request-scoped** : une instance n'a de sens que pour la durée d'une
-///   requête. Ce type ne se procure pas lui-même, ne se recycle pas — il
-///   n'est qu'un buffer à curseur, sans opinion sur son cycle de vie au-delà
-///   des méthodes qu'il expose.
-/// - **non partagée entre requêtes concurrentes** : aucune synchronisation
-///   interne (pas de `Mutex`/`RwLock`/atomics) — imposer cette discipline à
-///   l'appelant est un invariant d'usage, pas une garantie que ce type
-///   applique lui-même.
-/// - **capacité dérivée d'une borne AOT** : `with_capacity` reçoit la
-///   capacité en paramètre, ne la choisit jamais elle-même. L'appelant est
-///   responsable de la dériver de `RouteDescriptor.volatile_capacity`
-///   (DESIGN §11.3) — non câblé ici, aucun générateur de routes réel
-///   n'existe encore pour le fournir en production.
-/// - **bump-only, reset O(1)** (§11.1/§11.2) : `reset` remet le curseur à
-///   zéro sans jamais toucher au contenu du buffer ; `bump` avance le
-///   curseur sans jamais réutiliser un bloc déjà rendu dans le même cycle.
-/// - **aucune allocation sur le chemin d'utilisation** : le buffer est
-///   alloué une seule fois, à la construction (`with_capacity`) — ni
-///   `bump` ni `reset` n'allouent.
-pub struct RequestArena {
-    buf: Box<[u8]>,
-    cursor: usize,
-}
-
-impl RequestArena {
-    /// `capacity` est une donnée reçue, jamais choisie ici — dérivation
-    /// depuis une borne AOT laissée à l'appelant (cf. doc de type
-    /// ci-dessus).
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            buf: vec![0u8; capacity].into_boxed_slice(),
-            cursor: 0,
-        }
-    }
-
-    /// Remise à zéro en O(1) — DESIGN §11.1/§11.2 : à l'acquisition par une
-    /// requête, jamais à la libération. Ce type n'impose ni ne devine
-    /// quand cette méthode doit être appelée.
-    pub fn reset(&mut self) {
-        self.cursor = 0;
-    }
-
-    /// Allocation par curseur. Retourne `None` si la capacité restante est
-    /// insuffisante — refus explicite, jamais une écriture hors bornes. Le
-    /// traitement de ce cas (troncature, rejet, autre) reste un point
-    /// produit-métier différé (DESIGN §12) : cette méthode ne fait que
-    /// signaler l'échec.
-    pub fn bump(&mut self, len: usize) -> Option<&mut [u8]> {
-        let end = self.cursor.checked_add(len)?;
-        if end > self.buf.len() {
-            return None;
-        }
-        let slice = &mut self.buf[self.cursor..end];
-        self.cursor = end;
-        Some(slice)
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.buf.len()
-    }
-
-    pub fn used(&self) -> usize {
-        self.cursor
     }
 }
 
@@ -870,50 +792,5 @@ mod tests {
             "ResolvedRange doit pointer exactement dans le buffer de \
              VolatileStorage — aucune recopie à la résolution"
         );
-    }
-
-    // ── RequestArena : capacité bornée, bump/reset ──────────────────────
-
-    #[test]
-    fn arena_bump_within_capacity_succeeds() {
-        let mut arena = RequestArena::with_capacity(16);
-        let slice = arena.bump(10).expect("10 <= 16 doit réussir");
-        assert_eq!(slice.len(), 10);
-        assert_eq!(arena.used(), 10);
-    }
-
-    #[test]
-    fn arena_bump_exceeding_capacity_fails_explicitly() {
-        let mut arena = RequestArena::with_capacity(8);
-        assert!(arena.bump(9).is_none());
-        assert_eq!(
-            arena.used(),
-            0,
-            "un bump refusé ne doit jamais avancer le curseur"
-        );
-    }
-
-    #[test]
-    fn arena_reset_is_o1_and_does_not_touch_capacity() {
-        let mut arena = RequestArena::with_capacity(32);
-        arena.bump(20).unwrap();
-        assert_eq!(arena.used(), 20);
-        arena.reset();
-        assert_eq!(arena.used(), 0);
-        assert_eq!(arena.capacity(), 32, "reset ne modifie jamais la capacité");
-    }
-
-    #[test]
-    fn arena_successive_bumps_never_overlap() {
-        let mut arena = RequestArena::with_capacity(16);
-        let first = arena.bump(4).unwrap();
-        first[0] = 0xAA;
-        let second = arena.bump(4).unwrap();
-        // Deuxième tranche : jamais de chevauchement avec la première —
-        // vérifié en écrivant une valeur distincte et en s'assurant que la
-        // première zone (déjà rendue) reste ce qu'on y a écrit après coup
-        // via le curseur avancé.
-        second[0] = 0xBB;
-        assert_eq!(arena.used(), 8);
     }
 }

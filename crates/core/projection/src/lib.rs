@@ -1030,8 +1030,6 @@ mod tests_segment_descriptor {
 // porte aucune plage physique (§2), donc aucune information de
 // contiguïté n'existe à ce niveau pour être inspectée, ici ou ailleurs
 // dans l'IR AOT.
-/// Backend d'émission consommant un `EmissionPlan` (DESIGN §9) — décidé
-/// par la Forge, par route.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EmissionBackendKind {
     /// `sendfile(fd, offset, len)` — un seul descripteur de fichier, une

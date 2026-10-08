@@ -623,10 +623,11 @@ Ce sont deux mécanismes distincts, qui ne se remplacent pas. Interaction avec l
 
 - `MARIUS_MODULES` vit dans le `<head>` du Root (`base.marius`) : le `ModulesPlaceholder` se retrouve dans la moitié **head**, jamais dans la moitié tail.
 - `modules_lowering.snippet`, calculé une seule fois pour le flux complet, est donc passé à `generate_aot_snippet` pour **`render_head` uniquement**. `render_tail` n'en reçoit aucun : un second bloc `js_deps`/imports serait un doublon, pas une dépendance supplémentaire.
+- La capacité suit la même répartition : `render_head` est mesuré avec le pire cas du bloc modules (`modules_lowering.static_bytes`, tous les `push_str` du snippet émis simultanément), exactement comme `render()` ; `render_tail` est mesuré sans modules. `HEAD_TOTAL_CAP` couvre donc les octets que `render_head()` peut émettre, sans marge (`measure_volatile_halves`, `page.rs`).
 - Les scripts hissés sont résolus avant la scission : ils ne peuvent pas être dupliqués par elle.
 - Le contenu `nav_profile` est du HTML produit côté serveur : il n'a besoin d'aucun JavaScript pour être fonctionnel.
 
-Un test de `page.rs` fige le comportement (`head_receives_the_modules_snippet_tail_does_not_duplicate_it`).
+Deux tests de `page.rs` figent le comportement : `head_receives_the_modules_snippet_tail_does_not_duplicate_it` (répartition du snippet) et `head_capacity_covers_the_modules_snippet_worst_case_tail_has_none` (capacité).
 
 ---
 

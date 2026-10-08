@@ -218,7 +218,9 @@ async fn serve_content_document(
             }
 
             // Toute autre combinaison (incohérence P7) : jamais devinée,
-            // jamais de secours implicite.
+            // jamais de secours implicite. Garde runtime explicite :
+            // `segment_matches_source` reste le prédicat pur de cohérence
+            // (garde-fou testé), pas un appel de ce handler.
             _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
     }

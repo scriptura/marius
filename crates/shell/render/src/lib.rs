@@ -114,7 +114,7 @@ pub use route_derive::route_entry_from_spec;
 // matérialise ce besoin — pas une extension anticipée par confort.
 pub use pack_html_index::PackHtmlIndex;
 
-// MaterializedSource, ResolvedRange, RequestArena,
+// MaterializedSource, ResolvedRange,
 // SourceResolutionContext, resolve_generation, resolve_range,
 // source_spec_for — même convention que ci-dessus (types/fonctions
 // principaux d'un module, ré-exportés à plat). Phase 4 (GO 2026-09) :
@@ -137,7 +137,7 @@ pub use pack_html_index::PackHtmlIndex;
 // emission.rs (crates/shell/server/src/experimental_volatile_t2a.rs, V1c)
 // de nommer `marius_render::resolve_volatile_generation`.
 pub use emission::{
-    MaterializedSource, RequestArena, ResolvedRange, SourceResolutionContext,
+    MaterializedSource, ResolvedRange, SourceResolutionContext,
     VolatileCapacityExceeded, VolatileStorage, resolve_generation, resolve_range,
     resolve_volatile_generation, resolve_volatile_range, source_spec_for,
 };

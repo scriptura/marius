@@ -1180,6 +1180,14 @@ cohérence de génération est garantie *par source*. Le régénérateur (§11.1
 par des appels `registry.store()` **successifs** : aucun mécanisme du code actuel
 ne rend ces publications atomiques entre elles.
 
+> **Limite actuelle.** Chaque source statique résolue reste cohérente pendant la
+> durée de vie de la requête. Les artefacts multiples d'une même représentation
+> segmentée (`head`, `tail`) ne bénéficient pas encore d'une publication atomique
+> inter-sources : lors d'une rotation, une requête peut théoriquement combiner un
+> `head` et un `tail` de générations différentes. Une identité de génération pour
+> un ensemble corrélé de sources (un « bundle » côté registre) est un sujet de
+> conception futur, non implémenté ; il demande un arbitrage dédié.
+
 ### 11.5 La frontière : `marius-render` s'arrête à `ResolvedRange`
 
 `marius-render` ne dépend d'aucun de `axum`/`hyper`/`bytes` (contrat Volatile P3 ;

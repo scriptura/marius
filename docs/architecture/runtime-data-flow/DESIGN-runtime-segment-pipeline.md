@@ -98,7 +98,7 @@ Enum fermé : le dispatch est un `match`, pas une vtable.
 
 - **propriétaire** : le contexte de résolution de la requête (`SourceResolutionContext<N>`), structure à capacité fixe bornée par le nombre de `SourceKey` **distincts** de la route — jamais un `Vec`, et jamais égal par construction au nombre de segments ;
 - **durée de vie** : garantie pour toute la requête par la détention de l'`Arc` cloné ;
-- pour une Source `StaticArtifact` : un seul point de résolution par `SourceKey` distinct, qui applique l'invariant de `DESIGN-store-registry.md` (une requête observe exactement une génération du monde statique). Ce DESIGN dépend de l'invariant, pas du mécanisme (`ArcSwap` aujourd'hui) qui le réalise ;
+- pour une Source `StaticArtifact` : un seul point de résolution par `SourceKey` distinct : chaque source résolue reste cohérente pour toute la requête. Ce DESIGN dépend de cette propriété, pas du mécanisme (`ArcSwap` aujourd'hui) qui la réalise. La cohérence *entre* sources corrélées n'est pas encore garantie (§9) ;
 - pour une Source `VolatileSlot` : un `VolatileStorage` possédé et partageable, produit par le producteur désigné par sa `ProducerKey` (§6).
 
 Cette résolution de génération est le seul endroit du pipeline qui touche un `Arc` d'artefact. Elle ne produit pas, à elle seule, une plage physique : c'est le rôle de §3.2.
@@ -245,7 +245,8 @@ Le runtime résout une route par son nom (`ROUTES`) vers son `RouteDescriptor`, 
 ## 9. Ce que ce document ne tranche pas
 
 - La forme Rust exacte de `RequestValueId` et le mécanisme de remplissage des slots de sélection depuis les paramètres HTTP réels : portés aujourd'hui par `marius-server`, hors du Core IR.
-- Le devenir de `EmissionBackendKind`/`backend_kind`, de `SegmentBudget`/`segment_budget_fits_iov_limit`/`IOV_MAX_CURRENT_PLATFORM`, du type `RequestArena` et des helpers associés, qui subsistent dans le code sans être consommés par le chemin T2A retenu.
+- Le devenir de `EmissionBackendKind`/`backend_kind`, de `SegmentBudget`/`segment_budget_fits_iov_limit`/`IOV_MAX_CURRENT_PLATFORM` et des helpers associés, qui subsistent dans `marius-projection` sans être consommés par le chemin T2A retenu.
+- La publication atomique d'un ensemble corrélé de sources (`head`, `tail`, monolithique) : aujourd'hui des `store()` successifs, donc une requête peut théoriquement combiner deux générations lors d'une rotation. Sujet de conception futur (identité de génération ou « bundle » côté registre), à arbitrer avant toute implémentation.
 - Le mode de calcul et le stockage définitifs du budget de segments par la Forge.
 - Les mécanismes de zéro-copie réseau (`MSG_ZEROCOPY`) et toute optimisation du transport : hors contrat Marius pour l'émission segmentée.
 - HTTP/2 et les protocoles où la longueur totale ne serait pas connue à l'avance.

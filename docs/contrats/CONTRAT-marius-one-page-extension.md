@@ -482,20 +482,22 @@ La capacité est bornée par la Forge. La production, l'ownership, la longueur e
 
 Ce contrat d'augmentation n'introduit toujours aucun mécanisme de rendu runtime, de requête SQL ou de composition dynamique : le producteur ne manipule que du contenu déjà borné par la Forge. La provenance du contexte (aujourd'hui un paramètre de requête expérimental, demain une session) est hors du périmètre de ce contrat.
 
-## 17. Une génération du monde par requête
+## 17. Cohérence de génération par requête
 
-Lorsqu'une requête utilise plusieurs sources statiques, le Runtime doit observer une génération cohérente du registre.
+La résolution des sources statiques respecte l'invariant suivant :
 
-Une requête ne doit pas combiner arbitrairement :
+> **Chaque source statique résolue reste cohérente pendant la durée de vie de la requête.**
+
+Une requête qui résout une source en retient la génération (détention de l'`Arc`) ; elle n'observe jamais une génération partiellement remplacée, quelle que soit la rotation survenue ensuite. La résolution est dédupliquée par `SourceKey` distinct : deux segments qui référencent la même source aboutissent à la même génération.
+
+**Limite actuelle — publication non atomique entre sources.** Les artefacts multiples d'une même représentation segmentée (`head` et `tail`, et le monolithique qui les accompagne) ne bénéficient pas encore d'une publication atomique inter-sources. Ils sont écrits ensemble puis publiés par des `store()` successifs : une requête peut théoriquement observer des générations différentes lors d'une rotation (par exemple un `head` de génération N+1 avec un `tail` de génération N).
 
 ```text
-source A — génération N
-source B — génération N+1
+source A (head) — génération N+1
+source B (tail) — génération N        ← possible, brièvement, pendant une rotation
 ```
 
-La résolution des sources doit donc respecter l'invariant :
-
-> **Une requête observe une génération cohérente du monde statique.**
+Cette limite n'est pas une propriété garantie puis oubliée : l'identité de génération d'un ensemble corrélé de sources (un « bundle » de génération côté registre : `head`, `tail`, éventuelles autres sources corrélées) est un **sujet de conception futur**, qui nécessite un arbitrage dédié. Aucune solution n'est introduite par ce contrat.
 
 La contextualisation AOT ne modifie pas cet invariant.
 
@@ -723,7 +725,7 @@ Le contrat impose les invariants suivants.
 
 15. **La production effective du contenu volatile est définie par un contrat séparé** (`CONTRAT-volatile-v1.md`), jamais par ce contrat d'augmentation.
 
-16. **Une requête doit observer une génération cohérente des sources statiques.**
+16. **Chaque source statique résolue reste cohérente pendant la durée de vie de la requête.** La cohérence *entre* sources corrélées d'une même représentation segmentée n'est pas encore garantie (§17).
 
 17. **La réponse HTTP ne doit pas reconstruire dynamiquement la page.**
 

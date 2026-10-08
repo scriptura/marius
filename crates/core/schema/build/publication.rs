@@ -1256,7 +1256,6 @@ mod tests {
             "marius_render",
             "axum",
             "hyper",
-            "EmissionPlan",
             "IoSlice",
         ] {
             assert!(

@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use marius_fragment_forge::{
     AssetLookup, FlatPageToken, ImportRef, NamedBlockRange, PageArena, PageImportError,
-    PageLinkError, PageSourceToken, ParsedPageTemplate, SchemaIndex, TemplateId,
+    PageLinkError, PageSourceToken, ParsedPageTemplate, SchemaIndex, TemplateId, TemplateMetrics,
     VarlenField, collect_blocks, collect_static_refs, collect_top_level_imports,
     eliminate_recordless_conditions, extract_static_marker_facts, generate_aot_snippet,
     generate_segmented_snippet, hoist_and_dedupe_scripts, link_chain, lower, parse_page_tokens,
@@ -772,30 +772,27 @@ pub(crate) fn resolve_page_template<'src>(
                     },
                 )?;
 
-            let head_metrics = resolve_and_measure(
+            // Capacité AOT de chaque moitié, mesurée avec le MÊME modèle que le
+            // rendu monolithique (`resolve_and_measure` ci-dessus) : voir
+            // `measure_volatile_halves`. La moitié head porte le
+            // `ModulesPlaceholder` et reçoit `modules_lowering.snippet` plus
+            // bas ; elle doit donc être mesurée avec sa contribution exacte.
+            let (head_metrics, tail_metrics) = measure_volatile_halves(
                 &mut head_tokens,
-                &schema_index,
-                &get_file_size,
-                resolve_asset_len,
-                0,
-            )
-            .map_err(|errors| {
-                println!(
-                    "cargo:error=DB-Forge [{schema}.{table}] : résolution de la partie AOT \
-                     avant la région volatile «{marker}» échouée : {errors:?}"
-                );
-            })?;
-            let tail_metrics = resolve_and_measure(
                 &mut tail_tokens,
                 &schema_index,
                 &get_file_size,
                 resolve_asset_len,
-                0,
+                modules_lowering.static_bytes,
             )
-            .map_err(|errors| {
+            .map_err(|(half, errors)| {
+                let position = match half {
+                    VolatileHalf::Head => "avant",
+                    VolatileHalf::Tail => "après",
+                };
                 println!(
                     "cargo:error=DB-Forge [{schema}.{table}] : résolution de la partie AOT \
-                     après la région volatile «{marker}» échouée : {errors:?}"
+                     {position} la région volatile «{marker}» échouée : {errors}"
                 );
             })?;
 
@@ -839,6 +836,62 @@ pub(crate) fn resolve_page_template<'src>(
 }
 
 // =============================================================================
+// Mesure de capacité des deux moitiés d'une page scindée (région volatile)
+// =============================================================================
+
+/// Moitié d'une page scindée par une région volatile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VolatileHalf {
+    Head,
+    Tail,
+}
+
+/// Mesure les deux moitiés (`render_head` / `render_tail`) avec le modèle de
+/// capacité du rendu monolithique.
+///
+/// `modules_static_bytes` est le pire cas d'octets du bloc modules
+/// (`modules_lowering.static_bytes`) : `resolve_and_measure` l'ajoute une fois
+/// par `ModulesPlaceholder` présent dans le flux mesuré. Le placeholder
+/// (`MARIUS_MODULES`, dans le `<head>` du Root) se trouve dans la moitié head
+/// et c'est cette moitié, uniquement, qui reçoit `modules_lowering.snippet` :
+///
+/// ```text
+/// render()      → flux complet + modules
+/// render_head() → head          + modules
+/// render_tail() → tail, jamais de modules
+/// ```
+///
+/// Aucune marge : la capacité de la moitié head couvre exactement les octets
+/// que son rendu peut émettre. Les erreurs de résolution sont rendues sous
+/// forme de texte pour ne pas lier ce helper au type d'erreur du resolver.
+fn measure_volatile_halves<'src>(
+    head_tokens: &mut [FlatPageToken<'src>],
+    tail_tokens: &mut [FlatPageToken<'src>],
+    schema_index: &SchemaIndex<'_>,
+    get_file_size: &impl Fn(&str) -> Result<usize, String>,
+    resolve_asset_len: impl Fn(&str) -> AssetLookup + Copy,
+    modules_static_bytes: usize,
+) -> Result<(TemplateMetrics, TemplateMetrics), (VolatileHalf, String)> {
+    let head_metrics = resolve_and_measure(
+        head_tokens,
+        schema_index,
+        get_file_size,
+        resolve_asset_len,
+        modules_static_bytes,
+    )
+    .map_err(|errors| (VolatileHalf::Head, format!("{errors:?}")))?;
+    let tail_metrics = resolve_and_measure(
+        tail_tokens,
+        schema_index,
+        get_file_size,
+        resolve_asset_len,
+        0,
+    )
+    .map_err(|errors| (VolatileHalf::Tail, format!("{errors:?}")))?;
+    Ok((head_metrics, tail_metrics))
+}
+
+// =============================================================================
 // Test de non-régression — ModulesPlaceholder / split volatile (V3b)
 // =============================================================================
 //
@@ -852,7 +905,10 @@ pub(crate) fn resolve_page_template<'src>(
 // Mode Page.
 #[cfg(test)]
 mod tests_modules_placeholder_split_regression {
-    use super::{SchemaIndex, generate_aot_snippet, split_static_at_region};
+    use super::{
+        AssetLookup, SchemaIndex, generate_aot_snippet, measure_volatile_halves,
+        resolve_and_measure, split_static_at_region,
+    };
     use marius_fragment_forge::FlatPageToken;
 
     const BEGIN: &str = "<!-- MARIUS_VOLATILE_BEGIN nav_profile -->";
@@ -931,6 +987,103 @@ mod tests_modules_placeholder_split_regression {
             JS_DEPS_SNIPPET,
         );
         assert!(monolithic_body.contains(JS_DEPS_SNIPPET));
+    }
+
+    /// Capacité AOT (no-realloc) — cas `js_deps` actif.
+    ///
+    /// `render_head()` émet `modules_lowering.snippet` : la capacité de la
+    /// moitié head (`HEAD_TOTAL_CAP = total_static_bytes + total_dynamic_bytes`)
+    /// doit donc couvrir EXACTEMENT les octets du pire cas du snippet, comme
+    /// le fait le rendu monolithique — sans marge. `render_tail()` n'émet
+    /// jamais de modules : aucune contribution.
+    ///
+    /// `MODULES_WORST_CASE_BYTES` modélise `modules_lowering.static_bytes`
+    /// (pire cas : tous les `push_str` du snippet émis simultanément) pour le
+    /// snippet de test `JS_DEPS_SNIPPET`, dont l'unique `push_str` émet le
+    /// littéral ci-dessous.
+    const MODULES_PUSHED: &str = "<script src=\"/a.js\"></script>";
+    const MODULES_WORST_CASE_BYTES: usize = MODULES_PUSHED.len();
+
+    #[test]
+    fn head_capacity_covers_the_modules_snippet_worst_case_tail_has_none() {
+        const BEFORE: &str = "<head>";
+        const BETWEEN: &str = "</head><body>";
+        const AFTER: &str = "</body>";
+        const REGION_CONTENT: &str = "x";
+
+        let page = format!("{BETWEEN}{BEGIN}{REGION_CONTENT}{END}{AFTER}");
+        let tokens = vec![
+            FlatPageToken::Static(BEFORE),
+            FlatPageToken::ModulesPlaceholder,
+            FlatPageToken::Static(page.as_str()),
+        ];
+
+        let no_file = |_: &str| -> Result<usize, String> {
+            Err("aucun {% static %} dans ce flux".to_string())
+        };
+        let no_asset = |_: &str| -> AssetLookup { unreachable!("aucun {% asset %} dans ce flux") };
+
+        // Rendu monolithique — même appel que `resolve_page_template`.
+        let mut monolithic = tokens.clone();
+        let monolithic_metrics = resolve_and_measure(
+            &mut monolithic,
+            &schema(),
+            &no_file,
+            no_asset,
+            MODULES_WORST_CASE_BYTES,
+        )
+        .expect("mesure monolithique");
+
+        // Scission puis mesure des deux moitiés — chemin réel de production.
+        let (mut head_tokens, mut tail_tokens) =
+            split_static_at_region(tokens, BEGIN, END).expect("split doit réussir");
+        let (head_metrics, tail_metrics) = measure_volatile_halves(
+            &mut head_tokens,
+            &mut tail_tokens,
+            &schema(),
+            &no_file,
+            no_asset,
+            MODULES_WORST_CASE_BYTES,
+        )
+        .expect("mesure des moitiés");
+
+        // Octets maximaux réellement émis par chaque moitié (littéraux
+        // statiques + pire cas du snippet pour head).
+        let head_max_emitted = BEFORE.len() + MODULES_WORST_CASE_BYTES + BETWEEN.len();
+        let tail_max_emitted = AFTER.len();
+
+        let head_cap = head_metrics.total_static_bytes + head_metrics.total_dynamic_bytes;
+        let tail_cap = tail_metrics.total_static_bytes + tail_metrics.total_dynamic_bytes;
+
+        assert!(
+            head_cap >= head_max_emitted,
+            "HEAD_TOTAL_CAP ({head_cap}) < octets maximaux de render_head() ({head_max_emitted})"
+        );
+        assert_eq!(head_cap, head_max_emitted, "aucune marge : capacité exacte");
+        assert_eq!(tail_cap, tail_max_emitted, "render_tail() n'émet aucun module");
+
+        // Conservation : head + tail + marqueurs + contenu de région retiré
+        // = rendu monolithique (le bloc modules n'est ni perdu ni dupliqué
+        // dans la capacité).
+        assert_eq!(
+            head_metrics.total_static_bytes
+                + tail_metrics.total_static_bytes
+                + BEGIN.len()
+                + REGION_CONTENT.len()
+                + END.len(),
+            monolithic_metrics.total_static_bytes
+        );
+
+        // Garde du défaut corrigé : mesurer la moitié head sans le pire cas
+        // du snippet la sous-dimensionnerait de exactement ces octets.
+        let mut head_again = head_tokens.clone();
+        let without_modules =
+            resolve_and_measure(&mut head_again, &schema(), &no_file, no_asset, 0)
+                .expect("mesure sans modules");
+        assert_eq!(
+            head_metrics.total_static_bytes - without_modules.total_static_bytes,
+            MODULES_WORST_CASE_BYTES
+        );
     }
 }
 
