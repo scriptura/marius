@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-10-05 20:33:01
+**Généré le:** 2026-10-08 12:09:24
 
 ## Racine du Workspace
 
@@ -237,7 +237,7 @@
 ├── architecture
 │   ├── runtime-data-flow
 │   │   ├── CONTRAT-implementation-phase1.md
-│   │   ├── DESIGN-runtime-segment-pipeline (post-ADR-011).md
+│   │   ├── DESIGN-runtime-segment-pipeline.md
 │   │   ├── DESIGN-store-registry.md
 │   │   ├── DFS-phase1-reactivite-cow.md
 │   │   ├── PHASE1-CLOSURE.md
