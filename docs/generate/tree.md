@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-10-08 12:09:24
+**Généré le:** 2026-10-16 15:21:45
 
 ## Racine du Workspace
 
@@ -215,7 +215,7 @@
 ## Documentation du projet
 
 ```text
-/docs
+/marius/docs
 ├── adr-postgres
 │   ├── ADR-001-to-ADR-030.md
 │   ├── ADR-031-Nix-vs-Docker.md

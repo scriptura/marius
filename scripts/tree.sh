@@ -35,7 +35,7 @@ cat >> "$OUTPUT" << EOF
 EOF
 
 if [ -d "$DOCS_DIR" ]; then
-    tree "$DOCS_DIR" --dirsfirst | sed "1s|.*|/docs|" >> "$OUTPUT"
+    tree "$DOCS_DIR" --dirsfirst | sed "1s|.*|/$PROJECT_NAME/docs|" >> "$OUTPUT"
 else
     echo "⚠️ Dossier $DOCS_DIR introuvable." >> "$OUTPUT"
 fi
