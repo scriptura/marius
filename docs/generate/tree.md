@@ -1,12 +1,28 @@
 # Structure du Projet
 
-**Généré le:** 2026-10-16 15:21:45
+**Généré le:** 2026-10-30 10:00:11
 
 ## Racine du Workspace
 
 ```text
 /marius
 ├── crates
+│   ├── assets
+│   │   ├── src
+│   │   │   ├── config.rs
+│   │   │   ├── js_minify.rs
+│   │   │   ├── libraries.rs
+│   │   │   ├── main.rs
+│   │   │   ├── manifest.rs
+│   │   │   ├── resolve.rs
+│   │   │   ├── scripts.rs
+│   │   │   ├── service_worker.rs
+│   │   │   ├── sprites.rs
+│   │   │   ├── styles.rs
+│   │   │   ├── verbatim.rs
+│   │   │   └── webmanifest.rs
+│   │   ├── Cargo.toml
+│   │   └── README.md
 │   ├── core
 │   │   ├── collector
 │   │   │   ├── src
@@ -181,7 +197,6 @@
 │   ├── dml
 │   │   ├── forge_test_dml.pgsql
 │   │   └── master_schema_dml.pgsql
-│   ├── migrations
 │   ├── tests
 │   │   ├── 01_schema_and_security.sql
 │   │   ├── 02_identity_logic.sql
@@ -199,7 +214,8 @@
 │   │   ├── master-health-audit.md
 │   │   └── meta_tooling_guide.md
 │   ├── README.md
-│   └── master_init.sql
+│   ├── master_init.sql
+│   └── migrations
 ├── scripts
 │   ├── certify_frugality.sh
 │   ├── profile_frugality.sh
@@ -209,7 +225,7 @@
 ├── README.md
 └── biome.jsonc
 
-54 directories, 149 files
+55 directories, 164 files
 ```
 
 ## Documentation du projet

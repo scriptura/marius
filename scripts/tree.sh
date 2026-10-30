@@ -23,8 +23,15 @@ cat > "$OUTPUT" << EOF
 \`\`\`text
 EOF
 
-tree "$PROJECT_ROOT" -I "docs|doc|target|build|artifacts|assets|logs" --dirsfirst \
-    | sed "1s|.*|/$PROJECT_NAME|" >> "$OUTPUT"
+(
+    cd "$PROJECT_ROOT"
+    {
+        find . -maxdepth 1 -type f -print
+        find crates \( -name target -o -name build -o -name artifacts \) -prune -o -print 2>/dev/null
+        find db \( -name target -o -name build -o -name doc \) -prune -o -print 2>/dev/null
+        find scripts -print 2>/dev/null
+    } | tree --fromfile --dirsfirst
+) | sed "1s|.*|/$PROJECT_NAME|" >> "$OUTPUT"
 
 cat >> "$OUTPUT" << EOF
 \`\`\`
