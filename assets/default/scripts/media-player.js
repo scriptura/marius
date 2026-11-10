@@ -105,6 +105,21 @@ _TEMPLATE.innerHTML = `
 const MEDIA_SELECTOR = ".media";
 const PLAYBACK_RATES = Object.freeze([0.5, 0.25, 0.5, 1, 2, 4, 2, 1]);
 
+// Index de la cadence nominale (x1) : point de départ du cycle SLOW_MOTION.
+// Le premier clic donne ainsi x0.5 (et non x0.25).
+const PLAYBACK_RATE_IDX_INIT = PLAYBACK_RATES.lastIndexOf(1);
+
+// Balayage des entités dont le média a quitté le document : toutes les N frames.
+const DETACHED_SWEEP_INTERVAL = 120;
+
+// Borne de sécurité du vidage de la file : une commande ne doit pas pouvoir
+// en engendrer indéfiniment d'autres. Le reliquat est traité au tick suivant.
+const MAX_COMMANDS_PER_DRAIN = 1024;
+
+// HTMLMediaError.code : chargement interrompu (changement de source, abandon
+// utilisateur). Ce n'est pas une panne du média.
+const MEDIA_ERR_ABORTED = 1;
+
 // ── 2. Stores — Data Layout plat indexé par entityId (integer) ────────────
 
 export const timeStore = {};
@@ -128,6 +143,19 @@ const _commandBuffer = [];
  */
 export const dispatch = (entityId, type, payload) =>
 	_commandBuffer.push({ entityId, type, payload });
+
+/**
+ * Commande issue d'un événement (geste utilisateur, événement média) : poussée
+ * puis traitée immédiatement, sans attendre requestAnimationFrame.
+ * - rAF est suspendu onglet masqué / en PiP : la continuité fonctionnelle
+ *   (enchaînement de playlist) ne doit pas en dépendre ;
+ * - `play()` reste dans la tâche du geste utilisateur (politique d'autoplay).
+ * rAF est réservé à la présentation (TimeSystem, LogicSystem, UIRenderSystem).
+ */
+const _signal = (entityId, type, payload) => {
+	dispatch(entityId, type, payload);
+	CommandSystem.run();
+};
 
 // ── 4. Utilitaires purs ────────────────────────────────────────────────────
 
@@ -155,13 +183,105 @@ const _closeOtherMenus = (currentId) => {
 	}
 };
 
+// ── 4b. Gestion des erreurs ────────────────────────────────────────────────
+//  Une exception ne doit jamais interrompre la boucle ni se rejouer à chaque frame.
+//  Chaque message distinct n'est journalisé qu'une fois (borne : 50 messages).
+
+const _reported = new Set();
+
+const _reportError = (label, err) => {
+	const key = `${label}|${err?.message ?? err}`;
+	if (_reported.has(key) || _reported.size >= 50) return;
+	_reported.add(key);
+	console.error(`[media-player] ${label}`, err);
+};
+
+/** Exécute un système ; une exception est journalisée sans interrompre la frame. */
+const _guard = (label, fn) => {
+	try {
+		fn();
+	} catch (err) {
+		_reportError(label, err);
+	}
+};
+
+/**
+ * Absorbe le rejet d'une Promise d'API média (play, requestFullscreen, PiP…).
+ * AbortError (source changée / pause concurrente) et NotAllowedError (politique
+ * d'autoplay) sont des situations normales : aucune journalisation.
+ */
+const _settle = (p, label) => {
+	if (p && typeof p.catch === "function") {
+		p.catch((err) => {
+			if (err?.name === "AbortError" || err?.name === "NotAllowedError") return;
+			_reportError(label, err);
+		});
+	}
+};
+
+/**
+ * Démarre la lecture d'une entité. Un refus de la politique d'autoplay
+ * (NotAllowedError) est représenté dans l'état (`awaitingActivation`) : le
+ * player n'affiche jamais « lecture » lorsque le navigateur l'a refusée.
+ * NotSupportedError = aucune source exploitable : panne du média.
+ */
+const _play = (id, label) => {
+	const dom = domStore[id];
+	if (!dom) return;
+	const p = dom.media.play();
+	if (!p || typeof p.catch !== "function") return;
+	p.catch((err) => {
+		const ss = statusStore[id];
+		if (!ss) return; // entité disposée entre-temps
+		if (err?.name === "NotAllowedError") {
+			ss.awaitingActivation = true;
+			computedStore[id].dirty = true;
+		} else if (err?.name === "NotSupportedError") {
+			_signal(id, "_ERROR");
+		} else if (err?.name !== "AbortError") {
+			_reportError(label, err);
+		}
+	});
+};
+
+// Pistes proposées par SUBTITLES : sous-titres et légendes uniquement
+// (metadata, chapters, descriptions exclus). Une piste dont le chargement a
+// échoué (`deadTracks`) n'est plus sélectionnable ; seule cette piste est
+// concernée, jamais le média.
+const _isSubtitleTrack = (t) =>
+	!!t && (t.kind === "subtitles" || t.kind === "captions");
+
+const _isUsableTrack = (cfg, t) =>
+	_isSubtitleTrack(t) && !cfg.deadTracks.has(t);
+
+const _countUsableTracks = (cfg) => {
+	let n = 0;
+	for (let i = 0; i < cfg.tracks.length; i++) {
+		if (_isUsableTrack(cfg, cfg.tracks[i])) n++;
+	}
+	return n;
+};
+
+// Élément passé à requestFullscreen(). Point de bascule unique : le passage au
+// conteneur complet du player (contrôles inclus) ne modifiera que cette ligne.
+const _fullscreenTarget = (dom) => dom.media;
+
+/** Retourne un id de média libre dans le document (jamais en collision avec un id existant). */
+const _uniqueMediaId = (entityId) => {
+	const base = `media-${entityId}`;
+	let id = base;
+	for (let n = 2; document.getElementById(id); n++) id = `${base}-${n}`;
+	return id;
+};
+
 // ── 5. CommandSystem ───────────────────────────────────────────────────────
 //  Zéro DOM. Écrit uniquement dans configStore, les APIs natives et lève dirty.
 
 const _handlers = {
 	TOGGLE_PLAY(id) {
 		const m = domStore[id].media;
-		m.paused ? m.play() : m.pause();
+		if (m.paused) _play(id, "play");
+		else m.pause();
 		_closeOtherMenus(id);
 		const nextId = configStore[id].nextEntityId;
 		if (nextId !== null) {
@@ -172,8 +292,13 @@ const _handlers = {
 
 	SEEK(id, payload) {
 		const m = domStore[id].media;
-		if (!m.duration) return;
-		m.currentTime = (payload.value / payload.max) * m.duration;
+		const dur = m.duration;
+		// Flux (Infinity), média non chargé (NaN) ou durée nulle : rien à positionner.
+		if (!Number.isFinite(dur) || dur <= 0) return;
+		const value = parseFloat(payload?.value);
+		const max = parseFloat(payload?.max);
+		if (!Number.isFinite(value) || !(max > 0)) return;
+		m.currentTime = Math.min(Math.max(value / max, 0), 1) * dur;
 		computedStore[id].dirty = true;
 	},
 
@@ -224,7 +349,9 @@ const _handlers = {
 		if (cfg.subtitleIdx >= 0 && tracks[cfg.subtitleIdx])
 			tracks[cfg.subtitleIdx].mode = "disabled";
 
-		const next = cfg.subtitleIdx + 1;
+		// Prochaine piste utilisable ; au-delà de la dernière, retour à « désactivé ».
+		let next = cfg.subtitleIdx + 1;
+		while (next < tracks.length && !_isUsableTrack(cfg, tracks[next])) next++;
 		if (next < tracks.length) {
 			tracks[next].mode = "showing";
 			cfg.subtitleIdx = next;
@@ -248,14 +375,26 @@ const _handlers = {
 	},
 
 	FULLSCREEN(id) {
-		domStore[id].media.requestFullscreen?.();
+		const dom = domStore[id];
+		const m = dom.media;
+		const target = _fullscreenTarget(dom);
+		if (document.fullscreenElement === target) {
+			_settle(document.exitFullscreen?.(), "fullscreen-exit");
+		} else if (m.webkitDisplayingFullscreen) {
+			m.webkitExitFullscreen?.();
+		} else if (typeof target.requestFullscreen === "function") {
+			_settle(target.requestFullscreen(), "fullscreen");
+		} else if (typeof m.webkitEnterFullscreen === "function") {
+			// Safari iPhone : plein écran vidéo natif, sans les contrôles du player.
+			m.webkitEnterFullscreen();
+		}
 	},
 
 	PIP(id) {
 		if (document.pictureInPictureElement) {
-			document.exitPictureInPicture();
+			_settle(document.exitPictureInPicture?.(), "pip-exit");
 		} else if (document.pictureInPictureEnabled) {
-			domStore[id].media.requestPictureInPicture().catch(() => {});
+			_settle(domStore[id].media.requestPictureInPicture?.(), "pip-enter");
 		}
 	},
 
@@ -278,18 +417,58 @@ const _handlers = {
 
 	_ERROR(id) {
 		statusStore[id].error = true;
+		statusStore[id].waiting = false;
+		computedStore[id].dirty = true;
+	},
+
+	// Échec de chargement d'UNE piste : cette piste devient non sélectionnable,
+	// le média et les autres pistes ne sont pas affectés.
+	_TRACK_ERROR(id, track) {
+		const cfg = configStore[id];
+		if (!track || cfg.deadTracks.has(track)) return;
+		cfg.deadTracks.add(track);
+		if (cfg.tracks[cfg.subtitleIdx] === track) {
+			track.mode = "disabled";
+			cfg.subtitleIdx = -1;
+		}
+		cfg.usableTracks = _countUsableTracks(cfg);
 		computedStore[id].dirty = true;
 	},
 };
 
+// Drapeau de module (et non `this`) : run() est appelée sans receveur par _guard.
+let _draining = false;
+
 const CommandSystem = {
 	run() {
-		const len = _commandBuffer.length;
-		for (let i = 0; i < len; i++) {
-			const { entityId, type, payload } = _commandBuffer[i];
-			_handlers[type]?.(entityId, payload);
+		// Réentrance : une commande émise pendant le vidage (événement déclenché
+		// de façon synchrone par un handler) est traitée par la boucle en cours.
+		if (_draining) return;
+		_draining = true;
+		let i = 0;
+		try {
+			while (i < _commandBuffer.length && i < MAX_COMMANDS_PER_DRAIN) {
+				const { entityId, type, payload } = _commandBuffer[i++];
+				// Entité disposée entre le dispatch et l'exécution : commande périmée.
+				if (!domStore[entityId]) continue;
+				// hasOwn : un `data-action` tel que "__proto__" ou "constructor" ne doit rien résoudre.
+				if (!Object.hasOwn(_handlers, type)) continue;
+				// Une commande fautive est journalisée puis abandonnée (jamais rejouée).
+				try {
+					_handlers[type](entityId, payload);
+				} catch (err) {
+					_reportError(`command ${type}`, err);
+				}
+			}
+			if (i >= MAX_COMMANDS_PER_DRAIN && i < _commandBuffer.length)
+				_reportError(
+					"CommandSystem",
+					new Error("file de commandes saturée : reliquat reporté au tick suivant"),
+				);
+		} finally {
+			_commandBuffer.splice(0, i);
+			_draining = false;
 		}
-		_commandBuffer.splice(0, len);
 	},
 };
 
@@ -299,35 +478,41 @@ const TimeSystem = {
 	run() {
 		for (const id in domStore) {
 			const eid = +id;
-			const m = domStore[eid].media;
-			const ts = timeStore[eid];
-			const ss = statusStore[eid];
+			try {
+				const m = domStore[eid].media;
+				const ts = timeStore[eid];
+				const ss = statusStore[eid];
 
-			const prevTime = ts.currentTime;
-			const prevDuration = ts.duration;
-			const prevBuffered = ts.bufferedEnd;
-			const prevVolume = ss.volume;
-			const prevRate = ss.playbackRate;
+				const prevTime = ts.currentTime;
+				const prevDuration = ts.duration;
+				const prevBuffered = ts.bufferedEnd;
+				const prevVolume = ss.volume;
+				const prevRate = ss.playbackRate;
 
-			ts.currentTime = m.currentTime;
-			ts.duration = m.duration;
-			ts.bufferedEnd =
-				m.buffered.length > 0 ? m.buffered.end(m.buffered.length - 1) : 0;
+				ts.currentTime = m.currentTime;
+				ts.duration = m.duration;
+				ts.bufferedEnd =
+					m.buffered.length > 0 ? m.buffered.end(m.buffered.length - 1) : 0;
 
-			ss.paused = m.paused;
-			ss.muted = m.muted;
-			ss.volume = m.volume;
-			ss.loop = m.loop;
-			ss.playbackRate = m.playbackRate;
+				ss.paused = m.paused;
+				ss.muted = m.muted;
+				ss.volume = m.volume;
+				ss.loop = m.loop;
+				ss.playbackRate = m.playbackRate;
 
-			if (
-				ts.currentTime !== prevTime ||
-				ts.duration !== prevDuration ||
-				ts.bufferedEnd !== prevBuffered ||
-				ss.volume !== prevVolume ||
-				ss.playbackRate !== prevRate
-			) {
-				computedStore[eid].dirty = true;
+				// Object.is : NaN === NaN (durée inconnue avant chargement ou en erreur),
+				// là où `!==` lèverait `dirty` à chaque frame.
+				if (
+					!Object.is(ts.currentTime, prevTime) ||
+					!Object.is(ts.duration, prevDuration) ||
+					!Object.is(ts.bufferedEnd, prevBuffered) ||
+					!Object.is(ss.volume, prevVolume) ||
+					!Object.is(ss.playbackRate, prevRate)
+				) {
+					computedStore[eid].dirty = true;
+				}
+			} catch (err) {
+				_reportError("TimeSystem", err);
 			}
 		}
 	},
@@ -339,33 +524,41 @@ const LogicSystem = {
 	run() {
 		for (const id in timeStore) {
 			const eid = +id;
-			const cs = computedStore[eid];
-			if (!cs.dirty) continue;
+			try {
+				const cs = computedStore[eid];
+				if (!cs.dirty) continue;
 
-			const ts = timeStore[eid];
-			const ss = statusStore[eid];
-			const cfg = configStore[eid];
-			const dur = ts.duration;
+				const ts = timeStore[eid];
+				const ss = statusStore[eid];
+				const cfg = configStore[eid];
+				const dur = ts.duration;
 
-			cs.ratio = dur > 0 ? Math.floor((ts.currentTime / dur) * 1000) / 10 : 0;
-			cs.bufferRatio = dur > 0 ? Math.floor((ts.bufferedEnd / dur) * 100) : 0;
-			cs.timeStr = _toTime(ts.currentTime);
-			cs.durationStr = _toTime(dur);
-			cs.isPlaying = !ss.paused;
-			cs.isMuted = ss.muted || ss.volume === 0;
-			cs.isStopped = ss.paused && ts.currentTime === 0;
+				cs.ratio = dur > 0 ? Math.floor((ts.currentTime / dur) * 1000) / 10 : 0;
+				cs.bufferRatio = dur > 0 ? Math.floor((ts.bufferedEnd / dur) * 100) : 0;
+				cs.timeStr = _toTime(ts.currentTime);
+				cs.durationStr = _toTime(dur);
+				cs.isPlaying = !ss.paused;
+				cs.isMuted = ss.muted || ss.volume === 0;
+				cs.isStopped = ss.paused && ts.currentTime === 0;
 
-			// Extraction des états discrets nécessitant une mise à jour UI
-			if (cfg.subtitleIdx >= 0 && cfg.tracks[cfg.subtitleIdx]) {
-				cs.subtitleStr = `cc: ${cfg.tracks[cfg.subtitleIdx].language}`;
-				cs.hasSubtitles = true;
-			} else {
-				cs.subtitleStr = "";
-				cs.hasSubtitles = false;
+				// Extraction des états discrets nécessitant une mise à jour UI
+				if (cfg.subtitleIdx >= 0 && cfg.tracks[cfg.subtitleIdx]) {
+					cs.subtitleStr = `cc: ${cfg.tracks[cfg.subtitleIdx].language}`;
+					cs.hasSubtitles = true;
+				} else {
+					cs.subtitleStr = "";
+					cs.hasSubtitles = false;
+				}
+
+				cs.isNextReading = cfg.mediaRelationship?.dataset.nextReading === "true";
+				cs.isPip = document.pictureInPictureElement === domStore[eid].media;
+				cs.hasUsableTracks = cfg.usableTracks > 0;
+				cs.isFullscreen =
+					document.fullscreenElement === _fullscreenTarget(domStore[eid]) ||
+					domStore[eid].media.webkitDisplayingFullscreen === true;
+			} catch (err) {
+				_reportError("LogicSystem", err);
 			}
-
-			cs.isNextReading = cfg.mediaRelationship?.dataset.nextReading === "true";
-			cs.isPip = document.pictureInPictureElement === domStore[eid].media;
 		}
 	},
 };
@@ -381,94 +574,108 @@ const UIRenderSystem = {
 			const cs = computedStore[eid];
 			if (!cs.intersecting || !cs.dirty) continue;
 
-			const dom = domStore[eid];
-			const ss = statusStore[eid];
-			const cfg = configStore[eid];
+			try {
+				const dom = domStore[eid];
+				const ss = statusStore[eid];
+				const cfg = configStore[eid];
 
-			// ── Mutations topologiques uniques (Structural Changes) ──
+				// ── Mutations topologiques uniques (Structural Changes) ──
 
-			if (cfg.isStream && dom.progressBar) {
-				const timeEl = dom.player.querySelector(".media-time");
-				if (timeEl) {
-					timeEl.textContent = "Lecture en continu";
-					timeEl.style.marginRight = "auto";
-				}
-				dom.progressBar.remove();
-				dom.progressBar = null;
-				dom.menuButton?.remove();
-				dom.menuButton = null;
-				dom.extendMenu?.remove();
-				dom.extendMenu = null;
-			}
-
-			if (ss.error && !dom.player.hasAttribute("inert")) {
-				dom.player.setAttribute("inert", "");
-
-				// Remplacement du .forEach par un parcours indexé O(N) direct sans allocation.
-				const controls = dom.player.querySelectorAll("button, input");
-				for (let i = 0; i < controls.length; i++) {
-					controls[i].disabled = true;
+				if (cfg.isStream && dom.progressBar) {
+					const timeEl = dom.player.querySelector(".media-time");
+					if (timeEl) {
+						timeEl.textContent = "Lecture en continu";
+						timeEl.style.marginRight = "auto";
+					}
+					dom.progressBar.remove();
+					dom.progressBar = null;
+					dom.menuButton?.remove();
+					dom.menuButton = null;
+					dom.extendMenu?.remove();
+					dom.extendMenu = null;
 				}
 
-				dom.media.classList.add("error");
-				dom.player.classList.add("error");
-				dom.player.querySelector(".media-time").textContent =
-					"Erreur de lecture";
-				if ("poster" in dom.media) dom.media.poster = "";
+				// Plus aucune piste utilisable : le bouton SUBTITLES disparaît, le player continue.
+				if (!cs.hasUsableTracks && dom.subtitlesButton) {
+					dom.subtitlesButton.remove();
+					dom.subtitlesButton = null;
+				}
+
+				if (ss.error && !dom.player.hasAttribute("inert")) {
+					dom.player.setAttribute("inert", "");
+
+					// Remplacement du .forEach par un parcours indexé O(N) direct sans allocation.
+					const controls = dom.player.querySelectorAll("button, input");
+					for (let i = 0; i < controls.length; i++) {
+						controls[i].disabled = true;
+					}
+
+					dom.player.classList.remove("waiting");
+					dom.media.classList.add("error");
+					dom.player.classList.add("error");
+					dom.player.querySelector(".media-time").textContent =
+						"Erreur de lecture";
+					if ("poster" in dom.media) dom.media.poster = "";
+				}
+
+				// ── Mises à jour cycliques ──
+
+				if (dom.progressBar) {
+					dom.progressBar.value = cs.ratio;
+					dom.progressBar.style.setProperty("--position", `${cs.ratio}%`);
+					dom.progressBar.style.setProperty(
+						"--position-buffer",
+						`${cs.bufferRatio}%`,
+					);
+				}
+
+				if (dom.volumeBar) {
+					dom.volumeBar.style.setProperty("--position", `${ss.volume * 100}%`);
+				}
+
+				if (
+					dom.playbackRateOutput &&
+					dom.playbackRateOutput.textContent !== `x${ss.playbackRate}`
+				) {
+					dom.playbackRateOutput.textContent = `x${ss.playbackRate}`;
+					_cls(dom.playbackRateOutput, "active", ss.playbackRate !== 1);
+					_cls(dom.slowMotionButton, "active", ss.playbackRate !== 1);
+				}
+
+				if (
+					dom.subtitleLangageOutput &&
+					dom.subtitleLangageOutput.value !== cs.subtitleStr
+				) {
+					dom.subtitleLangageOutput.value = cs.subtitleStr;
+					_cls(dom.subtitlesButton, "active", cs.hasSubtitles);
+					_cls(dom.subtitleLangageOutput, "active", cs.hasSubtitles);
+				}
+
+				dom.currentTimeOutput.value = cs.timeStr;
+
+				if (dom.durationOutput.value !== cs.durationStr) {
+					dom.durationOutput.value = cs.durationStr;
+				}
+
+				_cls(dom.playPauseButton, "active", cs.isPlaying);
+				_cls(dom.muteButton, "active", cs.isMuted);
+				_cls(dom.nextReadingButton, "active", cs.isNextReading);
+				_cls(dom.pipButton, "active", cs.isPip);
+				_cls(dom.fullscreenButton, "active", cs.isFullscreen);
+				_cls(dom.player, "awaiting-activation", ss.awaitingActivation);
+
+				if (dom.stopButton) {
+					_cls(dom.stopButton, "active", cs.isStopped);
+					dom.stopButton.disabled = cs.isStopped;
+				}
+
+				if (dom.replayButton) _cls(dom.replayButton, "active", ss.loop);
+			} catch (err) {
+				_reportError("UIRenderSystem", err);
+			} finally {
+				// Même en cas d'échec : évite de relancer (et relever) la même exception à chaque frame.
+				cs.dirty = false;
 			}
-
-			// ── Mises à jour cycliques ──
-
-			if (dom.progressBar) {
-				dom.progressBar.value = cs.ratio;
-				dom.progressBar.style.setProperty("--position", `${cs.ratio}%`);
-				dom.progressBar.style.setProperty(
-					"--position-buffer",
-					`${cs.bufferRatio}%`,
-				);
-			}
-
-			if (dom.volumeBar) {
-				dom.volumeBar.style.setProperty("--position", `${ss.volume * 100}%`);
-			}
-
-			if (
-				dom.playbackRateOutput &&
-				dom.playbackRateOutput.textContent !== `x${ss.playbackRate}`
-			) {
-				dom.playbackRateOutput.textContent = `x${ss.playbackRate}`;
-				_cls(dom.playbackRateOutput, "active", ss.playbackRate !== 1);
-				_cls(dom.slowMotionButton, "active", ss.playbackRate !== 1);
-			}
-
-			if (
-				dom.subtitleLangageOutput &&
-				dom.subtitleLangageOutput.value !== cs.subtitleStr
-			) {
-				dom.subtitleLangageOutput.value = cs.subtitleStr;
-				_cls(dom.subtitlesButton, "active", cs.hasSubtitles);
-				_cls(dom.subtitleLangageOutput, "active", cs.hasSubtitles);
-			}
-
-			dom.currentTimeOutput.value = cs.timeStr;
-
-			if (dom.durationOutput.value !== cs.durationStr) {
-				dom.durationOutput.value = cs.durationStr;
-			}
-
-			_cls(dom.playPauseButton, "active", cs.isPlaying);
-			_cls(dom.muteButton, "active", cs.isMuted);
-			_cls(dom.nextReadingButton, "active", cs.isNextReading);
-			_cls(dom.pipButton, "active", cs.isPip);
-
-			if (dom.stopButton) {
-				_cls(dom.stopButton, "active", cs.isStopped);
-				dom.stopButton.disabled = cs.isStopped;
-			}
-
-			if (dom.replayButton) _cls(dom.replayButton, "active", ss.loop);
-
-			cs.dirty = false;
 		}
 	},
 };
@@ -478,16 +685,26 @@ const UIRenderSystem = {
 const MediaStackSystem = {
 	advance(id) {
 		const cfg = configStore[id];
-		if (!cfg.mediaRelationship) return;
+		if (!cfg?.mediaRelationship) return;
 		if (cfg.mediaRelationship.dataset.nextReading !== "true") return;
 
+		// Saute les candidats en erreur ou disposés (id périmé). Borné au nombre
+		// d'entités : une chaîne entièrement en erreur ne peut pas boucler.
 		let candidateId = cfg.nextEntityId;
-		while (candidateId !== null && statusStore[candidateId]?.error) {
+		let hops = 0;
+		const maxHops = Object.keys(domStore).length;
+		while (
+			candidateId !== null &&
+			hops++ < maxHops &&
+			(!domStore[candidateId] || statusStore[candidateId]?.error)
+		) {
 			candidateId = configStore[candidateId]?.nextEntityId ?? null;
 		}
-		if (candidateId === null || candidateId === id) return;
+		if (candidateId === null || candidateId === id || !domStore[candidateId])
+			return;
+		if (statusStore[candidateId]?.error) return;
 
-		domStore[candidateId].media.play();
+		_play(candidateId, "advance");
 
 		const nextNextId = configStore[candidateId]?.nextEntityId ?? null;
 		if (nextNextId !== null) {
@@ -543,25 +760,31 @@ const InputSystem = {
 		document.addEventListener(
 			"fullscreenchange",
 			() => {
-				const active = !!document.fullscreenElement;
-				for (const id in domStore)
-					_cls(domStore[+id].fullscreenButton, "active", active);
+				// `fullscreenchange` est global au document : l'état est calculé par
+				// entité (LogicSystem, comparaison à sa propre cible) et rendu par
+				// UIRenderSystem. Aucune écriture DOM ici (INV-1).
+				for (const id in computedStore) computedStore[id].dirty = true;
 			},
 			{ signal: sig },
 		);
 	},
 
 	_route(e) {
-		const el = e.target.closest("[data-action]");
+		const t = e.target;
+		// Cible sans `closest` (document, window, nœud texte) : hors périmètre.
+		if (typeof t?.closest !== "function") return;
+		// Un range émet `input` (en continu) puis `click` : seul `input` est routé
+		// pour les ranges, seul `click` pour le reste (un geste = une commande).
+		const isRange = t.type === "range";
+		if (isRange !== (e.type === "input")) return;
+		const el = t.closest("[data-action]");
 		if (!el) return;
 		const playerEl = el.closest("[data-entity-id]");
 		if (!playerEl) return;
-		dispatch(
+		_signal(
 			+playerEl.dataset.entityId,
 			el.dataset.action,
-			e.target.type === "range"
-				? { value: e.target.value, max: e.target.max }
-				: undefined,
+			isRange ? { value: t.value, max: t.max } : undefined,
 		);
 	},
 
@@ -576,13 +799,17 @@ const InputSystem = {
 const Engine = {
 	_rafId: null,
 	_running: false,
+	_frame: 0,
 
 	tick() {
-		CommandSystem.run();
-		TimeSystem.run();
-		LogicSystem.run();
-		UIRenderSystem.run();
+		// Ré-armement en premier : aucune exception ne doit pouvoir arrêter la boucle.
 		Engine._rafId = requestAnimationFrame(Engine.tick);
+		_guard("CommandSystem", CommandSystem.run);
+		_guard("TimeSystem", TimeSystem.run);
+		_guard("LogicSystem", LogicSystem.run);
+		_guard("UIRenderSystem", UIRenderSystem.run);
+		if (++Engine._frame % DETACHED_SWEEP_INTERVAL === 0)
+			_guard("DetachedSweep", disposeDetached);
 	},
 
 	start() {
@@ -598,212 +825,17 @@ const Engine = {
 };
 
 // ── 13. Initialisation d'une entité ────────────────────────────────────────
+//  Atomique (build-then-commit) : l'entité est construite hors stores et hors
+//  document, puis validée d'un bloc. Toute exception après le commit déclenche
+//  un rollback complet (stores, listeners, nœud player, observer).
 
-const _initEntity = (media, entityId) => {
-	const player = _TEMPLATE.content
-		.cloneNode(true)
-		.querySelector(".media-player");
-	player.dataset.entityId = entityId;
-	media.insertAdjacentElement("afterend", player);
-
-	const q = (sel) => player.querySelector(sel);
-	domStore[entityId] = {
-		media,
-		player,
-		playPauseButton: q(".media-play-pause"),
-		playbackRateOutput: q(".media-playback-rate"),
-		subtitleLangageOutput: q(".media-subtitle-langage"),
-		currentTimeOutput: q(".media-current-time"),
-		durationOutput: q(".media-duration"),
-		progressBar: q(".media-progress-bar"),
-		volumeBar: q(".media-volume-bar"),
-		muteButton: q(".media-mute"),
-		fullscreenButton: q(".media-fullscreen"),
-		menuButton: q(".media-menu"),
-		extendMenu: q(".media-extend-menu"),
-		nextReadingButton: q(".media-next-reading"),
-		subtitlesButton: q(".media-subtitles"),
-		pipButton: q(".media-picture-in-picture"),
-		slowMotionButton: q(".media-slow-motion"),
-		stopButton: q(".media-stop"),
-		replayButton: q(".media-replay"),
-	};
-
-	timeStore[entityId] = { currentTime: 0, duration: NaN, bufferedEnd: 0 };
-
-	statusStore[entityId] = {
-		paused: true,
-		muted: false,
-		volume: 0.5,
-		loop: false,
-		playbackRate: 1,
-		waiting: false,
-		error: false,
-	};
-
-	const mediaRelationship = media.closest(".media-relationship");
-	const ac = new AbortController();
-
-	configStore[entityId] = {
-		isAudio: media.tagName === "AUDIO",
-		isStream: false,
-		tracks: media.textTracks,
-		subtitleIdx: -1,
-		playbackRateIdx: 0,
-		mediaRelationship,
-		nextEntityId: null,
-		nextNextEntityId: null,
-		_ac: ac,
-	};
-
-	computedStore[entityId] = {
-		ratio: 0,
-		bufferRatio: 0,
-		timeStr: "0:00",
-		durationStr: "0:00",
-		subtitleStr: "",
-		hasSubtitles: false,
-		isPlaying: false,
-		isMuted: false,
-		isStopped: true,
-		isNextReading: false,
-		isPip: false,
-		dirty: true,
-		intersecting: true,
-	};
-
-	_mediaIndex.set(media, entityId);
-
-	const dom = domStore[entityId];
-	const isAudio = media.tagName === "AUDIO";
-
-	if (isAudio || !document.fullscreenEnabled) {
-		dom.fullscreenButton?.remove();
-		dom.fullscreenButton = null;
+const _release = (entityId, media, player, ac) => {
+	ac?.abort();
+	if (player) {
+		_observer.unobserve(player);
+		player.remove();
 	}
-	if (isAudio || !document.pictureInPictureEnabled) {
-		dom.pipButton?.remove();
-		dom.pipButton = null;
-	}
-	if (!media.textTracks[0]) {
-		dom.subtitlesButton?.remove();
-		dom.subtitlesButton = null;
-	}
-	if (!mediaRelationship) {
-		dom.nextReadingButton?.remove();
-		dom.nextReadingButton = null;
-	}
-
-	dom.progressBar.style.setProperty("--position", "0%");
-	dom.progressBar.style.setProperty("--position-buffer", "0%");
-	dom.volumeBar.style.setProperty("--position", "50%");
-
-	const sig = ac.signal;
-
-	const _setDuration = () => {
-		// Validation stricte du Float64 renvoyé par l'API HTMLMediaElement
-		if (Number.isFinite(media.duration)) computedStore[entityId].dirty = true;
-	};
-
-	media.readyState >= 1
-		? _setDuration()
-		: media.addEventListener("loadedmetadata", _setDuration, {
-				signal: sig,
-				once: true,
-			});
-
-	const _handleInfinity = () => {
-		if (media.duration !== Infinity) return;
-		dispatch(entityId, "_STREAM_DETECTED");
-
-		// Unrolling : zéro allocation, pas de closure, pas de tableau éphémère.
-		media.removeEventListener("loadeddata", _handleInfinity);
-		media.removeEventListener("loadedmetadata", _handleInfinity);
-		media.removeEventListener("play", _handleInfinity);
-	};
-
-	media.addEventListener("loadeddata", _handleInfinity, { signal: sig });
-	media.addEventListener("loadedmetadata", _handleInfinity, { signal: sig });
-	media.addEventListener("play", _handleInfinity, { signal: sig });
-
-	media.addEventListener(
-		"waiting",
-		() => {
-			statusStore[entityId].waiting = true;
-			player.classList.add("waiting");
-		},
-		{ signal: sig },
-	);
-
-	media.addEventListener(
-		"canplay",
-		() => {
-			statusStore[entityId].waiting = false;
-			player.classList.remove("waiting");
-			if (mediaRelationship) {
-				computedStore[entityId].dirty = true;
-			}
-		},
-		{ signal: sig },
-	);
-
-	media.addEventListener(
-		"ended",
-		() => {
-			media.currentTime = 0;
-			computedStore[entityId].dirty = true;
-			dispatch(entityId, "_ADVANCE");
-			const nn = configStore[entityId].nextNextEntityId;
-			if (nn !== null) {
-				const m = domStore[nn]?.media;
-				if (m) m.preload = "auto";
-			}
-		},
-		{ signal: sig },
-	);
-
-	if (dom.subtitlesButton) {
-		for (let i = 0; i < media.textTracks.length; i++) {
-			if (media.textTracks[i].mode !== "showing") continue;
-			configStore[entityId].subtitleIdx = i;
-			break;
-		}
-	}
-
-	media.src = media.currentSrc;
-	media.addEventListener("error", () => dispatch(entityId, "_ERROR"), {
-		signal: sig,
-		capture: true,
-	});
-
-	_observer.observe(player);
-};
-
-// ── 14. Résolution des adjacences cross-entités ────────────────────────────
-
-const _resolveAdjacencies = () => {
-	for (const id in configStore) {
-		const eid = +id;
-		const rel = configStore[eid].mediaRelationship;
-		if (!rel) continue;
-		const siblings = [...rel.querySelectorAll(MEDIA_SELECTOR)];
-		const idx = siblings.indexOf(domStore[eid].media);
-		const nextM = siblings[idx + 1] ?? siblings[0] ?? null;
-		const nextNM = siblings[idx + 2] ?? siblings[0] ?? null;
-		const nextId = nextM ? (_mediaIndex.get(nextM) ?? null) : null;
-		const nextNId = nextNM ? (_mediaIndex.get(nextNM) ?? null) : null;
-		configStore[eid].nextEntityId = nextId === eid ? null : nextId;
-		configStore[eid].nextNextEntityId = nextNId === eid ? null : nextNId;
-	}
-};
-
-// ── 15. Export API ─────────────────────────────────────────────────────────
-
-export const disposeEntity = (entityId) => {
-	configStore[entityId]?._ac.abort();
-	_observer.unobserve(domStore[entityId]?.player);
-	domStore[entityId]?.player.remove();
-	_mediaIndex.delete(domStore[entityId]?.media);
+	if (media) _mediaIndex.delete(media);
 
 	// Note DOD: Le mot clé 'delete' dé-optimise le dictionnaire V8.
 	// Acceptable ici car utilisé occasionnellement pour la libération de la GC.
@@ -814,11 +846,343 @@ export const disposeEntity = (entityId) => {
 	delete domStore[entityId];
 };
 
+const _initEntity = (media, entityId) => {
+	const player = _TEMPLATE.content
+		.cloneNode(true)
+		.querySelector(".media-player");
+	player.dataset.entityId = entityId;
+
+	const ac = new AbortController();
+	let committed = false;
+
+	try {
+		// ── Phase 1 : construction (aucun store, aucun document touché) ──
+
+		const q = (sel) => player.querySelector(sel);
+		const dom = {
+			media,
+			player,
+			playPauseButton: q(".media-play-pause"),
+			playbackRateOutput: q(".media-playback-rate"),
+			subtitleLangageOutput: q(".media-subtitle-langage"),
+			currentTimeOutput: q(".media-current-time"),
+			durationOutput: q(".media-duration"),
+			progressBar: q(".media-progress-bar"),
+			volumeBar: q(".media-volume-bar"),
+			muteButton: q(".media-mute"),
+			fullscreenButton: q(".media-fullscreen"),
+			menuButton: q(".media-menu"),
+			extendMenu: q(".media-extend-menu"),
+			nextReadingButton: q(".media-next-reading"),
+			subtitlesButton: q(".media-subtitles"),
+			pipButton: q(".media-picture-in-picture"),
+			slowMotionButton: q(".media-slow-motion"),
+			stopButton: q(".media-stop"),
+			replayButton: q(".media-replay"),
+		};
+
+		const mediaRelationship = media.closest(".media-relationship");
+		const isAudio = media.tagName === "AUDIO";
+
+		const time = { currentTime: 0, duration: NaN, bufferedEnd: 0 };
+
+		const status = {
+			paused: true,
+			muted: false,
+			volume: 0.5,
+			loop: false,
+			playbackRate: 1,
+			waiting: false,
+			error: false,
+			awaitingActivation: false,
+		};
+
+		const config = {
+			isAudio,
+			isStream: false,
+			tracks: media.textTracks,
+			subtitleIdx: -1,
+			playbackRateIdx: PLAYBACK_RATE_IDX_INIT,
+			deadTracks: new WeakSet(),
+			usableTracks: 0,
+			mediaRelationship,
+			nextEntityId: null,
+			nextNextEntityId: null,
+			_ac: ac,
+		};
+
+		const computed = {
+			ratio: 0,
+			bufferRatio: 0,
+			timeStr: "0:00",
+			durationStr: "0:00",
+			subtitleStr: "",
+			hasSubtitles: false,
+			isPlaying: false,
+			isMuted: false,
+			isStopped: true,
+			isNextReading: false,
+			isPip: false,
+			isFullscreen: false,
+			hasUsableTracks: true,
+			dirty: true,
+			intersecting: true,
+		};
+
+		// Safari iPhone n'expose pas l'API Fullscreen sur les éléments : il ne
+		// reste que webkitEnterFullscreen() sur la vidéo (repli natif).
+		if (
+			isAudio ||
+			(!document.fullscreenEnabled &&
+				typeof media.webkitEnterFullscreen !== "function")
+		) {
+			dom.fullscreenButton?.remove();
+			dom.fullscreenButton = null;
+		}
+		if (isAudio || !document.pictureInPictureEnabled) {
+			dom.pipButton?.remove();
+			dom.pipButton = null;
+		}
+		config.usableTracks = _countUsableTracks(config);
+		computed.hasUsableTracks = config.usableTracks > 0;
+		if (config.usableTracks === 0) {
+			dom.subtitlesButton?.remove();
+			dom.subtitlesButton = null;
+		}
+		if (!mediaRelationship) {
+			dom.nextReadingButton?.remove();
+			dom.nextReadingButton = null;
+		}
+
+		dom.progressBar.style.setProperty("--position", "0%");
+		dom.progressBar.style.setProperty("--position-buffer", "0%");
+		dom.volumeBar.style.setProperty("--position", "50%");
+
+		if (dom.subtitlesButton) {
+			for (let i = 0; i < media.textTracks.length; i++) {
+				if (
+					media.textTracks[i].mode !== "showing" ||
+					!_isUsableTrack(config, media.textTracks[i])
+				)
+					continue;
+				config.subtitleIdx = i;
+				break;
+			}
+		}
+
+		// ── Phase 2 : commit ──
+
+		if (!media.insertAdjacentElement("afterend", player))
+			throw new Error("média sans parent : player non insérable");
+
+		domStore[entityId] = dom;
+		timeStore[entityId] = time;
+		statusStore[entityId] = status;
+		configStore[entityId] = config;
+		computedStore[entityId] = computed;
+		_mediaIndex.set(media, entityId);
+		committed = true;
+
+		// Id de média : jamais en collision avec un id déjà présent dans le document.
+		if (!media.id) media.id = _uniqueMediaId(entityId);
+
+		// ── Phase 3 : listeners (annulés en bloc par ac.abort() en cas de rollback) ──
+
+		const sig = ac.signal;
+
+		const _setDuration = () => {
+			// Validation stricte du Float64 renvoyé par l'API HTMLMediaElement
+			if (Number.isFinite(media.duration)) computedStore[entityId].dirty = true;
+		};
+
+		media.readyState >= 1
+			? _setDuration()
+			: media.addEventListener("loadedmetadata", _setDuration, {
+					signal: sig,
+					once: true,
+				});
+
+		const _handleInfinity = () => {
+			if (media.duration !== Infinity) return;
+			_signal(entityId, "_STREAM_DETECTED");
+
+			// Unrolling : zéro allocation, pas de closure, pas de tableau éphémère.
+			media.removeEventListener("loadeddata", _handleInfinity);
+			media.removeEventListener("loadedmetadata", _handleInfinity);
+			media.removeEventListener("play", _handleInfinity);
+		};
+
+		media.addEventListener("loadeddata", _handleInfinity, { signal: sig });
+		media.addEventListener("loadedmetadata", _handleInfinity, { signal: sig });
+		media.addEventListener("play", _handleInfinity, { signal: sig });
+
+		media.addEventListener(
+			"waiting",
+			() => {
+				statusStore[entityId].waiting = true;
+				player.classList.add("waiting");
+			},
+			{ signal: sig },
+		);
+
+		media.addEventListener(
+			"canplay",
+			() => {
+				statusStore[entityId].waiting = false;
+				player.classList.remove("waiting");
+				if (mediaRelationship) {
+					computedStore[entityId].dirty = true;
+				}
+			},
+			{ signal: sig },
+		);
+
+		media.addEventListener(
+			"ended",
+			() => {
+				media.currentTime = 0;
+				computedStore[entityId].dirty = true;
+				_signal(entityId, "_ADVANCE");
+				const nn = configStore[entityId].nextNextEntityId;
+				if (nn !== null) {
+					const m = domStore[nn]?.media;
+					if (m) m.preload = "auto";
+				}
+			},
+			{ signal: sig },
+		);
+
+		// La lecture effective lève l'état « en attente d'activation utilisateur ».
+		media.addEventListener(
+			"playing",
+			() => {
+				const ss = statusStore[entityId];
+				if (!ss || !ss.awaitingActivation) return;
+				ss.awaitingActivation = false;
+				computedStore[entityId].dirty = true;
+			},
+			{ signal: sig },
+		);
+
+		// Plein écran vidéo natif iOS : l'état est relu par LogicSystem.
+		const _fsDirty = () => {
+			if (computedStore[entityId]) computedStore[entityId].dirty = true;
+		};
+		media.addEventListener("webkitbeginfullscreen", _fsDirty, { signal: sig });
+		media.addEventListener("webkitendfullscreen", _fsDirty, { signal: sig });
+
+		// `error` ne remonte pas, mais la phase de capture reçoit aussi celles des
+		// descendants <source> et <track> : chaque domaine d'erreur est traité à part.
+		media.addEventListener(
+			"error",
+			(e) => {
+				const t = e.target;
+				if (t === media) {
+					if (media.error?.code !== MEDIA_ERR_ABORTED)
+						_signal(entityId, "_ERROR");
+				} else if (t instanceof HTMLTrackElement) {
+					_signal(entityId, "_TRACK_ERROR", t.track);
+				} else if (t instanceof HTMLSourceElement) {
+					// Une source candidate en échec n'est pas une panne : le navigateur
+					// essaie la suivante. Seul l'échec de la dernière candidate l'est.
+					let last = media.lastElementChild;
+					while (last && !(last instanceof HTMLSourceElement))
+						last = last.previousElementSibling;
+					if (last === t) _signal(entityId, "_ERROR");
+				}
+			},
+			{ signal: sig, capture: true },
+		);
+
+		// Erreur déjà survenue avant l'amorçage (l'écouteur ne peut pas la voir) :
+		// on sonde l'état courant au lieu de relancer le chargement.
+		if (media.error && media.error.code !== MEDIA_ERR_ABORTED)
+			dispatch(entityId, "_ERROR");
+
+		_observer.observe(player);
+
+		// Dernier geste : retrait des contrôles natifs. Si l'init échoue avant ce
+		// point, le média garde ses contrôles natifs (dégradation gracieuse).
+		media.removeAttribute("controls");
+	} catch (err) {
+		if (committed) _release(entityId, media, player, ac);
+		else {
+			ac.abort();
+			player.remove();
+		}
+		throw err;
+	}
+};
+
+// ── 14. Résolution des adjacences cross-entités ────────────────────────────
+
+const _resolveAdjacencies = () => {
+	for (const id in configStore) {
+		const eid = +id;
+		const cfg = configStore[eid];
+		const rel = cfg.mediaRelationship;
+		if (!rel) continue;
+		// Seuls les médias réellement gérés comptent : un élément `.media` non
+		// initialisé ou disposé ne doit pas rompre la chaîne.
+		const siblings = [];
+		for (const el of rel.querySelectorAll(MEDIA_SELECTOR)) {
+			if (_mediaIndex.has(el)) siblings.push(el);
+		}
+		const idx = siblings.indexOf(domStore[eid].media);
+		if (idx === -1) {
+			cfg.nextEntityId = null;
+			cfg.nextNextEntityId = null;
+			continue;
+		}
+		const nextM = siblings[idx + 1] ?? siblings[0] ?? null;
+		const nextNM = siblings[idx + 2] ?? siblings[0] ?? null;
+		const nextId = nextM ? (_mediaIndex.get(nextM) ?? null) : null;
+		const nextNId = nextNM ? (_mediaIndex.get(nextNM) ?? null) : null;
+		cfg.nextEntityId = nextId === eid ? null : nextId;
+		cfg.nextNextEntityId = nextNId === eid ? null : nextNId;
+	}
+};
+
+// ── 15. Export API ─────────────────────────────────────────────────────────
+
+/**
+ * Libère une entité. Idempotent : un id inconnu ou déjà disposé est sans effet.
+ * Les adjacences des voisins sont recalculées.
+ */
+export const disposeEntity = (entityId) => {
+	const dom = domStore[entityId];
+	_release(entityId, dom?.media, dom?.player, configStore[entityId]?._ac);
+	if (dom) _resolveAdjacencies();
+};
+
+/**
+ * Libère les entités dont le média n'est plus dans le document (page swap,
+ * remplacement de layout). Retourne le nombre d'entités libérées.
+ * Aucune allocation tant qu'aucune entité n'est détachée.
+ */
+export const disposeDetached = () => {
+	let ids = null;
+	for (const id in domStore) {
+		if (domStore[id].media.isConnected) continue;
+		(ids ??= []).push(+id);
+	}
+	if (ids === null) return 0;
+	for (const eid of ids) {
+		const dom = domStore[eid];
+		_release(eid, dom.media, dom.player, configStore[eid]?._ac);
+	}
+	_resolveAdjacencies();
+	return ids.length;
+};
+
 /**
  * Initialise le lecteur.
  * @param {HTMLElement|Document} container
  */
 export const bootstrap = (container = document) => {
+	// 0. Purge des entités dont le média a quitté le document (ex : page swap).
+	_guard("DetachedSweep", disposeDetached);
+
 	// 1. Initialisation unique du layout de données statiques (Sprites)
 	// TRADE-OFF DOD : L'état d'injection est vérifié via le DOM (I/O) plutôt
 	// que par un flag en RAM.
@@ -833,10 +1197,23 @@ export const bootstrap = (container = document) => {
 	const medias = container.querySelectorAll(MEDIA_SELECTOR);
 	for (const media of medias) {
 		if (_mediaIndex.has(media)) continue;
-		media.removeAttribute("controls");
-		media.id = media.id || `media-${_nextEntityId}`;
-		_initEntity(media, _nextEntityId);
-		_nextEntityId++;
+		// `.media` est une classe générique : tout élément non audio/vidéo est ignoré.
+		if (!(media instanceof HTMLMediaElement)) {
+			_reportError(
+				"bootstrap",
+				new Error(
+					`'${MEDIA_SELECTOR}' ignoré : <${media.localName}> n'est ni audio ni vidéo`,
+				),
+			);
+			continue;
+		}
+		const entityId = _nextEntityId++;
+		// Une entité défaillante est isolée (rollback dans _initEntity) : les autres démarrent.
+		try {
+			_initEntity(media, entityId);
+		} catch (err) {
+			_reportError(`init entité ${entityId}`, err);
+		}
 	}
 	_resolveAdjacencies();
 	InputSystem.init();

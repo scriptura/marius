@@ -69,4 +69,5 @@ cargo run --bin marius-dump
 ```shell
 # Lancer le serveur
 cargo run --bin marius
+# exemple : http://127.0.0.1:3000/content/1
 ```
