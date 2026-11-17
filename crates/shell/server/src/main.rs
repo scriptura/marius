@@ -35,10 +35,10 @@ mod experimental_t2a;
 // provisionner un nouvel artefact au démarrage, hors périmètre V1c
 // « production réelle »). Rapport de session : décision explicite, pas
 // une omission.
+mod content_document;
 #[cfg(test)]
 mod experimental_volatile_t2a;
-mod handlers; // PROVISOIRE — EXPÉRIMENTAL, voir en-tête du module.
-mod content_document; // V3b — montage réel de /content/{id} sur T2A.
+mod handlers; // PROVISOIRE — EXPÉRIMENTAL, voir en-tête du module. // V3b — montage réel de /content/{id} sur T2A.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -109,14 +109,12 @@ include!(concat!(env!("OUT_DIR"), "/asset_routes.rs"));
 /// mécanisme de dump n'existe pour cette table — dump.rs est câblé
 /// exclusivement pour content_core). À réintroduire quand product_core
 /// reviendra au périmètre, avec son propre dump.
-static ROUTE_TABLE: &[RouteEntry] = &[
-    RouteEntry {
-        pattern: "/",
-        packfile_key: "pages_homepage",
-        id_source: IdSource::Fixed(1),
-        content_type: "text/html; charset=utf-8",
-    },
-];
+static ROUTE_TABLE: &[RouteEntry] = &[RouteEntry {
+    pattern: "/",
+    packfile_key: "pages_homepage",
+    id_source: IdSource::Fixed(1),
+    content_type: "text/html; charset=utf-8",
+}];
 
 /// V3b — `/content/{id}` bascule sur le pipeline runtime T2A
 /// (`content_document::mount`, ci-dessous) : retiré de `ROUTE_TABLE`
@@ -310,7 +308,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let content_core_key: &'static str = SHARDS[0].packfile_key;
     let content_core_head_key: &'static str = CONTENT_CORE_HEAD_ARTIFACT.as_str();
     let content_core_tail_key: &'static str = CONTENT_CORE_TAIL_ARTIFACT.as_str();
-    for key in [content_core_key, content_core_head_key, content_core_tail_key] {
+    for key in [
+        content_core_key,
+        content_core_head_key,
+        content_core_tail_key,
+    ] {
         match marius_render::ensure_provisioned(key).await? {
             marius_render::ProvisionOutcome::Provisioned => eprintln!(
                 "[marius-server] espace de projection provisionné (vierge) — artefact \"{key}\""
@@ -320,7 +322,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let registry = Arc::new(LiveRegistry::cold_start_with_extra_keys(
         ROUTE_TABLE,
-        &[content_core_key, content_core_head_key, content_core_tail_key],
+        &[
+            content_core_key,
+            content_core_head_key,
+            content_core_tail_key,
+        ],
     )?);
     eprintln!(
         "[marius-server] cold_start réussi — {} route(s) enregistrée(s), 3 artefact(s) hors route",
@@ -1213,8 +1219,11 @@ mod tests {
         write_fixture_packfile("content_core_tail", &[(1, TAIL)]);
 
         let registry = Arc::new(
-            LiveRegistry::cold_start_with_extra_keys(&[], &["content_core_head", "content_core_tail"])
-                .expect("cold_start_with_extra_keys doit réussir"),
+            LiveRegistry::cold_start_with_extra_keys(
+                &[],
+                &["content_core_head", "content_core_tail"],
+            )
+            .expect("cold_start_with_extra_keys doit réussir"),
         );
         let app = content_document::mount(registry);
 
@@ -1262,7 +1271,11 @@ mod tests {
             expected_anon.len() as u64,
             "Content-Length = head + volatile effectif + tail, jamais la capacité"
         );
-        assert_eq!(&body[..], &expected_anon[..], "ordre head → volatile → tail");
+        assert_eq!(
+            &body[..],
+            &expected_anon[..],
+            "ordre head → volatile → tail"
+        );
 
         // ── requête HTTP → contexte → username → materialize_volatile ──
         // (jamais un username injecté artificiellement au moment du Body)
@@ -1321,8 +1334,11 @@ mod tests {
         write_fixture_packfile("content_core_tail", &[(1, TAIL)]);
 
         let registry = Arc::new(
-            LiveRegistry::cold_start_with_extra_keys(&[], &["content_core_head", "content_core_tail"])
-                .expect("cold_start_with_extra_keys doit réussir"),
+            LiveRegistry::cold_start_with_extra_keys(
+                &[],
+                &["content_core_head", "content_core_tail"],
+            )
+            .expect("cold_start_with_extra_keys doit réussir"),
         );
         let app = content_document::mount(registry);
 

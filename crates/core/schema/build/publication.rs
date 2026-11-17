@@ -267,7 +267,12 @@ pub(crate) fn parse_publication(src: &str) -> Result<PublicationManifest, Vec<St
         Err(e) => return Err(vec![format!("TOML invalide : {e}")]),
     };
     let root = &root;
-    check_known_keys(root, &["artifact", "route", "volatile_region"], "manifeste", &mut errors);
+    check_known_keys(
+        root,
+        &["artifact", "route", "volatile_region"],
+        "manifeste",
+        &mut errors,
+    );
 
     let mut manifest = PublicationManifest::default();
 
@@ -320,7 +325,13 @@ pub(crate) fn parse_publication(src: &str) -> Result<PublicationManifest, Vec<St
         let ctx = format!("volatile_region[{i}]");
         check_known_keys(
             table,
-            &["component", "marker", "head_artifact", "tail_artifact", "capacity"],
+            &[
+                "component",
+                "marker",
+                "head_artifact",
+                "tail_artifact",
+                "capacity",
+            ],
             &ctx,
             &mut errors,
         );
@@ -329,8 +340,13 @@ pub(crate) fn parse_publication(src: &str) -> Result<PublicationManifest, Vec<St
         let head_artifact = read_string(table, "head_artifact", &ctx, true, &mut errors);
         let tail_artifact = read_string(table, "tail_artifact", &ctx, true, &mut errors);
         let capacity = read_u32(table, "capacity", &ctx, true, &mut errors);
-        if let (Some(component), Some(marker), Some(head_artifact), Some(tail_artifact), Some(capacity)) =
-            (component, marker, head_artifact, tail_artifact, capacity)
+        if let (
+            Some(component),
+            Some(marker),
+            Some(head_artifact),
+            Some(tail_artifact),
+            Some(capacity),
+        ) = (component, marker, head_artifact, tail_artifact, capacity)
         {
             manifest.volatile_regions.push(VolatileRegionDecl {
                 component,
@@ -499,7 +515,10 @@ pub(crate) fn validate_against_components(
 
     for region in &manifest.volatile_regions {
         let ctx = format!("région volatile «{}»", region.marker);
-        if !components.iter().any(|c| c.component_id == region.component) {
+        if !components
+            .iter()
+            .any(|c| c.component_id == region.component)
+        {
             errors.push(format!(
                 "{ctx} : composant «{}» absent de meta.containment_intent",
                 region.component
@@ -946,9 +965,7 @@ mod tests {
         // head = SourceKey(1), tail = SourceKey(2) — ordre du manifeste :
         // content_core(0), content_core_head(1), content_core_tail(2).
         assert!(
-            code.contains(
-                "SourceSpec::StaticArtifact { key: ::marius_projection::SourceKey(1) }"
-            ),
+            code.contains("SourceSpec::StaticArtifact { key: ::marius_projection::SourceKey(1) }"),
             "{code}"
         );
         assert!(
@@ -958,15 +975,10 @@ mod tests {
             "{code}"
         );
         assert!(
-            code.contains(
-                "SourceSpec::StaticArtifact { key: ::marius_projection::SourceKey(2) }"
-            ),
+            code.contains("SourceSpec::StaticArtifact { key: ::marius_projection::SourceKey(2) }"),
             "{code}"
         );
-        assert!(
-            code.contains("SegmentSelection::NotApplicable"),
-            "{code}"
-        );
+        assert!(code.contains("SegmentSelection::NotApplicable"), "{code}");
         assert!(code.contains("SegmentFlags::VOLATILE"), "{code}");
         assert!(code.contains("volatile_capacity: 512,"), "{code}");
         // Le K=1 monolithique (SourceKey(0), RouteEntry/RouteSpec) reste
@@ -1006,7 +1018,10 @@ mod tests {
         let src = "[[artifact]]\nkey=\"t\"\n\
                    [[volatile_region]]\ncomponent=\"s.t\"\nmarker=\"m\"\n\
                    head_artifact=\"missing_head\"\ntail_artifact=\"t\"\ncapacity=64\n";
-        assert_err_contains(parse_publication(src), "head_artifact «missing_head» non déclaré");
+        assert_err_contains(
+            parse_publication(src),
+            "head_artifact «missing_head» non déclaré",
+        );
     }
 
     #[test]
@@ -1014,7 +1029,10 @@ mod tests {
         let src = "[[artifact]]\nkey=\"h\"\n\
                    [[volatile_region]]\ncomponent=\"s.t\"\nmarker=\"m\"\n\
                    head_artifact=\"h\"\ntail_artifact=\"missing_tail\"\ncapacity=64\n";
-        assert_err_contains(parse_publication(src), "tail_artifact «missing_tail» non déclaré");
+        assert_err_contains(
+            parse_publication(src),
+            "tail_artifact «missing_tail» non déclaré",
+        );
     }
 
     #[test]

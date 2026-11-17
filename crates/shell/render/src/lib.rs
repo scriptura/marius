@@ -137,7 +137,7 @@ pub use pack_html_index::PackHtmlIndex;
 // emission.rs (crates/shell/server/src/experimental_volatile_t2a.rs, V1c)
 // de nommer `marius_render::resolve_volatile_generation`.
 pub use emission::{
-    MaterializedSource, ResolvedRange, SourceResolutionContext,
-    VolatileCapacityExceeded, VolatileStorage, resolve_generation, resolve_range,
-    resolve_volatile_generation, resolve_volatile_range, source_spec_for,
+    MaterializedSource, ResolvedRange, SourceResolutionContext, VolatileCapacityExceeded,
+    VolatileStorage, resolve_generation, resolve_range, resolve_volatile_generation,
+    resolve_volatile_range, source_spec_for,
 };

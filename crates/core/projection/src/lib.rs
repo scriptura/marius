@@ -372,7 +372,10 @@ pub enum SourceSpec {
     /// `producer` : identité opaque du producteur qui matérialisera le
     /// contenu (contrat Volatile P8) — le dispatch vers son implémentation
     /// vit hors de ce crate, hors de `emission.rs` (V1b/V1c).
-    VolatileSlot { capacity: u32, producer: ProducerKey },
+    VolatileSlot {
+        capacity: u32,
+        producer: ProducerKey,
+    },
 }
 
 // Absence de Drop — propriété explicitement requise (liste de vérification
@@ -666,7 +669,10 @@ mod tests_segment_selection {
             SegmentSelection::Constant(0),
             SegmentSelection::RequestSlot(RequestValueId(0))
         );
-        assert_ne!(SegmentSelection::Constant(0), SegmentSelection::NotApplicable);
+        assert_ne!(
+            SegmentSelection::Constant(0),
+            SegmentSelection::NotApplicable
+        );
         assert_ne!(
             SegmentSelection::RequestSlot(RequestValueId(0)),
             SegmentSelection::NotApplicable

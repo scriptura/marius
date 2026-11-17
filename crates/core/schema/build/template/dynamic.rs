@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use marius_fragment_forge::{
-    AssetLookup, SchemaIndex, VarlenField, detect_extends,
-    eliminate_recordless_conditions, generate_aot_snippet, generate_segmented_snippet,
-    parse_page_tokens, parse_tokens, resolve_and_measure, scan, validate_ast,
+    AssetLookup, SchemaIndex, VarlenField, detect_extends, eliminate_recordless_conditions,
+    generate_aot_snippet, generate_segmented_snippet, parse_page_tokens, parse_tokens,
+    resolve_and_measure, scan, validate_ast,
 };
 
 use crate::asset_lookup::resolve_asset_lookup;
@@ -257,8 +257,10 @@ pub(crate) fn resolve_template(
                      après la région volatile «{marker}» échouée : {errors:?}"
                 );
             })?;
-            let head_body = generate_aot_snippet(&head_tokens, &schema_index, resolve_asset_url, "");
-            let tail_body = generate_aot_snippet(&tail_tokens, &schema_index, resolve_asset_url, "");
+            let head_body =
+                generate_aot_snippet(&head_tokens, &schema_index, resolve_asset_url, "");
+            let tail_body =
+                generate_aot_snippet(&tail_tokens, &schema_index, resolve_asset_url, "");
             Some(VolatileSplitTemplateRender {
                 head_body,
                 head_metrics,

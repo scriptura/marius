@@ -39,9 +39,7 @@
 
 use marius_projection::{ProducerKey, SourceSpec};
 
-use crate::emission::{
-    MaterializedSource, VolatileCapacityExceeded, resolve_volatile_generation,
-};
+use crate::emission::{MaterializedSource, VolatileCapacityExceeded, resolve_volatile_generation};
 
 /// `ProducerKey` du producteur `nav_profile` — valeur provisoire du
 /// vertical slice, celle que la Forge génère dans `ROUTE_DESCRIPTORS`
@@ -110,9 +108,8 @@ const NAV_PROFILE_CLOSE: &str = "</li>";
 /// `VolatileStorage::from_produced` (String → Vec<u8> sans copie).
 pub fn produce_nav_profile(ctx: &VolatileContext) -> Vec<u8> {
     let username = ctx.username.as_deref().unwrap_or("");
-    let mut html = String::with_capacity(
-        NAV_PROFILE_OPEN.len() + username.len() + NAV_PROFILE_CLOSE.len(),
-    );
+    let mut html =
+        String::with_capacity(NAV_PROFILE_OPEN.len() + username.len() + NAV_PROFILE_CLOSE.len());
     html.push_str(NAV_PROFILE_OPEN);
     escape_html_into(username, &mut html);
     html.push_str(NAV_PROFILE_CLOSE);
@@ -171,8 +168,11 @@ mod tests {
 
     #[test]
     fn producer_zero_renders_the_username_into_the_nav_profile_li() {
-        let source = materialize_volatile(&nav_profile_spec(512), &VolatileContext::with_username("Alice"))
-            .expect("doit réussir");
+        let source = materialize_volatile(
+            &nav_profile_spec(512),
+            &VolatileContext::with_username("Alice"),
+        )
+        .expect("doit réussir");
         assert_eq!(
             resolved_bytes(&source),
             b"<li class=\"nav-profile\">Alice</li>".to_vec()
@@ -181,8 +181,11 @@ mod tests {
 
     #[test]
     fn effective_len_is_the_produced_length_not_the_forge_capacity() {
-        let source = materialize_volatile(&nav_profile_spec(512), &VolatileContext::with_username("Alice"))
-            .unwrap();
+        let source = materialize_volatile(
+            &nav_profile_spec(512),
+            &VolatileContext::with_username("Alice"),
+        )
+        .unwrap();
         let MaterializedSource::Volatile { storage } = &source else {
             panic!("attendu Volatile");
         };
@@ -205,9 +208,11 @@ mod tests {
     #[test]
     fn username_is_html_escaped_never_injected_raw() {
         let hostile = "<script>alert(\"x\")</script>&'";
-        let source =
-            materialize_volatile(&nav_profile_spec(512), &VolatileContext::with_username(hostile))
-                .unwrap();
+        let source = materialize_volatile(
+            &nav_profile_spec(512),
+            &VolatileContext::with_username(hostile),
+        )
+        .unwrap();
         let html = String::from_utf8(resolved_bytes(&source)).unwrap();
         assert_eq!(
             html,
@@ -227,9 +232,11 @@ mod tests {
         };
 
         // Production ultérieure, contexte différent : n'affecte pas `first`.
-        let second =
-            materialize_volatile(&nav_profile_spec(512), &VolatileContext::with_username("Bob"))
-                .unwrap();
+        let second = materialize_volatile(
+            &nav_profile_spec(512),
+            &VolatileContext::with_username("Bob"),
+        )
+        .unwrap();
 
         assert_eq!(
             resolved_bytes(&first),
@@ -243,9 +250,11 @@ mod tests {
 
     #[test]
     fn storage_outlives_the_materialized_source_through_a_cloned_handle() {
-        let source =
-            materialize_volatile(&nav_profile_spec(512), &VolatileContext::with_username("Alice"))
-                .unwrap();
+        let source = materialize_volatile(
+            &nav_profile_spec(512),
+            &VolatileContext::with_username("Alice"),
+        )
+        .unwrap();
         let MaterializedSource::Volatile { storage } = &source else {
             panic!("attendu Volatile");
         };
@@ -256,9 +265,11 @@ mod tests {
 
     #[test]
     fn resolved_range_points_into_the_owned_buffer_without_copy() {
-        let source =
-            materialize_volatile(&nav_profile_spec(512), &VolatileContext::with_username("Alice"))
-                .unwrap();
+        let source = materialize_volatile(
+            &nav_profile_spec(512),
+            &VolatileContext::with_username("Alice"),
+        )
+        .unwrap();
         let MaterializedSource::Volatile { storage } = &source else {
             panic!("attendu Volatile");
         };
@@ -302,9 +313,18 @@ mod tests {
     #[test]
     fn exact_capacity_is_accepted() {
         let exact = NAV_PROFILE_OPEN.len() + NAV_PROFILE_CLOSE.len(); // anonyme
-        assert!(materialize_volatile(&nav_profile_spec(exact as u32), &VolatileContext::anonymous()).is_ok());
+        assert!(
+            materialize_volatile(
+                &nav_profile_spec(exact as u32),
+                &VolatileContext::anonymous()
+            )
+            .is_ok()
+        );
         assert!(matches!(
-            materialize_volatile(&nav_profile_spec(exact as u32 - 1), &VolatileContext::anonymous()),
+            materialize_volatile(
+                &nav_profile_spec(exact as u32 - 1),
+                &VolatileContext::anonymous()
+            ),
             Err(VolatileProductionError::CapacityExceeded(_))
         ));
     }

@@ -817,7 +817,8 @@ pub(crate) fn resolve_page_template<'src>(
                 resolve_asset_url,
                 &modules_lowering.snippet,
             );
-            let tail_body = generate_aot_snippet(&tail_tokens, &schema_index, resolve_asset_url, "");
+            let tail_body =
+                generate_aot_snippet(&tail_tokens, &schema_index, resolve_asset_url, "");
 
             Some(VolatileSplitTemplateRender {
                 head_body,
@@ -1060,7 +1061,10 @@ mod tests_modules_placeholder_split_regression {
             "HEAD_TOTAL_CAP ({head_cap}) < octets maximaux de render_head() ({head_max_emitted})"
         );
         assert_eq!(head_cap, head_max_emitted, "aucune marge : capacité exacte");
-        assert_eq!(tail_cap, tail_max_emitted, "render_tail() n'émet aucun module");
+        assert_eq!(
+            tail_cap, tail_max_emitted,
+            "render_tail() n'émet aucun module"
+        );
 
         // Conservation : head + tail + marqueurs + contenu de région retiré
         // = rendu monolithique (le bloc modules n'est ni perdu ni dupliqué

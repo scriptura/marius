@@ -43,13 +43,13 @@ mod template;
 
 use std::path::PathBuf;
 
+use marius_db_forge::codegen::projection::VolatileSplitRender;
 use marius_db_forge::{
     PrimaryKey, build_field_specs, check_no_name_collision, fetch_columns, fetch_component_list,
     fetch_max_id, fetch_pk_column, fetch_varlena_cols, validate_layout, write_collector,
     write_from_impl, write_projection_stub, write_row_struct, write_section_header,
     write_store_struct, write_varlen_owned_struct,
 };
-use marius_db_forge::codegen::projection::VolatileSplitRender;
 use marius_fragment_forge::VarlenField;
 
 use crate::capabilities::validate_capabilities;

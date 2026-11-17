@@ -307,7 +307,9 @@ mod tests_split_static_at_region {
     fn well_formed_region_spanning_multiple_consecutive_statics() {
         let tokens = vec![
             FlatPageToken::Static("<header>H</header><!-- MARIUS_VOLATILE_BEGIN nav_profile -->"),
-            FlatPageToken::Static("<li>volatile</li><!-- MARIUS_VOLATILE_END --><footer>F</footer>"),
+            FlatPageToken::Static(
+                "<li>volatile</li><!-- MARIUS_VOLATILE_END --><footer>F</footer>",
+            ),
         ];
         let (head, tail) = split_static_at_region(tokens, BEGIN, END).expect("doit réussir");
         assert_eq!(head, vec![FlatPageToken::Static("<header>H</header>")]);
@@ -329,7 +331,9 @@ mod tests_split_static_at_region {
     /// F.2 — BEGIN absent : erreur nommée, jamais un split partiel.
     #[test]
     fn missing_begin_marker_is_a_named_error() {
-        let tokens = vec![FlatPageToken::Static("<a></a><!-- MARIUS_VOLATILE_END --><b></b>")];
+        let tokens = vec![FlatPageToken::Static(
+            "<a></a><!-- MARIUS_VOLATILE_END --><b></b>",
+        )];
         assert_eq!(
             split_static_at_region(tokens, BEGIN, END),
             Err(SplitRegionError::BeginMarkerNotFound)
@@ -352,7 +356,9 @@ mod tests_split_static_at_region {
     /// l'algorithme — begin_marker cherché en premier, absent ici).
     #[test]
     fn end_without_begin_is_a_named_error() {
-        let tokens = vec![FlatPageToken::Static("<a></a><!-- MARIUS_VOLATILE_END --><b></b>")];
+        let tokens = vec![FlatPageToken::Static(
+            "<a></a><!-- MARIUS_VOLATILE_END --><b></b>",
+        )];
         assert_eq!(
             split_static_at_region(tokens, BEGIN, END),
             Err(SplitRegionError::BeginMarkerNotFound)
@@ -441,7 +447,9 @@ mod tests_split_static_at_region {
                 entity: "record",
                 field: "title",
             },
-            FlatPageToken::Static("<!-- MARIUS_VOLATILE_BEGIN nav_profile -->x<!-- MARIUS_VOLATILE_END -->"),
+            FlatPageToken::Static(
+                "<!-- MARIUS_VOLATILE_BEGIN nav_profile -->x<!-- MARIUS_VOLATILE_END -->",
+            ),
             FlatPageToken::AssetRef("main.css"),
         ];
         let (head, tail) = split_static_at_region(tokens, BEGIN, END).expect("doit réussir");

@@ -138,7 +138,10 @@ impl VolatileStorage {
     /// fonction (cf. commentaire de section). Échoue si `payload.len()`
     /// dépasse `capacity` (P2) ; réussit, y compris pour `payload` vide
     /// (`effective_len = 0 <= capacity`, quelle que soit `capacity`).
-    pub fn from_produced(payload: Vec<u8>, capacity: u32) -> Result<Self, VolatileCapacityExceeded> {
+    pub fn from_produced(
+        payload: Vec<u8>,
+        capacity: u32,
+    ) -> Result<Self, VolatileCapacityExceeded> {
         if payload.len() > capacity as usize {
             return Err(VolatileCapacityExceeded {
                 capacity,
@@ -229,10 +232,11 @@ where
         SourceSpec::VolatileSlot { capacity, producer } => {
             let payload = produce(*producer);
             Some(
-                VolatileStorage::from_produced(payload, *capacity)
-                    .map(|storage| MaterializedSource::Volatile {
+                VolatileStorage::from_produced(payload, *capacity).map(|storage| {
+                    MaterializedSource::Volatile {
                         storage: Arc::new(storage),
-                    }),
+                    }
+                }),
             )
         }
         SourceSpec::StaticArtifact { .. } => None,

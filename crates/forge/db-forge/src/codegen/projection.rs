@@ -756,8 +756,10 @@ pub fn write_projection_stub(
             format!("varlena: &{name}VarlenOwned")
         };
 
-        let head_total = split.head_metrics.total_static_bytes + split.head_metrics.total_dynamic_bytes;
-        let tail_total = split.tail_metrics.total_static_bytes + split.tail_metrics.total_dynamic_bytes;
+        let head_total =
+            split.head_metrics.total_static_bytes + split.head_metrics.total_dynamic_bytes;
+        let tail_total =
+            split.tail_metrics.total_static_bytes + split.tail_metrics.total_dynamic_bytes;
         writeln!(
             out,
             "pub const {screaming}_HEAD_STATIC_CAP:  usize = {};",

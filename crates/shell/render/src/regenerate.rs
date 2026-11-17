@@ -196,7 +196,11 @@ async fn fetch_delta_batch<P: Projection>(
 /// `fetch_delta_batches_with_volatile_split` ci-dessous : même règle de
 /// détection des suppressions pour le monolithique et pour head/tail,
 /// jamais deux implémentations divergentes de la même logique.
-fn build_delta_batch(payload_index: Vec<PackfileEntry>, payload: Vec<u8>, ids: &[i64]) -> DeltaBatch {
+fn build_delta_batch(
+    payload_index: Vec<PackfileEntry>,
+    payload: Vec<u8>,
+    ids: &[i64],
+) -> DeltaBatch {
     let mut entries: Vec<DeltaEntry> = Vec::with_capacity(ids.len());
     for entry in &payload_index {
         debug_assert!(
@@ -369,15 +373,21 @@ async fn fetch_delta_batches_with_volatile_split<P: Projection>(
         mono_renderer.reset(CHUNK_SIZE);
 
         if let (Some((head, tail)), Some(acc)) = (volatile_split, split_acc.as_mut()) {
-            acc.head_offset =
-                acc.head_renderer
-                    .render_batch(&batch, head.render, &mut acc.head_writer, acc.head_offset)?;
+            acc.head_offset = acc.head_renderer.render_batch(
+                &batch,
+                head.render,
+                &mut acc.head_writer,
+                acc.head_offset,
+            )?;
             acc.head_index.extend_from_slice(acc.head_renderer.index());
             acc.head_renderer.reset(CHUNK_SIZE);
 
-            acc.tail_offset =
-                acc.tail_renderer
-                    .render_batch(&batch, tail.render, &mut acc.tail_writer, acc.tail_offset)?;
+            acc.tail_offset = acc.tail_renderer.render_batch(
+                &batch,
+                tail.render,
+                &mut acc.tail_writer,
+                acc.tail_offset,
+            )?;
             acc.tail_index.extend_from_slice(acc.tail_renderer.index());
             acc.tail_renderer.reset(CHUNK_SIZE);
         }
@@ -419,7 +429,10 @@ struct ResolvedTarget {
     old: Arc<PackHtmlIndex>,
 }
 
-fn resolve_target(packfile_key: &'static str, registry: &LiveRegistry) -> io::Result<ResolvedTarget> {
+fn resolve_target(
+    packfile_key: &'static str,
+    registry: &LiveRegistry,
+) -> io::Result<ResolvedTarget> {
     let final_path = packfile_path_for(packfile_key);
     let tmp_path = final_path.with_extension("tmp");
     if let Some(parent) = tmp_path.parent() {
@@ -475,13 +488,8 @@ pub async fn regenerate_and_swap_with_volatile_split<P: Projection>(
     // ---- Segment 1 — fetch réseau Postgres, UNE fois pour les (jusqu'à)
     // trois cibles. Hors périmètre du sémaphore, même discipline que
     // regenerate_and_swap.
-    let (mono_delta, split_delta) = fetch_delta_batches_with_volatile_split::<P>(
-        pool,
-        ids,
-        total_cap,
-        volatile_split,
-    )
-    .await?;
+    let (mono_delta, split_delta) =
+        fetch_delta_batches_with_volatile_split::<P>(pool, ids, total_cap, volatile_split).await?;
 
     // ---- Segment 2 — attente du permis : un seul acquire() pour l'écriture
     // physique des (jusqu'à) trois packfiles de ce tick, pas un par packfile
@@ -497,43 +505,44 @@ pub async fn regenerate_and_swap_with_volatile_split<P: Projection>(
     // distincts) — regroupées dans le même spawn_blocking pour rester sous
     // le même permis que segment 2, jamais une politique de concurrence
     // nouvelle entre elles.
-    let new_indices = tokio::task::spawn_blocking(move || -> io::Result<Vec<(&'static str, PackHtmlIndex)>> {
-        let mut results = Vec::with_capacity(1 + split_targets.as_ref().map_or(0, |_| 2));
-        results.push((
-            mono_target.packfile_key,
-            apply_merge_io_sync(
-                mono_target.old.as_ref(),
-                &mono_delta,
-                &mono_target.tmp_path,
-                &mono_target.final_path,
-            )?,
-        ));
-        if let (Some((head_target, tail_target)), Some((head_delta, tail_delta))) =
-            (split_targets, split_delta)
-        {
+    let new_indices =
+        tokio::task::spawn_blocking(move || -> io::Result<Vec<(&'static str, PackHtmlIndex)>> {
+            let mut results = Vec::with_capacity(1 + split_targets.as_ref().map_or(0, |_| 2));
             results.push((
-                head_target.packfile_key,
+                mono_target.packfile_key,
                 apply_merge_io_sync(
-                    head_target.old.as_ref(),
-                    &head_delta,
-                    &head_target.tmp_path,
-                    &head_target.final_path,
+                    mono_target.old.as_ref(),
+                    &mono_delta,
+                    &mono_target.tmp_path,
+                    &mono_target.final_path,
                 )?,
             ));
-            results.push((
-                tail_target.packfile_key,
-                apply_merge_io_sync(
-                    tail_target.old.as_ref(),
-                    &tail_delta,
-                    &tail_target.tmp_path,
-                    &tail_target.final_path,
-                )?,
-            ));
-        }
-        Ok(results)
-    })
-    .await
-    .map_err(io::Error::other)??;
+            if let (Some((head_target, tail_target)), Some((head_delta, tail_delta))) =
+                (split_targets, split_delta)
+            {
+                results.push((
+                    head_target.packfile_key,
+                    apply_merge_io_sync(
+                        head_target.old.as_ref(),
+                        &head_delta,
+                        &head_target.tmp_path,
+                        &head_target.final_path,
+                    )?,
+                ));
+                results.push((
+                    tail_target.packfile_key,
+                    apply_merge_io_sync(
+                        tail_target.old.as_ref(),
+                        &tail_delta,
+                        &tail_target.tmp_path,
+                        &tail_target.final_path,
+                    )?,
+                ));
+            }
+            Ok(results)
+        })
+        .await
+        .map_err(io::Error::other)??;
 
     // Dernière étape, sans exception — mêmes garanties que regenerate_and_swap :
     // tout Err ci-dessus retourne avant cette ligne, chaque ancien Arc reste
@@ -544,7 +553,6 @@ pub async fn regenerate_and_swap_with_volatile_split<P: Projection>(
 
     Ok(())
 }
-
 
 /// Étage 2 du tick `Dispatcher::run()` (V2d) — l'unique point d'appel de
 /// régénération du Dispatcher, extrait pour être testable sans `Collector`
@@ -1227,9 +1235,16 @@ mod tests {
         let registry = LiveRegistry::with_indices(indices);
         let io_sem = tokio::sync::Semaphore::new(1);
 
-        regenerate_and_swap::<StubProjection>(&pool, &[1], STUB_TOTAL_CAP, key_a, &registry, &io_sem)
-            .await
-            .expect("regenerate_and_swap (existant) doit réussir");
+        regenerate_and_swap::<StubProjection>(
+            &pool,
+            &[1],
+            STUB_TOTAL_CAP,
+            key_a,
+            &registry,
+            &io_sem,
+        )
+        .await
+        .expect("regenerate_and_swap (existant) doit réussir");
         regenerate_and_swap_with_volatile_split::<StubProjection>(
             &pool,
             &[1],
@@ -1349,7 +1364,10 @@ mod tests {
         let registry = LiveRegistry::with_indices(indices);
         let io_sem = tokio::sync::Semaphore::new(1);
 
-        let split: (SplitRenderTarget<StubProjection>, SplitRenderTarget<StubProjection>) = (
+        let split: (
+            SplitRenderTarget<StubProjection>,
+            SplitRenderTarget<StubProjection>,
+        ) = (
             SplitRenderTarget {
                 packfile_key: head_key,
                 total_cap: STUB_TOTAL_CAP,
@@ -1434,7 +1452,6 @@ mod tests {
             "sans paire, aucune clé annexe n'est touchée"
         );
     }
-
 
     struct FailingProjection;
 
