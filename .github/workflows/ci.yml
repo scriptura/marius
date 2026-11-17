@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Le workflow ne nécessite aucun droit d'écriture sur le dépôt.
+permissions:
+  contents: read
+
+# Annule les exécutions obsolètes d'une même branche/PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      # Neutralise la valeur de développement définie dans .cargo/config.toml.
+      # La CI ne doit pas tenter de contacter une base PostgreSQL locale.
+      DATABASE_URL: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # Cache Cargo spécialisé : clé tenant compte du toolchain, des manifests,
+      # de Cargo.lock et de .cargo/config.toml. Pas de cache target/ fait maison.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.3
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check all workspace targets and features
+        run: cargo check --locked --workspace --all-targets --all-features
+
+      - name: Run workspace tests
+        run: cargo test --locked --workspace --all-features
+
+      - name: Run Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features
