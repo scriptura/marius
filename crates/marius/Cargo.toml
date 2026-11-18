@@ -2,7 +2,6 @@
 [package]
 name = "marius"
 description = "Marius: a data-oriented reactive projection engine. PostgreSQL → AOT HTML, zero intermediate transformation."
-readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

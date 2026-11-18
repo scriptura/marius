@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-10-30 10:15:43
+**Généré le:** 2026-11-19 00:18:03
 
 ## Racine du Workspace
 
@@ -155,6 +155,7 @@
 │           ├── tests
 │           │   └── server_supervision_and_provisioning.rs
 │           ├── Cargo.toml
+│           ├── README.md
 │           └── build.rs
 ├── db
 │   ├── 00_infra
@@ -225,7 +226,7 @@
 ├── README.md
 └── biome.jsonc
 
-55 directories, 164 files
+55 directories, 165 files
 ```
 
 ## Documentation du projet

@@ -1,7 +1,6 @@
 [package]
 name = "marius-schema"
 description = "Generated #[repr(C)] structs and Collector statics mirroring PostgreSQL schema for the Marius engine."
-readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

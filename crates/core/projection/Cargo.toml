@@ -1,7 +1,6 @@
 [package]
 name = "marius-projection"
 description = "Projection trait for the Marius reactive engine (Core/Shell boundary)."
-readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

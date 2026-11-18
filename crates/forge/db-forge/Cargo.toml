@@ -1,7 +1,6 @@
 [package]
 name = "marius-db-forge"
 description = "Build-time generator: PostgreSQL pg_attribute → Rust #[repr(C)] structs for the Marius engine."
-readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

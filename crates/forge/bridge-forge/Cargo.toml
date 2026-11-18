@@ -1,7 +1,6 @@
 [package]
 name = "marius-bridge-forge"
 description = "Build-time SQLx batch query and Axum route generator for the Marius engine."
-readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

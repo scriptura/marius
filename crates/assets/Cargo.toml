@@ -1,7 +1,6 @@
 [package]
 name = "marius-assets"
 description = "Compilateur AOT d'assets statiques du thème Marius — hachage BLAKE3 (cache-busting), manifeste plat, outil de build hôte exclusivement."
-readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

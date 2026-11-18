@@ -1,7 +1,6 @@
 [package]
 name = "marius-render"
 description = "Dispatcher and artifact rendering shell for the Marius reactive engine."
-readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
