@@ -46,6 +46,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # Le manifeste est un artefact généré, absent d'un checkout CI propre.
+      # Le produire avant la compilation de marius-schema et marius-server.
+      - name: Build static assets manifest
+        run: cargo run --locked --release -p marius-assets --bin marius-assets -- ./assets/default
+
       - name: Check all workspace targets and features
         run: cargo check --locked --workspace --all-targets --all-features
 
