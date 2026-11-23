@@ -6,7 +6,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 keywords = ["ecs", "projection", "marius"]
@@ -18,3 +17,6 @@ categories = ["database"]
 sqlx = { workspace = true }
 bytemuck = { workspace = true }
 memmap2 = { workspace = true }
+
+[lints]
+workspace = true

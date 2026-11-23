@@ -7,7 +7,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 keywords = ["ecs", "lock-free", "bit-vector", "marius"]
@@ -17,3 +16,6 @@ categories = ["concurrency", "data-structures"]
 # Tokio → marius-render (Dispatcher).
 # SQLx  → marius-projection (trait Projection).
 [dependencies]
+
+[lints]
+workspace = true

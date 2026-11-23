@@ -6,7 +6,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 keywords = ["axum", "web", "dispatcher", "marius"]
@@ -20,7 +19,6 @@ tokio = { workspace = true, features = [
     "macros",
     "rt-multi-thread",
 ] }
-rayon = { workspace = true }
 memmap2 = { workspace = true }
 bytemuck = { workspace = true }
 arc-swap = { workspace = true }
@@ -30,9 +28,6 @@ marius-schema = { workspace = true }
 
 [dev-dependencies]
 divan = { workspace = true }
-
-[build-dependencies]
-marius-fragment-forge = { workspace = true }
 
 [[bench]]
 name = "hot_path_render"
@@ -49,3 +44,6 @@ path = "src/bin/dump.rs"
 [[bin]]
 name = "marius-verify"
 path = "src/bin/verify.rs"
+
+[lints]
+workspace = true

@@ -7,7 +7,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 keywords = ["ecs", "dod", "reactive", "cms", "aot"]
@@ -17,3 +16,6 @@ categories = ["web-programming", "database", "concurrency"]
 marius-collector = { workspace = true }
 marius-projection = { workspace = true }
 marius-render = { workspace = true }
+
+[lints]
+workspace = true

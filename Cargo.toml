@@ -29,7 +29,6 @@ edition = "2024"
 rust-version = "1.100"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/scriptura/marius"
-homepage = "https://github.com/scriptura/marius"
 documentation = "https://github.com/scriptura/marius/tree/main/docs"
 authors = ["Olivier Chavarin"]
 
@@ -42,7 +41,6 @@ sqlx = { version = "0.8", features = [
     "chrono",
 ] }
 tokio = { version = "1", default-features = false }
-rayon = "1.12"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 bytemuck = { version = "1.25", features = ["derive"] }
@@ -118,16 +116,12 @@ oxc_codegen = "=0.148.0"
 oxc_minifier = "=0.148.0"
 
 # Dépendances internes au workspace — version verrouillée pour tous les membres.
-marius = { version = "=0.6.0", path = "crates/marius" }
 marius-collector = { version = "=0.6.0", path = "crates/core/collector" }
 marius-projection = { version = "=0.6.0", path = "crates/core/projection" }
 marius-schema = { version = "=0.6.0", path = "crates/core/schema" }
 marius-render = { version = "=0.6.0", path = "crates/shell/render" }
-marius-server = { version = "=0.6.0", path = "crates/shell/server" }
 marius-db-forge = { version = "=0.6.0", path = "crates/forge/db-forge" }
 marius-fragment-forge = { version = "=0.6.0", path = "crates/forge/fragment-forge" }
-marius-guard-forge = { version = "=0.6.0", path = "crates/forge/guard-forge" }
-marius-bridge-forge = { version = "=0.6.0", path = "crates/forge/bridge-forge" }
 
 [workspace.lints.clippy]
 clone_on_copy = "deny"

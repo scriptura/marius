@@ -6,7 +6,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 keywords = ["codegen", "postgresql", "build-script", "ecs", "marius"]
@@ -14,8 +13,19 @@ categories = ["development-tools", "database"]
 
 [dependencies]
 sqlx = { workspace = true }
-tokio = { workspace = true, features = ["rt", "io-util", "net", "time"] }
 # Interface partagée : VarlenField, FieldSpec, FieldKind, generate_render, generate_capacity_consts.
 # Dépendance unidirectionnelle : db-forge → fragment-forge.
 # fragment-forge n'importe jamais db-forge (INV-4).
 marius-fragment-forge = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = [
+    "rt",
+    "io-util",
+    "net",
+    "time",
+    "macros",
+] }
+
+[lints]
+workspace = true

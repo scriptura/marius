@@ -76,8 +76,8 @@ impl<const MAX: usize, const WORDS: usize> Collector<MAX, WORDS> {
     pub fn flush(&self) -> Vec<i64> {
         let mut ids = Vec::with_capacity(self.count.load(Relaxed));
 
-        for w in 0..WORDS {
-            let mut word = self.presence[w].swap(0, AcqRel);
+        for (w, presence) in self.presence.iter().enumerate() {
+            let mut word = presence.swap(0, AcqRel);
             while word != 0 {
                 let bit = word.trailing_zeros() as usize;
                 ids.push((w * 64 + bit + 1) as i64);

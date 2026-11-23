@@ -1457,11 +1457,9 @@ dependencies = [
  "bytemuck",
  "divan",
  "marius-collector",
- "marius-fragment-forge",
  "marius-projection",
  "marius-schema",
  "memmap2",
- "rayon",
  "sqlx",
  "tokio",
 ]
