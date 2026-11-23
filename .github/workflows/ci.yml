@@ -18,36 +18,46 @@ concurrency:
 
 jobs:
   quality:
-    name: Quality gates
+    name: Quality gates (Rust 1.100.0)
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
-      # Neutralise la valeur de développement définie dans .cargo/config.toml.
-      # La CI ne doit pas tenter de contacter une base PostgreSQL locale.
-      DATABASE_URL: ""
+      # DATABASE_URL est volontairement absent.
+      # Une variable vide provoque Configuration(RelativeUrlWithoutBase).
+      # Sans override shell, Cargo applique la valeur définie dans
+      # .cargo/config.toml, configuration validée localement sous Rust 1.100.0.
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
 
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
+      # Aligné sur rust-toolchain.toml et workspace.package.rust-version.
+      - name: Install Rust 1.100.0
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.100.0
           components: clippy, rustfmt
 
-      # Cache Cargo spécialisé : clé tenant compte du toolchain, des manifests,
-      # de Cargo.lock et de .cargo/config.toml. Pas de cache target/ fait maison.
+      - name: Verify Rust toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version
+          test "$(rustc --version | awk '{print $2}')" = "1.100.0"
+          test "$(cargo --version | awk '{print $2}')" = "1.100.0"
+
+      # La clé intègre notamment Cargo.lock, les manifests, rust-toolchain.toml
+      # et .cargo/config.toml. Le choix de toolchain intervient avant le cache.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.3
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # Le manifeste est un artefact généré, absent d'un checkout CI propre.
-      # Le produire avant la compilation de marius-schema et marius-server.
+      # Le manifeste est généré par marius-assets et absent d'un checkout propre.
+      # Le produire avant les build scripts de marius-schema et marius-server.
       - name: Build static assets manifest
         run: cargo run --locked --release -p marius-assets --bin marius-assets -- ./assets/default
 
