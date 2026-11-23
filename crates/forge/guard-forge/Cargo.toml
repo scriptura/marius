@@ -3,6 +3,7 @@ name = "marius-guard-forge"
 description = "Build-time RLS and security trait generator for the Marius engine."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

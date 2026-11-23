@@ -3,6 +3,7 @@ name = "marius-bridge-forge"
 description = "Build-time SQLx batch query and Axum route generator for the Marius engine."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

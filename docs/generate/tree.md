@@ -1,6 +1,6 @@
 # Structure du Projet
 
-**Généré le:** 2026-11-23 20:44:36
+**Généré le:** 2026-11-23 22:09:44
 
 ## Racine du Workspace
 
@@ -224,9 +224,10 @@
 ├── Cargo.lock
 ├── Cargo.toml
 ├── README.md
-└── biome.jsonc
+├── biome.jsonc
+└── rust-toolchain.toml
 
-55 directories, 165 files
+55 directories, 166 files
 ```
 
 ## Documentation du projet

@@ -3,6 +3,7 @@ name = "marius-fragment-forge"
 description = "Build-time HTML render generator for the Marius engine. Computes static/dynamic buffer capacities."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

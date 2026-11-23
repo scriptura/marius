@@ -3,6 +3,7 @@ name = "marius-schema"
 description = "Generated #[repr(C)] structs and Collector statics mirroring PostgreSQL schema for the Marius engine."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

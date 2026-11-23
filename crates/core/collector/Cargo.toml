@@ -4,6 +4,7 @@ name = "marius-collector"
 description = "Lock-free bit-vector collector for the Marius reactive engine. Pure Core, no async runtime."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

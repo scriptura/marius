@@ -3,6 +3,7 @@ name = "marius-render"
 description = "Dispatcher and artifact rendering shell for the Marius reactive engine."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

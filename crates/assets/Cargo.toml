@@ -3,6 +3,7 @@ name = "marius-assets"
 description = "Compilateur AOT d'assets statiques du thème Marius — hachage BLAKE3 (cache-busting), manifeste plat, outil de build hôte exclusivement."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

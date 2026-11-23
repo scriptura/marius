@@ -3,6 +3,7 @@ name = "marius-projection"
 description = "Projection trait for the Marius reactive engine (Core/Shell boundary)."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
