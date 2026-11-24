@@ -7,7 +7,15 @@
 /target/
 **/*.rs.bk
 *.pdb
-.cargo/config.toml
+
+# Deux fichiers .cargo/config.toml coexistent — ne pas les confondre :
+#   1. ./.cargo/config.toml → versionné (réglages communs du workspace)
+#   2. ~/.cargo/config.toml → personnel, JAMAIS versionné (secrets locaux,
+#                               ex. DATABASE_URL avec mot de passe)
+# Cargo fusionne les deux : la configuration personnelle complète les clés
+# absentes de la configuration projet. En cas de conflit, le projet est prioritaire.
+# Voir ADR-031 pour la gestion en environnement Nix.
+# .cargo/config.toml
 
 # ── Artéfacts de build AOT ────────────────────────────────────────────────────
 /dist/
